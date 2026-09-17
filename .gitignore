@@ -1,2 +1,10 @@
 /*build*/
 /.idea
+
+# portable local build toolchain (msvc/cmake/ninja/vcpkg) -- large binaries,
+# not project source, see D:\csgo2021_gc\build_local.bat for how it's populated
+/tools/
+
+# local build logs
+*.log
+build_local_log.txt

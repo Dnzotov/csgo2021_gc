@@ -224,12 +224,16 @@ void ClientGC::BuildMatchmakingHello(CMsgGCCStrike15_v2_MatchmakingGC2ClientHell
     message.mutable_global_stats()->set_main_post_url("");
 
     // bullshit
-    message.mutable_global_stats()->set_required_appid_version(13857);
+    // must not exceed the actual client's own ClientVersion (csgo/steam.inf) or it
+    // thinks it's outdated and refuses to proceed. Upstream's 13857 is a much later
+    // (CS2-era) client version than the Oct 2021 build 1352 this target actually is.
+    message.mutable_global_stats()->set_required_appid_version(1352);
     message.mutable_global_stats()->set_pricesheet_version(1680057676); // mikkotodo revisit
     message.mutable_global_stats()->set_twitch_streams_version(2);
     message.mutable_global_stats()->set_active_tournament_eventid(20);
     message.mutable_global_stats()->set_active_survey_id(0);
-    message.mutable_global_stats()->set_required_appid_version2(13862); // csgo s2
+    // required_appid_version2 (CS2 dual-version transition field) intentionally not
+    // set -- doesn't apply to this pre-CS2 2021 target
 
     message.set_vac_banned(GetConfig().VacBanned());
     message.mutable_commendation()->set_cmd_friendly(GetConfig().CommendedFriendly());
