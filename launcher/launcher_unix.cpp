@@ -1,0 +1,121 @@
+#include <stdio.h>
+#include <stdarg.h>
+#include <string.h>
+#include <stdlib.h>
+#include <dlfcn.h>
+
+#if defined(__APPLE__)
+#include <CoreFoundation/CoreFoundation.h>
+#endif
+
+#if defined(DEDICATED)
+#define LAUNCHER_LIB "dedicated"
+#define SYMBOL_NAME "DedicatedMain"
+#else
+#define LAUNCHER_LIB "launcher"
+#define SYMBOL_NAME "LauncherMain"
+#endif
+
+typedef int (*LauncherMain_t)(int argc, char **argv);
+typedef void (*InstallGC_t)(bool dedicated);
+
+static void ErrorMessageBox(const char *format, ...)
+{
+    va_list ap;
+    char message[4096];
+
+    va_start(ap, format);
+    vsnprintf(message, sizeof(message), format, ap);
+    va_end(ap);
+
+    fprintf(stderr, "csgo_gc: %s\n", message);
+
+#if defined(__APPLE__)
+    CFStringRef messageString = CFStringCreateWithCString(kCFAllocatorDefault, message, kCFStringEncodingUTF8);
+
+    CFOptionFlags responseFlags;
+
+    CFUserNotificationDisplayAlert(0, // timeout
+        kCFUserNotificationStopAlertLevel, // docs: "The notification is very serious."
+        nullptr, // iconURL
+        nullptr, // soundURL
+        nullptr, // localizationURL
+        CFSTR("csgo_gc"), // alertHeader
+        messageString, // alertMessage
+        nullptr, // defaultButtonTitle
+        nullptr, // alternateButtonTitle
+        nullptr, // otherButtonTitle
+        &responseFlags); // not used but idk if it can be null
+
+    CFRelease(messageString);
+#else
+    fprintf(stderr, "csgo_gc: %s\n", message);
+#endif
+}
+
+static void *LoadModuleAndFindSymbol(const char *modulePath, const char *symbol)
+{
+    void *module = dlopen(modulePath, RTLD_NOW);
+    if (!module)
+    {
+        ErrorMessageBox("%s", dlerror());
+        return nullptr;
+    }
+
+    void *function = dlsym(module, symbol);
+    if (!function)
+    {
+        ErrorMessageBox("%s", dlerror());
+        return nullptr;
+    }
+
+    return function;
+}
+
+int main(int argc, char **argv)
+{
+    // Add bin dir to LD_LIBRARY_PATH so Vulkan libraries and other dependencies can be found
+    {
+        const char *binPath = "bin/" GC_LIB_DIR;
+        const char *currentPath = getenv("LD_LIBRARY_PATH");
+        if (currentPath)
+        {
+            char *newPath = nullptr;
+            asprintf(&newPath, "%s:%s", binPath, currentPath);
+            if (newPath)
+            {
+                setenv("LD_LIBRARY_PATH", newPath, 1);
+                free(newPath);
+            }
+        }
+        else
+        {
+            setenv("LD_LIBRARY_PATH", binPath, 1);
+        }
+    }
+
+    const char *modulePath = "bin/" GC_LIB_DIR "/" LAUNCHER_LIB GC_LIB_SUFFIX GC_LIB_EXTENSION;
+    LauncherMain_t LauncherMain = (LauncherMain_t)LoadModuleAndFindSymbol(modulePath, SYMBOL_NAME);
+    if (!LauncherMain)
+    {
+        // LoadModuleAndFindSymbol told us why
+        return 1;
+    }
+
+    modulePath = "csgo_gc/" GC_LIB_DIR "/"
+                 "csgo_gc" GC_LIB_EXTENSION;
+    InstallGC_t InstallGC = (InstallGC_t)LoadModuleAndFindSymbol(modulePath, "InstallGC");
+    if (!InstallGC)
+    {
+        // LoadModuleAndFindSymbol told us why
+        return 1;
+    }
+
+#if defined(DEDICATED)
+    InstallGC(true);
+#else
+    InstallGC(false);
+#endif
+
+    return LauncherMain(argc, argv);
+}

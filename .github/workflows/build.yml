@@ -1,0 +1,165 @@
+name: Build
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-15, windows-latest]
+        build_type: [Release]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - if: matrix.os != 'windows-latest'
+      name: Run sccache-cache
+      uses: mozilla-actions/sccache-action@v0.0.9
+
+    - name: Setup vcpkg
+      uses: lukka/run-vcpkg@v11
+      with:
+        vcpkgDirectory: '${{ github.workspace }}/vcpkg'
+        doNotCache: true # cache vcpkg_installed ourselves instead
+
+    - name: Get vcpkg commit
+      id: vcpkg-commit
+      shell: bash
+      run: echo "sha=$(git -C '${{ github.workspace }}/vcpkg' rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+    - name: Cache vcpkg installed packages
+      uses: actions/cache@v4
+      with:
+        path: |
+          ${{ github.workspace }}/build/vcpkg_installed
+          ${{ github.workspace }}/build_ds/vcpkg_installed
+        key: vcpkg-${{ matrix.os }}-${{ steps.vcpkg-commit.outputs.sha }}-${{ hashFiles('vcpkg.json') }}
+        restore-keys: |
+          vcpkg-${{ matrix.os }}-${{ steps.vcpkg-commit.outputs.sha }}-
+
+    - if: matrix.os == 'ubuntu-latest'
+      name: Dependencies
+      run: |
+        sudo dpkg --add-architecture i386
+        sudo apt-get update
+        sudo apt install --yes --no-install-recommends gcc-multilib g++-multilib
+
+    # ugh, should clean this up
+    - if: matrix.os == 'ubuntu-latest'
+      name: Build Linux
+      run: |
+        mkdir ${{ github.workspace }}/release
+        cmake -B ${{ github.workspace }}/build -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -S ${{ github.workspace }} -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DOUTDIR=${{ github.workspace }}/release -DCMAKE_TOOLCHAIN_FILE=${{ env.VCPKG_ROOT }}/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-linux
+        cmake --build ${{ github.workspace }}/build --config ${{ matrix.build_type }} --target csgo csgo_gc
+        cmake -B ${{ github.workspace }}/build_ds -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -S ${{ github.workspace }} -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DCMAKE_C_FLAGS=-m32 -DCMAKE_CXX_FLAGS=-m32 -DCMAKE_ASM_FLAGS=-m32 -DOUTDIR=${{ github.workspace }}/release -DCMAKE_TOOLCHAIN_FILE=${{ env.VCPKG_ROOT }}/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x86-linux
+        cmake --build ${{ github.workspace }}/build_ds --config ${{ matrix.build_type }} --target srcds csgo_gc
+
+    - if: matrix.os == 'macos-15'
+      name: Build macOS
+      run: |
+        mkdir ${{ github.workspace }}/release
+        cmake -B ${{ github.workspace }}/build -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -S ${{ github.workspace }} -DCMAKE_OSX_ARCHITECTURES=x86_64 -DFUNCHOOK_CPU=x86 -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DOUTDIR=${{ github.workspace }}/release -DCMAKE_TOOLCHAIN_FILE=${{ env.VCPKG_ROOT }}/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-osx
+        cmake --build ${{ github.workspace }}/build --config ${{ matrix.build_type }} --target csgo csgo_gc
+
+    - if: matrix.os == 'windows-latest'
+      name: Build Windows
+      run: |
+        mkdir ${{ github.workspace }}/release
+        cmake -A Win32 -B ${{ github.workspace }}/build -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -S ${{ github.workspace }} -DOUTDIR=${{ github.workspace }}/release -DCMAKE_TOOLCHAIN_FILE=${{ env.VCPKG_ROOT }}/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET:STRING=x86-windows-static
+        cmake --build ${{ github.workspace }}/build --config ${{ matrix.build_type }} --target csgo srcds csgo_gc
+
+    - name: Package
+      shell: bash
+      run: |
+        cp $GITHUB_WORKSPACE/README.md $GITHUB_WORKSPACE/release/
+        mkdir $GITHUB_WORKSPACE/release/licenses
+        cp $GITHUB_WORKSPACE/LICENSE $GITHUB_WORKSPACE/release/licenses/LICENSE-csgo_gc.txt
+        cp $GITHUB_WORKSPACE/build/_deps/distorm-src/COPYING $GITHUB_WORKSPACE/release/licenses/LICENSE-distorm.txt
+        cp $GITHUB_WORKSPACE/build/_deps/funchook-src/LICENSE $GITHUB_WORKSPACE/release/licenses/LICENSE-funchook.txt
+        cp $GITHUB_WORKSPACE/examples/config.txt $GITHUB_WORKSPACE/release/csgo_gc/
+        cp $GITHUB_WORKSPACE/examples/inventory.txt $GITHUB_WORKSPACE/release/csgo_gc/
+        cp $GITHUB_WORKSPACE/examples/price_sheet.txt $GITHUB_WORKSPACE/release/csgo_gc/
+        cp $GITHUB_WORKSPACE/examples/unusual_loot_lists.txt $GITHUB_WORKSPACE/release/csgo_gc/
+
+        # bullshit to get licenses of dependencies installed via vcpkg
+        case "${{ matrix.os }}" in
+          ubuntu-latest)  TRIPLET=x86-linux ;;
+          macos-15)       TRIPLET=x64-osx ;;
+          windows-latest) TRIPLET=x86-windows-static ;;
+        esac
+        VCPKG_SHARE="$GITHUB_WORKSPACE/build/vcpkg_installed/$TRIPLET/share"
+        for portdir in "$VCPKG_SHARE"/*/; do
+          port=$(basename "$portdir")
+          if [ -f "${portdir}copyright" ]; then
+            cp "${portdir}copyright" "$GITHUB_WORKSPACE/release/licenses/LICENSE-$port.txt"
+          fi
+        done
+
+    - name: Zip artifacts (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        OUTNAME: csgo_gc-${{ matrix.os }}.zip
+      run: |
+        $out = Join-Path $env:GITHUB_WORKSPACE $env:OUTNAME
+        if (Test-Path $out) { Remove-Item $out -Force }
+        # include everything under release
+        Compress-Archive -Path (Join-Path $env:GITHUB_WORKSPACE 'release\*') -DestinationPath $out -Force
+        Get-ChildItem $out
+
+    - name: Zip artifacts (non-Windows)
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
+        OUTNAME="csgo_gc-${{ matrix.os }}.zip"
+        (cd release && zip -r "../${OUTNAME}" .)
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: artifact-${{ matrix.os }}
+        path: ${{ github.workspace }}/csgo_gc-${{ matrix.os }}.zip
+
+  publish:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create continuous release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          TAG=continuous
+          files=( $(find artifacts -type f -name "*.zip") )
+
+          # schizo check
+          if [ ${#files[@]} -gt 0 ]; then
+            gh release delete "$TAG" --cleanup-tag --repo "$REPO" --yes || true
+
+            # kludge to avoid the release being created as a draft...
+            sleep 10s
+
+            gh release create "$TAG" --repo "$REPO" \
+              --title "Continuous Build" \
+              --notes "$SHA" \
+              --target "$SHA"
+
+            gh release upload "$TAG" --repo "$REPO" "${files[@]}" --clobber
+          fi
