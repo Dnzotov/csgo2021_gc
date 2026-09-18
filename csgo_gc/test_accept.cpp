@@ -1,5 +1,6 @@
 #include "stdafx.h"
 #include "test_accept.h"
+#include "test_diag.h"
 
 #include <chrono>
 #include <cstring>
@@ -527,9 +528,17 @@ int WSAAPI Hk_WSARecvFrom(SOCKET s, LPWSABUF buffers, DWORD bufferCount, LPDWORD
 
     // cheap filter first: this hook sits on every datagram the engine (and steam) receives
     if (result == 0 && !overlapped && bufferCount == 1 && buffers && bytesReceived
-        && *bytesReceived == ReserveCheckResponseSize && s_armed.load(std::memory_order_relaxed))
+        && *bytesReceived == ReserveCheckResponseSize)
     {
-        InspectReserveCheckResponse(reinterpret_cast<const uint8_t *>(buffers[0].buf), from, fromlen ? *fromlen : 0);
+        if (DiagEnabled())
+        {
+            DiagOnDatagram19(buffers[0].buf, from, fromlen ? *fromlen : 0);
+        }
+
+        if (s_armed.load(std::memory_order_relaxed))
+        {
+            InspectReserveCheckResponse(reinterpret_cast<const uint8_t *>(buffers[0].buf), from, fromlen ? *fromlen : 0);
+        }
     }
 
     return result;

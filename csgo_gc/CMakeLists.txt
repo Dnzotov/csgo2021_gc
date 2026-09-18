@@ -37,6 +37,7 @@ add_library(csgo_gc SHARED
     networking_server.cpp
     steam_hook.cpp
     test_accept.cpp
+    test_diag.cpp
     test_mm.cpp)
 
 if (CMAKE_SYSTEM_NAME STREQUAL "Windows")

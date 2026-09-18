@@ -62,6 +62,7 @@ private:
         bool active{};
         uint32_t serverIp{};
         uint16_t serverPort{};
+        uint32_t eGame{};
         std::string map;
     };
 

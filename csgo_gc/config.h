@@ -59,6 +59,8 @@ public:
     uint32_t TestRealAccountId() const { return m_testRealAccountId; }
     // how long after the Accept popup is up before the first fake participant accepts
     uint32_t TestFakeAcceptDelayMs() const { return m_testFakeAcceptDelayMs; }
+    // TEST ONLY: runtime diagnostics of the matchmaking UI flow (test_diag.h), client only, default on
+    bool TestDiag() const { return m_testDiag; }
 
     float GetRarityWeight(uint32_t rarity) const;
 
@@ -91,6 +93,7 @@ private:
     std::string m_testAcceptMode;
     uint32_t m_testRealAccountId{ 0 };
     uint32_t m_testFakeAcceptDelayMs{ 2500 };
+    bool m_testDiag{ true };
 
     // default to valve weights
     std::vector<RarityWeight> m_rarityWeights{

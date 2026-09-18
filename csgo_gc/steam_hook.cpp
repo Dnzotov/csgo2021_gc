@@ -5,6 +5,7 @@
 #include "appid.h"
 #include "gc_client.h"
 #include "gc_server.h"
+#include "test_diag.h"
 #include "platform.h"
 #include <funchook.h>
 
@@ -297,6 +298,10 @@ public:
         else
         {
             result = s_clientGC->m_messageQueue.RetrieveMessage(*punMsgType, pubDest, cubDest, *pcubMsgSize);
+            if (result)
+            {
+                AcceptTest::DiagOnGcMessageDelivered(*punMsgType);
+            }
         }
 
         if (!result)
@@ -1151,6 +1156,9 @@ static void DispatchReserveServerForQueuedGame(const std::vector<uint8_t> &paylo
 static void Hk_SteamAPI_RunCallbacks()
 {
     Og_SteamAPI_RunCallbacks();
+
+    // TEST ONLY: installs the client.dll diagnostic hooks on the main thread once the module is loaded
+    AcceptTest::DiagTick();
 
     if (s_clientGC)
     {

@@ -3,6 +3,7 @@
 #include "graffiti.h"
 #include "keyvalue.h"
 #include "test_accept.h"
+#include "test_diag.h"
 
 ClientGC::ClientGC(uint64_t steamId)
     : m_steamId{ steamId }
@@ -207,6 +208,11 @@ void ClientGC::SendMessageToGame(bool sendToGameServer, uint32_t type,
     const google::protobuf::MessageLite &message, uint64_t jobId)
 {
     GCMessageWrite messageWrite{ type, message, jobId };
+
+    if (type == k_EMsgGCCStrike15_v2_MatchmakingGC2ClientReserve)
+    {
+        AcceptTest::DiagLog9107(static_cast<const CMsgGCCStrike15_v2_MatchmakingGC2ClientReserve &>(message));
+    }
 
     if (sendToGameServer)
     {
@@ -494,6 +500,8 @@ void ClientGC::OnMatchmakingStart(GCMessageRead &messageRead)
     // against the real client (RESEARCH_FINDINGS.md #20) -- not a bare 0-13 value.
     uint32_t eGame = request.game_type() & 0xF;
 
+    AcceptTest::DiagBeginAttempt(request.game_type());
+
     Platform::Print(
         "[MM-TEST] MatchmakingStart received: game_type=%u (eGame=%u) accounts=%d prime_only=%d client_version=%u\n",
         request.game_type(), eGame, request.account_ids_size(), request.prime_only(), request.client_version());
@@ -553,6 +561,7 @@ void ClientGC::OnMatchmakingStart(GCMessageRead &messageRead)
         m_pendingAccept.active = true;
         m_pendingAccept.serverIp = testServerIp;
         m_pendingAccept.serverPort = testServerPort;
+        m_pendingAccept.eGame = eGame;
         m_pendingAccept.map = testMap;
         AcceptTest::ArmClient(testServerIp, testServerPort);
 
@@ -575,6 +584,8 @@ void ClientGC::OnMatchmakingStart(GCMessageRead &messageRead)
 
 void ClientGC::OnMatchmakingStop()
 {
+    AcceptTest::DiagLog("client -> GC MatchmakingStop (9102) received");
+
     if (m_pendingAccept.active)
     {
         Platform::Print("[MM-ACCEPT] MatchmakingStop received, dropping the pending accept\n");
@@ -616,7 +627,14 @@ void ClientGC::OnReservationFullyAccepted()
     AddressString(pending.serverIp, pending.serverPort, addressString, sizeof(addressString));
     reserve.set_server_address(addressString);
 
-    // no `reservation` on purpose: game_type reads as 0 (default instance) which is outside the accept set
+    // no `reservation` on purpose: an accept-type reservation would make the 9107 handler rebuild the ready-up
+    // callback (stage 1, mode 0) and show the Accept popup again (RESEARCH_FINDINGS.md #44). Without it the handler
+    // builds (stage 2, mode 2) with game_type 0, which the callback treats as a non-accept match and announces with a
+    // second "@map" Match Found popup -- so arm the one-shot that gives that callback the Accept game_type instead.
+    if (!AcceptTest::SetFinalAcceptGameType(pending.eGame))
+    {
+        Platform::Print("[MM-ACCEPT] client.dll 9107 hook not available, the final 9107 will show the non-accept Match Found popup\n");
+    }
 
     SendMessageToGame(false, k_EMsgGCCStrike15_v2_MatchmakingGC2ClientReserve, reserve);
 }

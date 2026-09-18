@@ -3860,3 +3860,43 @@ Retail-формат и триггер 9107 #2 на стороне GC; источ
 
 ### NEXT STEP AFTER §42
 Live-тест Competitive (1 real + 9 fake) по 42.4; по логам определить, на каком шаге цепочка обрывается (хук / fake `0x21` / popup / второй 9107 / connect). Затем Wingman/Danger Zone. Замена TEST ONLY триггера на backend-driven (сигнал сервер→GC) и cookie lifecycle (§34) — только после подтверждения.
+
+
+---
+
+## 43. Второе окно «Match Found» без Accept после успешного Accept-flow — диагностика
+
+**Контекст:** Competitive (1 real + 9 fake) работает end-to-end (§42, live-подтверждено пользователем). После входа в матч появляется ещё одно уведомление «матч найден» без кнопки Accept. Задача: определить источник, ничего не чинить.
+
+### 43.1 CONFIRMED — источник второго окна (по логам прогона + статический RE `client.dll`)
+
+- **[C] Наш GC отправил ровно два 9107 за попытку** (`gc_log.txt`/`console.log`: одно `Sending MatchmakingGC2ClientReserve` при 9101 и одно `sending the second MatchmakingGC2ClientReserve (connect)` после `0x25 stage=2 awaiting=0`). Других matchmaking-сообщений GC→client (9104/9110/9112…) в этой попытке нет; третьего 9107 нет.
+- **[C] `ServerReserved` (Panorama-событие «Match Found» попап) поднимается только из `CServerConfirmedReservationCheckCallback` (`client.dll sub_103F7C00`)** — у raiser `sub_103FB5C0` ровно два вызывающих места, оба внутри этого callback'а:
+  1. `0x103F7D49` — ветка ready-up (`state==4`, `stage==1`, `mode==0`): `RaiseReadyUp` + звук `popup_accept_match_found` + `ServerReserved(map)` = **первое окно, с Accept**;
+  2. `0x103F7E1C` — ветка queue-connect (`state==4`, `mode!=0`) при **`sub_103EF770(callback+92 = game_type) == false`** (game_type ∉ {8,9,10,11,13}): звук `popup_accept_match_found` + `ServerReserved("@<map>")` (формат `"@%s"`, `0x103F7E06`) и `helper_time = MSTime + 2000` = **NQMM-уведомление без Accept, автоматическое, connect откладывается на ~2 с**. Для accept-типов та же ветка играет только `popup_accept_match_confirmed` без попапа.
+- **[C] Вывод:** второе окно — **прямое следствие нашего второго 9107**: он без `reservation` ⇒ `game_type=0` ⇒ 9107-handler (`sub_103F49F0`) создаёт callback `(stage 2, mode 2)` c `game_type=0` ⇒ `0x25 state 4` ⇒ не-accept ветка `0x103F7E1C` ⇒ попап `@de_dust2` (то самое «обычное уведомление classic-режима»). Ни отдельного третьего 9107, ни иного matchmaking-события для этого не требуется.
+
+### 43.2 Что добавлено для проверки runtime (только логирование, поведение не менялось)
+
+`csgo_gc/test_diag.h/.cpp`, ключ `matchmaking.test_diag` (по умолчанию 1, только клиент): строки `[MM-DIAG a<попытка> t=+<сек>]`:
+GC-сторона — каждый отправленный 9107 (порядковый номер, наличие/`game_type` `reservation`, `reservationid`, `map`, `direct_udp`, `server_address`) и каждое matchmaking-сообщение, реально полученное игрой (`RetrieveMessage`); `client.dll` (inline-хуки, вызывают оригинал; RVA живого `client.dll`, проверка prologue): вход/выход 9107-handler (`game/mmqueue` + активный callback stage/mode/game_type), вход/выход callback (state запроса, `game/mmqueue`), создание callback (stage, mode), Accept, `ServerReserved`, `PlaySoundEffect`, `RaiseReadyUp`, `QueueConnectToServer`; сеть — клиентский `0x21` (stage) и любой принятый `0x25`.
+
+### §43 STATUS
+Источник второго окна установлен статически и по логам: callback `(2,2)` c `game_type=0` от нашего второго 9107 (не-accept ветка `0x103F7E1C`, `@map`). Runtime-подтверждение — логи `[MM-DIAG]` следующего прогона (DLL собрана, в игру не устанавливалась).
+
+### NEXT STEP AFTER §43
+Если runtime-логи подтвердят — решение по устранению (пользователь): второй 9107 должен приводить к connect без не-accept попапа (варианты обсуждать отдельно; не реализовано).
+
+### 43.3 Финальный переход после Accept без второго popup — что определяет ветку и фикс (новые подтверждённые сведения)
+
+**CONFIRMED (статический RE `client.dll`, без runtime; функции: 9107-handler `sub_103F49F0`, callback `sub_103F7C00`, ctor `sub_103F7980`, copy-in `sub_103F7A80`, msg→source `sub_103F83B0`):**
+- **9107-handler всегда** уничтожает активный callback (`sub_103F7AF0` + delete, `0x103F4B8A`) и строит новый; тип выбирается по `(reservation ? reservation.game_type : default(0)) & 0xF`: ∈ {8,9,10,11,13} → ctor `(stage 1, mode 0)` (`0x103F4C09`), иначе → `(stage 2, mode 2)` (`0x103F4BEE`).
+- **`callback+92` (game_type для `sub_103EF770` и `gametype/gamemode` в QueueConnect-KV) = `reservation.game_type & 0xF`, если у сообщения есть `reservation` (has-bit 0x10), иначе 0** (`sub_103F83B0` → source+84, копируется `sub_103F7A80` в callback+8+84=+92). Значение и выбор `(stage, mode)` происходят из ОДНОГО поля ⇒ **никаким 9107 нельзя получить callback «mode≠0 + accept game_type»**.
+- **Вариант «9107 #2 с `reservation.game_type=8`» — неприемлем:** handler пересоздаст accept-callback `(stage 1, mode 0)`, отправит `0x21 stage 1`, сервер (все stage ≥ 1) ответит `awaiting=0` ⇒ ветка ready-up `0x103F7D49`: снова `RaiseReadyUp` + `popup_accept_match_found` + `ServerReserved`, т.е. второй Accept; путь в QueueConnect потребует ещё один 9107 (цикл).
+- **Вариант «9107 #2 без `reservation`» (наш прежний):** callback `(2,2)` c `game_type=0` ⇒ на `0x25 state 4` ветка queue-connect: `sub_103EF770(0)=false` ⇒ `v29=1`, `popup_accept_match_found` + `ServerReserved("@map")` (`0x103F7E1C`) и `helper_time+2000`; в KV `gametype/gamemode="unknown"`.
+- **Для `game_type ∈ accept` в той же ветке (mode≠0):** только `popup_accept_match_confirmed`, без `ServerReserved`, `helper_time+0`, KV `gametype=classic/gamemode=competitive`, `QueueConnect` сохраняется через `sub_103F7240(…, 0)`, затем (`LABEL_114`) `RaiseReadyUp(false,…)` закрывает ready-up попап — это штатный вид accept-mode connect-callback.
+- Замечание: retail-путь, дающий accept game_type при `mode≠0` — локальный `(2,1)` из `sub_103F7400` (сохранённая резервация `dword_1520ED18`, «reconnect to ongoing match»), не через 9107; project446 «native re-arm (mode 1, stage 2)» — то же самое по смыслу.
+
+**Реализованный фикс (минимальный, только клиент, Casual не затронут):** второй 9107 остаётся без `reservation`; сразу после того, как 9107-handler построил `(stage 2, mode 2, game_type 0)`, хук handler'а (`test_diag.cpp`, `Hk_Handler9107`) один раз выставляет `callback+92 = eGame` (8/10/13) — только при флаге, взведённом `ClientGC::OnReservationFullyAccepted` непосредственно перед отправкой 9107 #2 (`AcceptTest::SetFinalAcceptGameType`), и только если активный callback ровно `(2,2,0)`. Безопасность: `+92` читается лишь на `0x25 state 4` (в следующих кадрах), ctor его не использует. Handler-хук ставится всегда (проверка prologue), остальные диагностические — при `matchmaking.test_diag=1`; при недоступном хуке — прежнее поведение (лог `[MM-ACCEPT] client.dll 9107 hook not available…`). Лог успешного применения: `[MM-ACCEPT] final transition: callback (stage=2 mode=2) game_type 0 -> 8 …`.
+
+**[?] Не проверено live:** отсутствие второго popup, загрузка карты после фикса, поведение KV `gametype/gamemode` (`classic/competitive`) на connect.
