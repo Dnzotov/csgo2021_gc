@@ -51,6 +51,15 @@ public:
     std::string_view TestServerAddress() const { return m_testServerAddress; }
     uint16_t TestServerPort() const { return m_testServerPort; }
 
+    // TEST ONLY, srcds side, see test_accept.h/RESEARCH_FINDINGS.md #42 -- "competitive", "wingman" or
+    // "dangerzone" makes the server reserve a queued ('Q') roster of the real player plus fake
+    // participants instead of the plain 'G' reservation. Empty = old Casual behavior.
+    std::string_view TestAcceptMode() const { return m_testAcceptMode; }
+    // AccountID (steamid64 & 0xffffffff) of the real player, srcds has no way to learn it by itself
+    uint32_t TestRealAccountId() const { return m_testRealAccountId; }
+    // how long after the Accept popup is up before the first fake participant accepts
+    uint32_t TestFakeAcceptDelayMs() const { return m_testFakeAcceptDelayMs; }
+
     float GetRarityWeight(uint32_t rarity) const;
 
 private:
@@ -79,6 +88,9 @@ private:
 
     std::string m_testServerAddress{ "127.0.0.1" };
     uint16_t m_testServerPort{ 27015 };
+    std::string m_testAcceptMode;
+    uint32_t m_testRealAccountId{ 0 };
+    uint32_t m_testFakeAcceptDelayMs{ 2500 };
 
     // default to valve weights
     std::vector<RarityWeight> m_rarityWeights{

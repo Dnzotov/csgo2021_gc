@@ -39,6 +39,15 @@
 {
 	"test_server_address"	"127.0.0.1"
 	"test_server_port"	"27015"
+
+	// TEST ONLY, dedicated server (srcds) config: queued reservation with fake participants for the
+	// retail Accept flow (RESEARCH_FINDINGS.md #42). Leave test_accept_mode empty for the plain Casual path.
+	// "competitive" = 1 real + 9 fake, "wingman" = 1 real + 3 fake, "dangerzone" = 1 real + 15 fake
+	"test_accept_mode"	""
+	// AccountID of the real player (steamid64 & 0xffffffff), the client logs it as [MM-ACCEPT] on MatchmakingStart
+	"test_real_account_id"	"0"
+	// milliseconds between the Accept popup showing up and the first fake participant accepting
+	"test_fake_accept_delay_ms"	"2500"
 }
 
 // steam related options

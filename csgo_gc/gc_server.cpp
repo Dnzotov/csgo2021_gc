@@ -2,6 +2,7 @@
 #include "gc_server.h"
 #include "gc_const.h"
 #include "gc_const_csgo.h"
+#include "config.h"
 #include "graffiti.h"
 
 // yuck!! needed for CSteamID (construct full id from account id)
@@ -19,6 +20,7 @@ ServerGC::ServerGC()
 
 ServerGC::~ServerGC()
 {
+    m_testRoster.reset();
     StopThread();
     Platform::Print("ServerGC destroyed\n");
 }
@@ -81,6 +83,12 @@ void ServerGC::HandleMessage(uint32_t type, const void *data, uint32_t size)
 
 void ServerGC::HandleClientSOCacheUnsubscribe(uint64_t steamId)
 {
+    if (m_connectedClients.erase(steamId) && m_connectedClients.empty() && m_testRoster)
+    {
+        // TEST ONLY: the last real client left, start over with a fresh roster for the next match
+        m_testRoster->OnMatchEnded();
+    }
+
     Platform::Print("HandleClientSOCacheUnsubscribe: %llu\n", steamId);
 
     CMsgSOCacheUnsubscribed message;
@@ -185,6 +193,12 @@ bool ValidateMessageOwnerSOID<CMsgSOCacheSubscribed>(GCMessageRead &messageRead,
 
 void ServerGC::HandleNetMessage(uint64_t steamId, const void *data, uint32_t size)
 {
+    if (m_testRoster && m_connectedClients.insert(steamId).second && m_connectedClients.size() == 1)
+    {
+        // TEST ONLY: first real client made it onto the server, stop refreshing the reservation
+        m_testRoster->OnMatchStarted();
+    }
+
     Platform::Print("HandleNetMessage: %llu, %u bytes\n", steamId, size);
 
     GCMessageRead validate{ 0, data, size };
@@ -291,6 +305,12 @@ void ServerGC::SendServerWelcome()
 // ResolveVEngineServer()/DispatchReserveServerForQueuedGame() as-is -- see RESEARCH_FINDINGS.md #32.
 void ServerGC::ReserveServerForOurCookie()
 {
+    // TEST ONLY: once the Accept test roster runs it owns the reservation (refresh included)
+    if (m_testRoster || StartAcceptTestRoster())
+    {
+        return;
+    }
+
     char buffer[64];
     snprintf(buffer, sizeof(buffer), "G%llx,%llx,1:",
         static_cast<unsigned long long>(GameServerCookieId),
@@ -298,6 +318,51 @@ void ServerGC::ReserveServerForOurCookie()
 
     Platform::Print("[MM] Queueing server reservation on host thread\n");
     PostToHost(HostEvent::ReserveServerForQueuedGame, 0, buffer, static_cast<uint32_t>(strlen(buffer)));
+}
+
+// TEST ONLY: matchmaking.test_accept_mode in this server's config.txt switches the reservation from the plain
+// 'G' (awaiting always 0, no Accept) to a queued 'Q' roster: the real player (matchmaking.test_real_account_id) plus
+// deterministic fake participants that exist only as roster entries and answer through real 0x21 datagrams
+// (AcceptTest::FakeRoster). Returns false (=> old 'G' behavior) when the mode is unset or misconfigured.
+bool ServerGC::StartAcceptTestRoster()
+{
+    const GCConfig &config = GetConfig();
+    if (config.TestAcceptMode().empty())
+    {
+        return false;
+    }
+
+    const AcceptTest::Mode *mode = AcceptTest::FindModeByName(config.TestAcceptMode());
+    if (!mode)
+    {
+        Platform::Print("[MM-ACCEPT] unknown matchmaking.test_accept_mode '%.*s' (competitive/wingman/dangerzone), using the plain reservation\n",
+            static_cast<int>(config.TestAcceptMode().size()), config.TestAcceptMode().data());
+        return false;
+    }
+
+    if (config.TestRealAccountId() == 0)
+    {
+        Platform::Print("[MM-ACCEPT] matchmaking.test_accept_mode is set but matchmaking.test_real_account_id is missing "
+            "(the client logs it on MatchmakingStart), using the plain reservation\n");
+        return false;
+    }
+
+    AcceptTest::FakeRoster::Params params;
+    params.cookie = GameServerCookieId;
+    params.realAccountId = config.TestRealAccountId();
+    params.rosterSize = mode->rosterSize;
+    params.serverAddress = std::string(config.TestServerAddress());
+    params.serverPort = config.TestServerPort();
+    params.acceptDelayMs = config.TestFakeAcceptDelayMs();
+
+    // ReserveServerForQueuedGame has to run on the main thread, so it goes through the usual host event queue
+    m_testRoster = std::make_unique<AcceptTest::FakeRoster>(params,
+        [this](const std::string &payload)
+        {
+            PostToHost(HostEvent::ReserveServerForQueuedGame, 0, payload.data(), static_cast<uint32_t>(payload.size()));
+        });
+
+    return true;
 }
 
 void ServerGC::IncrementKillCountAttribute(GCMessageRead &messageRead)

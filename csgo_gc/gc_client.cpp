@@ -2,6 +2,7 @@
 #include "gc_client.h"
 #include "graffiti.h"
 #include "keyvalue.h"
+#include "test_accept.h"
 
 ClientGC::ClientGC(uint64_t steamId)
     : m_steamId{ steamId }
@@ -13,10 +14,21 @@ ClientGC::ClientGC(uint64_t steamId)
     StartThread();
 
     Platform::Print("ClientGC spawned for user %llu\n", steamId);
+
+    // TEST ONLY: the recv hook (installed in InstallGC) tells us when a reservation is fully accepted
+    AcceptTest::SetClientNotify(
+        [](void *context)
+        {
+            static_cast<ClientGC *>(context)->PostToGC(GCEvent::ReservationFullyAccepted, 0, nullptr, 0);
+        },
+        this);
 }
 
 ClientGC::~ClientGC()
 {
+    AcceptTest::SetClientNotify(nullptr, nullptr);
+    AcceptTest::DisarmClient();
+
     StopThread();
     Platform::Print("ClientGC destroyed\n");
 }
@@ -35,6 +47,10 @@ void ClientGC::HandleEvent(GCEvent type, uint64_t id, const std::vector<uint8_t>
 
     case GCEvent::SOCacheRequest:
         HandleSOCacheRequest();
+        break;
+
+    case GCEvent::ReservationFullyAccepted:
+        OnReservationFullyAccepted();
         break;
 
     default:
@@ -78,6 +94,10 @@ void ClientGC::HandleMessage(uint32_t type, const void *data, uint32_t size)
 
         case k_EMsgGCCStrike15_v2_MatchmakingStart:
             OnMatchmakingStart(messageRead);
+            break;
+
+        case k_EMsgGCCStrike15_v2_MatchmakingStop:
+            OnMatchmakingStop();
             break;
 
         case k_EMsgGCSetItemPositions:
@@ -478,15 +498,22 @@ void ClientGC::OnMatchmakingStart(GCMessageRead &messageRead)
         "[MM-TEST] MatchmakingStart received: game_type=%u (eGame=%u) accounts=%d prime_only=%d client_version=%u\n",
         request.game_type(), eGame, request.account_ids_size(), request.prime_only(), request.client_version());
 
-    if (eGame != 7)
+    // Accept modes (game_type 8/10/13, RESEARCH_FINDINGS.md #41.4) take the reservation + Accept path
+    // below; Casual keeps the original direct path untouched.
+    const AcceptTest::Mode *acceptMode = AcceptTest::FindModeByGame(eGame);
+    if (eGame != 7 && !acceptMode)
     {
-        Platform::Print("[MM-TEST] eGame=%u is not Casual -- only Casual is handled for now, ignoring\n", eGame);
+        Platform::Print("[MM-TEST] eGame=%u is neither Casual nor a supported Accept mode (8/10/13) -- ignoring\n", eGame);
         return;
     }
 
+    // a new search supersedes whatever accept we were still waiting for
+    m_pendingAccept = {};
+    AcceptTest::DisarmClient();
+
     uint32_t testServerIp = ParseIpAddress(GetConfig().TestServerAddress());
     uint16_t testServerPort = GetConfig().TestServerPort();
-    const char *testMap = "de_dust2";
+    const char *testMap = acceptMode ? acceptMode->map : "de_dust2";
 
     Platform::Print("[MM-TEST] Test server (REAL dedicated server expected): %.*s:%u\n",
         static_cast<int>(GetConfig().TestServerAddress().size()), GetConfig().TestServerAddress().data(), testServerPort);
@@ -505,9 +532,35 @@ void ClientGC::OnMatchmakingStart(GCMessageRead &messageRead)
     AddressString(testServerIp, testServerPort, addressString, sizeof(addressString));
     reserve.set_server_address(addressString);
 
+    if (acceptMode)
+    {
+        // First 9107 of the Accept flow: a `reservation` whose game_type & 0xF is in {8,9,10,11,13} makes the
+        // client's 9107 handler (client.dll sub_103F49F0) create the reservation callback as (stage 1, mode 0),
+        // i.e. the retail Accept popup, instead of (stage 2, mode 2) = direct connect. RESEARCH_FINDINGS.md #38/#41.
+        reserve.mutable_reservation()->set_game_type(request.game_type());
+    }
+
     SendMessageToGame(false, k_EMsgGCCStrike15_v2_MatchmakingGC2ClientReserve, reserve);
 
     Platform::Print("[MM-TEST] MatchmakingGC2ClientReserve dispatched\n");
+
+    if (acceptMode)
+    {
+        // The dedicated server is reserved by its own ServerGC (srcds process, roster of the real player + fake
+        // participants), there is no GC<->GC transport, so nothing to bridge from here. What is left for us is
+        // the second 9107 once the server says everybody accepted (0x25 stage 2 / awaiting 0), see
+        // OnReservationFullyAccepted().
+        m_pendingAccept.active = true;
+        m_pendingAccept.serverIp = testServerIp;
+        m_pendingAccept.serverPort = testServerPort;
+        m_pendingAccept.map = testMap;
+        AcceptTest::ArmClient(testServerIp, testServerPort);
+
+        Platform::Print("[MM-ACCEPT] %s: waiting for the Accept popup / full accept. srcds needs "
+            "matchmaking.test_accept_mode=%s and matchmaking.test_real_account_id=%u in its csgo_gc/config.txt\n",
+            acceptMode->name, acceptMode->name, AccountId());
+        return;
+    }
 
     // Bridge the server-side half of the reservation: IVEngineServer::ReserveServerForQueuedGame
     // must be called on the engine's main thread (RESEARCH_FINDINGS.md #29.5), not this GC worker
@@ -518,6 +571,54 @@ void ClientGC::OnMatchmakingStart(GCMessageRead &messageRead)
     Platform::Print("[MM] Queueing server reservation on host thread\n");
     PostToHost(HostEvent::ReserveServerForQueuedGame, 0,
         reservationPayload.data(), static_cast<uint32_t>(reservationPayload.size()));
+}
+
+void ClientGC::OnMatchmakingStop()
+{
+    if (m_pendingAccept.active)
+    {
+        Platform::Print("[MM-ACCEPT] MatchmakingStop received, dropping the pending accept\n");
+    }
+
+    m_pendingAccept = {};
+    AcceptTest::DisarmClient();
+}
+
+// TEST ONLY replacement for the missing retail server->GC->client completion path (RESEARCH_FINDINGS.md #40/#41.6):
+// the reserved server broadcast 0x25 (stage 2, awaiting 0), so every participant accepted. The client's accept
+// callback is (stage 2, mode 0), which deliberately does nothing on that state -- the only thing that moves it
+// on is a second MatchmakingGC2ClientReserve (9107) with fresh reservationid + address + map and either no
+// `reservation` or a game_type outside the accept set. That is exactly what the working Casual path already sends,
+// so the message is identical to it and the client follows its existing route: new callback (2, 2) -> 0x21 stage 2
+// -> 0x25 state 4 -> QueueConnect -> `connect ip:port`.
+void ClientGC::OnReservationFullyAccepted()
+{
+    if (!m_pendingAccept.active)
+    {
+        Platform::Print("[MM-ACCEPT] reservation accepted notification without a pending accept, ignoring\n");
+        return;
+    }
+
+    PendingAccept pending = std::move(m_pendingAccept);
+    m_pendingAccept = {};
+
+    Platform::Print("[MM-ACCEPT] sending the second MatchmakingGC2ClientReserve (connect): map=%s reservationid=%llx\n",
+        pending.map.c_str(), static_cast<unsigned long long>(GameServerCookieId));
+
+    CMsgGCCStrike15_v2_MatchmakingGC2ClientReserve reserve;
+    reserve.set_serverid(1);
+    reserve.set_direct_udp_ip(pending.serverIp);
+    reserve.set_direct_udp_port(pending.serverPort);
+    reserve.set_reservationid(GameServerCookieId);
+    reserve.set_map(pending.map);
+
+    char addressString[32];
+    AddressString(pending.serverIp, pending.serverPort, addressString, sizeof(addressString));
+    reserve.set_server_address(addressString);
+
+    // no `reservation` on purpose: game_type reads as 0 (default instance) which is outside the accept set
+
+    SendMessageToGame(false, k_EMsgGCCStrike15_v2_MatchmakingGC2ClientReserve, reserve);
 }
 
 void ClientGC::SetItemPositions(GCMessageRead &messageRead)

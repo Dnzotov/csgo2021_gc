@@ -1,6 +1,10 @@
 #pragma once
 
+#include <memory>
+#include <unordered_set>
+
 #include "gc_shared.h"
+#include "test_accept.h"
 
 class ServerGC final : public SharedGC
 {
@@ -18,7 +22,12 @@ private:
 
     void SendServerWelcome();
     void ReserveServerForOurCookie();
+    bool StartAcceptTestRoster();
     void IncrementKillCountAttribute(GCMessageRead &messageRead);
 
     bool m_sentWelcome{};
+
+    // TEST ONLY (test_accept.h): Q reservation with fake participants, only when configured
+    std::unique_ptr<AcceptTest::FakeRoster> m_testRoster;
+    std::unordered_set<uint64_t> m_connectedClients; // worker thread only
 };

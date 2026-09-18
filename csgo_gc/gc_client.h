@@ -24,6 +24,8 @@ private:
 
     void OnClientHello(GCMessageRead &messageRead);
     void OnMatchmakingStart(GCMessageRead &messageRead);
+    void OnMatchmakingStop();
+    void OnReservationFullyAccepted();
     void AdjustItemEquippedState(GCMessageRead &messageRead);
     void ClientPlayerDecalSign(GCMessageRead &messageRead);
     void UseItemRequest(GCMessageRead &messageRead);
@@ -51,6 +53,19 @@ private:
     void SendRankUpdate();
 
     uint32_t AccountId() const { return m_steamId & 0xffffffff; }
+
+    // TEST ONLY (see test_accept.h): the reservation we handed out for an Accept mode (game_type 8/10/13) and
+    // are waiting to be fully accepted, so the second MatchmakingGC2ClientReserve (9107) can repeat it.
+    // Only touched from the worker thread.
+    struct PendingAccept
+    {
+        bool active{};
+        uint32_t serverIp{};
+        uint16_t serverPort{};
+        std::string map;
+    };
+
+    PendingAccept m_pendingAccept;
 
     const uint64_t m_steamId;
 

@@ -2623,3 +2623,1240 @@ case k_EMsgGCServerHello:
 Первый вариант — минимальный, не требует новых RE-находок, полностью укладывается в уже существующую инфраструктуру (`Hk_SteamGameServer_RunCallbacks` уже main-thread, уже вызывает `ReserveServerForQueuedGame` тем же путём). Не реализовано в этом раунде — только диагностика, по явной инструкции пользователя.
 
 Никаких изменений кода/сборки/Git в этом раунде — только чтение `console.log` и `gc_server.cpp`/`gc_server.h` (уже существующий код с §33, не переоткрывался заново, кроме проверки количества вхождений `ReserveServerForOurCookie`).
+
+---
+
+## 35. Competitive / Wingman / Danger Zone Accept Flow + Fake Participant Research (read-only)
+
+Приоритет смещён с §34 (reservation-баг зафиксирован, НЕ чинится в этом раунде) на исследование Accept-flow для `eGame∈{8,10,13}`. Ничего не менялось/не собиралось/не деплоилось/Git не трогался. Источники: `client_panorama.dll.i64` (та же база, что в §5/§16-21), `.proto`-схемы проекта, читаемые source-деревья, project446-бинарник (§6/§28). `ida_deobfuscated_grok` — **не IDA-decompiled дамп, а второй настоящий leaked/slipped source tree** (~2019-эры CS:GO Panorama lineage), как явно подтверждено пользователем — используется в этом разделе именно как source, не как RE-артефакт.
+
+### 35.1 Главный архитектурный вывод — **CONFIRMED** (уже было найдено в §6, здесь применено к новому вопросу)
+
+**Подсчёт "требуется/принято" НЕ реализован как нативный клиентский или даже GC-DLL-side счётчик, который можно было бы "обмануть" подделкой значения.** Это установлено прямой полной декомпиляцией `project446`'s `sub_100789A0` (§6, 1426 байт, обработчик 9102): при получении Accept-сигнала (не-abandon, accept-required game_type) код делает буквально:
+```c
+log("Matchmaking: Player ACCEPTED, waiting for all players");
+sub_100BFC20(9102, &v23);   // форвардит сигнал НАРУЖУ, на backend
+// состояние остаётся "waiting" -- дальше ничего не считается в этом DLL
+```
+Ни в `project446/csgo_gc.dll`, ни (как показано ниже) в `client_panorama.dll` НЕТ кода, который сравнивает `accepted_count == required_count` и сам принимает решение "все готовы". **Это решение принимается на backend** (Valve-сервере или, в случае project446, на их собственном WebSocket-бэкенде) — вне зоны видимости любого доступного нам бинарника. Клиент — "тонкий" участник: показывает попап, шлёт свой личный Accept, и ждёт ВНЕШНЕГО сигнала "матч готов" (нового GC-сообщения/состояния), не считает сам.
+
+**Следствие для fake players (прямой ответ на §17 задания)**: раз retail-клиент не содержит проверяемого условия "сколько приняло", то fake participant'ам не нужно удовлетворять НИКАКОЙ клиентской логике подсчёта — потому что такой логики просто не существует на клиенте. "Все приняли" — это решение, которое **при отсутствии реального backend'а обязано принимать НАШЕ СОБСТВЕННОЕ GC-side код** (`gc_client.cpp`/`gc_server.cpp`, ещё не реализовано для Accept-flow), причём ровно так, как это делает retail backend: считать входящие Accept/Abandon-сигналы у себя и, когда решили, что "готово", прислать клиенту следующий GC-сигнал, который штатный клиентский код интерпретирует как "все приняли" (см. 35.2/35.3 — конкретно какой сигнал).
+
+### 35.2 Match Found → popup_accept_match — точная цепочка — **CONFIRMED** (переподтверждение + одно новое звено)
+
+Уже задокументированная в §5 цепочка (переподтверждена, не переоткрывалась заново):
+```
+sub_103DF430 (RVA 0x103DF430, client_panorama.dll) -- KV-listener на "game/mmqueue"
+  this+140 == 1 (ready-up state)
+    → DevMsg("Server reservation check %p ready-up!")
+    → sub_10418AC0("popup_accept_match_found", 0)     -- ПОКАЗЫВАЕТ ACCEPT-ПОПАП
+    → (условно) sub_103D8AF0()                         -- получить lobby-event-dispatcher объект
+  this+132 (queue-connect state)
+    → sub_103D7640(this+92)                            -- Accept-required-by-gametype проверка (35.4)
+        true  → sub_10418AC0("popup_accept_match_confirmed", 0)
+        false → sub_10418AC0("popup_accept_match_found", 0) + "@"+map (live-join)
+    → безусловно строит "QueueConnect" KV-команду (см. §5 таблицу полей)
+```
+**Новое в этом раунде**: `sub_103D8AF0` (RVA `0x103D8AF0`, 90 байт, полностью декомпилирована) — это **lazy-singleton getter**, не сам dispatcher:
+```c
+int __thiscall sub_103D8AF0(void *this) {
+    if (!byte_1519DDEE) return 0;                 // global "feature enabled" flag
+    if (!dword_15278634) {
+        v2 = g_pMemAlloc->Alloc(12432);            // 12432-байтный объект -- крупный UI-компонент
+        if (v2) { dword_15278634 = sub_1057F440(v2, this); return dword_15278634 ? dword_15278634+8 : 0; }
+    }
+    return dword_15278634 ? dword_15278634+8 : 0;  // возвращает this+8 закэшированного объекта
+}
+```
+Вызывается из **пяти мест**: 3 раза внутри `sub_103DF430` (ready-up ветка) и **1 раз внутри `sub_103D9900`** (обработчик 9104, RVA `0x103D9900`, см. 35.3). Возвращённый `this+8` затем вызывается как `(**v28)(v28, arg1, arg2, arg3)` — 3-аргументный вызов через vtable slot 0. **Не подтверждено на 100%** (не проверено побайтово), что этот vtable slot 0 буквально указывает на `sub_10581640` ("PanoramaComponent_Lobby_ReadyUpForMatch") — сигнатуры совпадают (3 аргумента), оба используются в одном и том же ready-up контексте, но прямая проверка адреса в vtable не проводилась в этом раунде. **HIGH CONFIDENCE, не CONFIRMED** на уровне идентичности функции.
+
+`PartyMenu.ShowMatchAcceptPopUp` (JS-уровень, `popup_accept_match.js`/`.xml`) — упомянутые пользователем файлы/символы **не найдены заново в этом раунде** (не искались повторно — уже задокументированный путь в client_panorama.dll идёт через нативный `sub_10418AC0("popup_accept_match_found", 0)`, который скорее всего и есть нативная сторона `ShowMatchAcceptPopUp`, но JS-файлы `popup_accept_match.xml/js` физически недоступны для чтения из скомпилированного `panorama.dll`/`code.pbin` без отдельной распаковки Panorama-ресурсов — этого не делалось ни в этой, ни в прошлых сессиях). **TODO**, не критично для основного вывода.
+
+### 35.3 Обработчик 9104 (`MatchmakingGC2ClientUpdate`) — впервые полностью декомпилирован в этом раунде — **CONFIRMED**
+
+`sub_103D9900` (RVA `0x103D9900`, client_panorama.dll, 1385 байт) — ранее (§16/§18) была известна только сигнатура и две DevMsg-строки. Полная декомпиляция в этом раунде даёт:
+
+```c
+DevMsg("Matchmaking update: %d\n", v38[39]);           // v38[39] = protobuf поле `matchmaking` (field 1, int32)
+if (v1[3])                                               // v1[3] = size() поля waiting_account_id_sessions (field 2)
+    DevMsg("Matchmaking waiting for %d accounts (%X, ...)\n", v1[3], *(DWORD*)v1[2]);
+
+if (!v38[39]) {
+    // === matchmaking == 0: "поиск снят/остановлен" ветка ===
+    // уничтожает закэшированный match-state объект (dword_152786A4/dword_15278690)
+    // читает "cfg/qmmconnect.dt" -- QuickMatchMaking connect-файл (см. 35.9)
+    // проверяет: sub_108F9840("members/numSlots", 0) == 1  И  KV-путь "game/mmqueue" == "connect"
+    //   -> если оба true (и НЕ byte_1519DDEE) -- "не сбрасывать", что-то вызывает через dword_15280E10+80
+    //   -> иначе -- сбрасывает через KeyValuesSystem
+} else {
+    // === matchmaking != 0: "активный статус" ветка ===
+    // резолвит/лениво создаёт match-state объект (dword_152786A4, через sub_103DD020)
+    // ПОВТОРНО проверяет sub_108F9A90("game/mmqueue", Locale) -- ТОТ ЖЕ GATE, что и в 9107-хендлере (§18)!
+    //   -> gate FAIL: строит и шлёт MatchmakingStop обратно в GC (точно как в 9107-хендлере)
+    //   -> gate OK: чистит список устаревших "note"-записей (по времени, вероятно penalty/notes поля протобуфа)
+    //      if (v38[39] == 3) {                          // <-- matchmaking FIELD == 3
+    //          v28 = sub_103D8AF0();                    // <-- ТОТ ЖЕ dispatcher-getter, что в ready-up ветке!
+    //          if (v28) (**v28)(v28, 0, 0, 0);           // <-- 3-аргументный вызов, сигнатура = ReadyUpForMatch
+    //      }
+}
+```
+
+**Три новых, ранее не задокументированных факта**:
+1. **9104 (`MatchmakingGC2ClientUpdate`) САМ гейтится тем же `game/mmqueue`-непустым условием**, что и 9107-хендлер (§18). Это **опровергает** более раннюю рабочую гипотезу (§18, строка 806/820) о том, что 9104 может быть "недостающим звеном", изначально выставляющим `game/mmqueue` в `"searching"`. Раз 9104 САМ требует, чтобы `game/mmqueue` уже было непустым, чтобы что-либо сделать (иначе тоже просто шлёт `MatchmakingStop`) — начальная установка `"searching"` происходит **где-то ещё, локально на клиенте, до всякого GC-сообщения** (согласуется с Live Test #2's находкой, §19 конец: окно между кликом Play и приходом 9101 — единственное известное место, где это могло произойти; конкретный setter по-прежнему НЕ найден, см. TODO 35.13).
+2. **Поле `matchmaking` (protobuf field 1 в `CMsgGCCStrike15_v2_MatchmakingGC2ClientUpdate`) — это status-код (int32), не boolean.** Значение **`3`** конкретно триггерит вызов dispatcher-объекта через `sub_103D8AF0()` — тот же getter, что используется в ready-up-ветке `sub_103DF430`. **HIGH CONFIDENCE** (не 100% CONFIRMED — см. 35.2) это и есть механизм доставки `"PanoramaComponent_Lobby_ReadyUpForMatch"`-события ИЗ GC-сообщения 9104 (не только из локального `game/mmqueue`-изменения).
+3. **`waiting_account_id_sessions` (protobuf field 2) — это НЕ список участников найденного матча**, это глобальный, queue-wide список (per-account) для ЭТОГО игрока — `DevMsg`-строка `"Matchmaking waiting for %d accounts"` печатает `.size()` этого repeated-поля и первый элемент в hex, но по контексту (общий queue-status update, а не reservation-specific) это, вероятнее всего, список аккаунтов **этого игрока в очереди** (например, при нескольких одновременных запросах/lobby-члены, ожидающие подтверждения), не "сколько человек нашлось в моём матче". **MEDIUM CONFIDENCE** по интерпретации значения, но **CONFIRMED**, что поле НЕ является счётчиком "требуется/принято" конкретного матча — оно из совершенно другого сообщения (9104, статус очереди), не из 9107 (резервация конкретного матча).
+
+### 35.4 Required player count — **NOT FOUND как явное число в GC-протоколе; вывод по косвенным данным**
+
+Прямого, явного числового поля "required players" **не найдено нигде** — ни в одном из полей `CMsgGCCStrike15_v2_MatchmakingGC2ClientReserve`/`MatchmakingGC2ServerReserve`/`MatchmakingGC2ClientUpdate` (полный список полей — 35.6), ни в декомпилированном коде `sub_103DF430`/`sub_103D9900`/`sub_103DC4B0`. Это **согласуется** с 35.1: если подсчёт делает backend, клиенту незачем знать точное требуемое число — ему достаточно сигнала "готово"/"не готово" по каждому конкретному матчу.
+
+Единственная найденная **числовая проверка count-подобного значения на клиенте** — в `sub_103D9900`'s `matchmaking==0` ветке: `sub_108F9840("members/numSlots", 0) == 1` (35.7/35.9) — но это сравнение с константой `1`, не с динамическим "сколько нужно для этого режима", и относится к KV-пути `"members/..."`, который, судя по структуре (`members/machine{N}/player{M}/xuid`, точно совпадающая с адресацией `ISteamMatchmaking::SetLobbyMemberData` из Hydra source'а `matchmaking/sys_session.cpp`), с высокой вероятностью представляет **PARTY-лобби (группу друзей ДО постановки в очередь)**, а не участников НАЙДЕННОГО матча. **NOT PROVEN**, какое из двух это на самом деле — не удалось декомпилировать writer этой KV-ветки в этом раунде (кандидат-функции найдены, ни одна не декомпилирована — см. 35.11).
+
+`sub_103D7640` (Accept-required-by-gametype, §5) возвращает **bool**, не число — она отвечает только на вопрос "нужен ли Accept вообще для этого gameType", не "сколько человек нужно".
+
+**Вывод**: required count для Competitive/Wingman/Danger Zone **архитектурно не хранится и не проверяется как явное число на клиенте** — единственный источник правды об этом (сколько реальных слотов в команде для конкретного режима) — это то, что backend решает передать через `account_ids`/`rankings` в `MatchmakingGC2ServerReserve` (embedded в 9107, 35.6), и КОЛИЧЕСТВО элементов в этом массиве и есть де-факто "required" — клиент просто ничего не сверяет с этим числом сам.
+
+### 35.5 Accepted player count — **NOT FOUND на клиенте, backend-side по 35.1**
+
+Как и required count — нет native-структуры на клиенте, которая бы считала "сколько уже приняло". `sub_100789A0` (project446, единственный код с полным accept state machine, который у нас вообще есть) явно форвардит каждый accept НАРУЖУ без подсчёта (35.1). На клиентской стороне (`client_panorama.dll`) декомпилированный accept-related код (`LobbyAPI.SetLocalPlayerReady`, §5) тоже **не читает и не пишет никакой числовой счётчик** — он классифицирует reason-строку и пишет булево/enum состояние в `this+12` (**не сеть, не число участников**). Заключение по 35.1 полностью применимо: `accepted_count`/`required_count`/`all_players_ready` как явные, читаемые native-переменные **не существуют** — есть только klиентский bool "я лично готов" и backend-side (недоступное) агрегирование.
+
+### 35.6 Account IDs / участники — полная протобуф-схема, повторно проверено — **CONFIRMED**
+
+`CMsgGCCStrike15_v2_MatchmakingGC2ClientReserve` (9107) — **не содержит participant-полей напрямую**, но:
+```protobuf
+message CMsgGCCStrike15_v2_MatchmakingGC2ClientReserve {
+    optional uint64 serverid = 1;
+    optional uint32 direct_udp_ip = 2;
+    optional uint32 direct_udp_port = 3;
+    optional uint64 reservationid = 4;
+    optional CMsgGCCStrike15_v2_MatchmakingGC2ServerReserve reservation = 5;   // <-- ВЛОЖЕННОЕ сообщение
+    optional string map = 6;
+    optional string server_address = 7;
+}
+```
+Поле 5, `reservation`, **встраивает целиком** `CMsgGCCStrike15_v2_MatchmakingGC2ServerReserve` — то же сообщение, что уходит НА сервер как 9105:
+```protobuf
+message CMsgGCCStrike15_v2_MatchmakingGC2ServerReserve {
+    repeated uint32 account_ids = 1;               // <-- ПОЛНЫЙ список участников
+    optional uint32 game_type = 2;
+    optional uint64 match_id = 3;
+    optional uint32 server_version = 4;
+    optional uint32 flags = 18;
+    repeated PlayerRankingInfo rankings = 5;        // <-- per-player ранги
+    optional uint64 encryption_key = 6;
+    optional uint64 encryption_key_pub = 7;
+    repeated uint32 party_ids = 8;                  // <-- группировка по пати (parallel array с account_ids)
+    repeated IpAddressMask whitelist = 9;
+    optional uint64 tv_master_steamid = 10;
+    optional TournamentEvent tournament_event = 11;
+    repeated TournamentTeam tournament_teams = 12;
+    repeated uint32 tournament_casters_account_ids = 13;   // <-- casters, соответствует {%x} из §26/§28 reservation payload
+    optional uint64 tv_relay_steamid = 14;
+    optional CPreMatchInfoData pre_match_data = 15;
+    optional uint32 rtime32_event_start = 16;
+    optional uint32 tv_control = 17;
+}
+```
+Это **уже существующие, реальные поля 2021-протокола** (наша собственная `.proto`-схема, кросс-подтверждённая ранее в проекте как байт-идентичная минимум 3 независимым источникам, §2/§27) — **никаких изменений схемы не требуется** для представления нескольких участников (`account_ids`), их пати-группировки (`party_ids`) и рангов (`rankings`). Это прямой ответ на п.4/п.13 задания: **структура для "real + fake participants" уже существует в протоколе, просто наш текущий `OnMatchmakingStart` не заполняет `reservation` вообще** (уже задокументировано в §18, строка 808-809, как "второстепенная находка" в прошлой сессии — подтверждается здесь снова).
+
+`sub_103DC4B0` (9107-хендлер, §18) читает именно `v9 = *(v31+32)` — это и есть указатель на `reservation` (поле 5) — если не заполнено (как в нашем текущем коде), падает fallback на глобальное клиентское состояние. **Нет доказательств**, что `account_ids`/`party_ids`/`rankings` из этого вложенного сообщения читаются ДАЛЬШЕ (для рендеринга Accept-попапа) — сам 9107-хендлер использует из него только `& 0xF` (game_type-подобный байт) для выбора accept-required ветки. **NOT PROVEN**, что Accept-попап вообще показывает конкретные имена/аватарки участников из этого поля — это отдельный вопрос, не отвечен в этом раунде (не декомпилировался код рендеринга самого попапа, JS/XML недоступны, см. 35.2).
+
+### 35.7 "members/" KV-дерево — новая находка этого раунда — **HIGH CONFIDENCE как party-представление, NOT PROVEN как match-found roster**
+
+Полнотекстовый поиск строк в `client_panorama.dll` нашёл **реально существующую KV-структуру**, отдельную от protobuf/GC-сообщений:
+```
+members/numSlots            -- читается в sub_10245D10, sub_103DF430(!), sub_104690A0, sub_1058DAA0, sub_105C0040, и обработчике 9104 (sub_103D9900)
+members/numPlayers          -- читается в 12+ функциях (sub_103B91C0, sub_1042EA80, sub_10482FF0, sub_104B0490, sub_104C0100/0320, sub_10513AE0, sub_1057F610, sub_1058DAA0, sub_105C0040/5450/5700, sub_10245D10)
+members/numSpectators       -- sub_103B91C0
+members/numTSlotsFree       -- sub_103B91C0   (T-команда свободные слоты!)
+members/numCTSlotsFree      -- sub_103B91C0   (CT-команда свободные слоты!)
+members/numMachines         -- sub_103DF430(!), sub_105CA870, sub_105CBA30, sub_105CBB00
+members/machine%d/player0/xuid            -- sub_103DDCB0, sub_104B0490   (конкретный участник, per-machine/per-player XUID!)
+members/machine0/player0/game/offjoin     -- sub_1057F9F0, sub_10581010
+members/machine0/player0                  -- sub_105CBE70
+members:numSlots (двоеточие, отдельный вариант пути)  -- sub_10245D10
+```
+**Критично**: `sub_103DF430` (сама ready-up KV-listener функция для `"game/mmqueue"`, §5!) **читает и `members/numSlots`, и `members/numMachines`** (xrefs @ `0x103dfa5a` и `0x103df6e5`) — то есть ready-up-логика РЕАЛЬНО консультируется с этим деревом, это не изолированная, неиспользуемая структура.
+
+Адресация `machine{N}/player{M}/xuid` **побайтово совпадает по стилю** с реальным, подтверждённым Hydra-source кодом (§4, `matchmaking/sys_session.cpp`, `CSysSessionHost`/`CSysSession`, `ISteamMatchmaking()->SetLobbyMemberData`/`GetLobbyMemberData`, `SetLobbyData`) — Steam Lobby member data традиционно адресуется именно так в старых CS:GO/Source играх. **HIGH CONFIDENCE**: `"members/"` — это локальное зеркало **Steam Lobby участников (PARTY, до постановки в очередь)**, синхронизируемое Steam-колбэками, а не GC-протоколом.
+
+**NOT PROVEN, но важный открытый вопрос**: используется ли ЭТО ЖЕ дерево (или его копия/пересчёт) также для представления участников НАЙДЕННОГО матча после того, как backend объединил несколько партий в одну игру? Ни один из декомпилированных в этом раунде фрагментов не даёт прямого ответа — writer-функции этого дерева (кто реально ПИШЕТ `members/numSlots`, а не читает) не были декомпилированы (см. 35.11, TODO).
+
+### 35.8 Fake Accept — существующий retail-механизм для перевода участника в ready-состояние — **CONFIRMED, частично**
+
+Единственный подтверждённый, полностью прослеженный retail-путь "участник → ready":
+```
+Panorama JS: LobbyAPI.SetLocalPlayerReady(reason: string)
+    ↓ sub_10583500 (регистрация V8 FunctionTemplate)
+    ↓ sub_10584F70 (JS-маршалинг аргументов, RVA 0x10584F70)
+    ↓ sub_10585B00 (классификация reason через sub_10580C20, RVA 0x10585B00)
+    ↓ sub_10580C20: if (reason=="deferred") ... else { sub_103DEA80(0, 2); return true; }
+    ↓ пишет в this+12 состояние (НЕ шлёт сеть синхронно здесь — состояние локальное для UI)
+```
+Это относится к ЛОКАЛЬНОМУ ("моему собственному") ready-state — вызывается когда РЕАЛЬНЫЙ игрок нажимает Accept в UI. **Это единственная native точка, где клиент сообщает "я готов"** — она принимает `reason` (строку), не account id — то есть предназначена ТОЛЬКО для локального игрока, не для указания "какой участник" стал ready. **Нет параметра "for account X"** — `SetLocalPlayerReady` буквально означает "МЕСТНЫЙ игрок", не абстрактный API для управления состоянием произвольных участников.
+
+**Вывод**: retail не предоставляет клиентский API "пометить УЧАСТНИКА B как ready" — потому что клиент вообще не управляет состоянием ДРУГИХ участников, это исключительно backend-domain (35.1). "Fake Accept" для fake-участников поэтому **не может и не должно** имитироваться через `LobbyAPI.SetLocalPlayerReady` (это API для "я" — реального игрока) — вместо этого fake-участники "принимают" исключительно в НАШЕЙ СОБСТВЕННОЙ GC-side бухгалтерии (мы решаем "все готовы" и шлём клиенту соответствующий сигнал), что и есть retail-эквивалентная архитектура (backend решает, клиент не считает).
+
+### 35.9 `cfg/qmmconnect.dt` — новая находка, не задокументированная ранее — **CONFIRMED существование, TODO назначение**
+
+`sub_103D9900` (`matchmaking==0` ветка) читает/пишет файл `"cfg/qmmconnect.dt"` через `"USRLOCAL"`-путь (`(*(vtbl+40))(dword_152680D8+4, "cfg/qmmconnect.dt", "USRLOCAL")`/`(*(vtbl+80))(...)`). Имя файла ("QMM" = Quick Match Making, как и упомянутый пользователем dead-code `cs_bot_manager.cpp:1230-1267`, §3) намекает на кэш/persist-состояние старой bot-fill-slot механики. **Содержимое/формат файла не исследовались** (не пытались открыть/распаковать в этом раунде). **TODO**, потенциально релевантно для "как клиент кэширует информацию об участниках между сессиями", но не подтверждено.
+
+### 35.10 Competitive / Wingman / Danger Zone — потоки по отдельности
+
+Общий вывод для ВСЕХ ТРЁХ режимов: **весь прослеженный retail-код (`sub_103D7640`, `sub_103DF430`, `sub_103D9900`, `sub_10581640`) НЕ различает game_type для целей required/accepted-подсчёта** — единственное место, где `game_type` вообще на что-то влияет в этой цепочке — это (а) `sub_103D7640`'s bool "нужен ли Accept" (35.4, одинаковый результат `true` для 8/9/10/11/13, `false` для остальных), и (б) выбор callback-режима в 9107-хендлере (`sub_103F7980(v34,1,0)` vs `(v34,2,2)`, §18, эффект на что именно — не до конца прослежен). **Нет отдельного, по-game_type-разного, числового required-count в клиентском коде** — что означает: с точки зрения RE, Competitive/Wingman/Danger Zone **структурно идентичны** в части "сколько нужно/сколько приняло", потому что этот подсчёт вообще не на клиенте (35.1/35.4).
+
+**Competitive (eGame=8)**: `MatchmakingStart → (backend matching, не реверсено) → MatchmakingGC2ServerReserve(9105)→сервер → MatchmakingGC2ClientReserve(9107)→клиент, reservation.account_ids заполнен backend'ом → game/mmqueue: reserved/ready-up → popup_accept_match_found → LobbyAPI.SetLocalPlayerReady("...") [клиент] → 9102(accept) → backend решает все ли готовы → (HIGH CONFIDENCE) MatchmakingGC2ClientUpdate(9104).matchmaking==3 → sub_103D8AF0()-dispatcher → ReadyUpForMatch-подобное событие → game/mmqueue: connect → QueueConnect KV-команда → connect`. **CONFIRMED** архитектура пути, **HIGH CONFIDENCE** конкретно звено 9104.matchmaking==3→dispatcher (35.3).
+
+**Wingman (eGame=10)**: **тот же путь**, никакой отдельной, по коду отличающейся структуры не найдено. Единственное известное числовое различие для Wingman — не на клиенте, а в `project446`'s GC-стороне (`sub_10094120`, §28.5): team-cap `2` вместо `5` для account-list bracket-padding при построении `sv_mmqueue_reservation` payload'а — это BACKEND/GC-side (наш будущий код), не retail client-side ограничение.
+
+**Danger Zone (eGame=13)**: **тот же путь** на уровне найденного клиентского кода. Danger Zone — режим с другим числом игроков (battle royale, не 5v5) в реальности, но **этот факт нигде не закодирован в исследованном client_panorama.dll accept-коде** — что согласуется с 35.1 (backend решает состав, клиент не проверяет). ⚠️ project446's `sub_10094120` (native-Q-reserve builder, §28.3) **вообще НЕ обрабатывает** `game_type==13` (условие там `result==8 || result==10`) — то есть даже у project446 нет отдельной реализации для Danger Zone в этом конкретном payload-билдере; неизвестно, обрабатывают ли они DZ каким-то другим путём. **NOT PROVEN** что-либо специфичное для DZ помимо общего вывода "клиент не считает".
+
+### 35.11 Party / участники — что реально существует — **HIGH CONFIDENCE** (см. 35.7), плюс source-tree
+
+`matchmaking/sys_session.cpp` (Hydra source, §4, повторно процитировано) — **реально рабочий** Steam Lobby код: `CreateLobby`, `SetLobbyData`, `JoinLobby` — это и есть, по всей видимости, source-уровневый эквивалент того, что заполняет `"members/..."` KV-дерево (35.7) в реальном бинарнике. Это уже задокументированная в проекте (§4) находка, здесь только явно связана с новым RE-открытием `members/` дерева.
+
+### 35.12 Минимальная test-only архитектура — по факту всего вышеустановленного
+
+Раз retail не хранит required/accepted как проверяемое клиентом число (35.1/35.4/35.5), схема из задания (п.17) технически недостижима буквально ("fake participants становятся ready через retail Accept API") — потому что retail Accept API (`SetLocalPlayerReady`) **предназначен только для локального игрока**, а не для управления состоянием других участников (35.8). Ближайший к идеалу вариант, минимально трогающий retail-логику:
+
+```
+Matchmaking test harness (НАШ GC-side код, ещё не написан)
+    ↓ real player присылает MatchmakingStart (eGame=8/10/13)
+    ↓ мы (GC) РЕШАЕМ состав матча: account_ids = [real, fake_1, ..., fake_N] -- заполняем reservation (35.6),
+      это уже существующие protobuf-поля, никакой схемы менять не нужно
+    ↓ отправляем 9107 с заполненным reservation -- retail game/mmqueue переходит в ready-up (this+140==1)
+    ↓ retail показывает popup_accept_match_found -- ПОЛНОСТЬЮ retail UI, не тронуто
+    ↓ real player жмёт Accept -- retail LobbyAPI.SetLocalPlayerReady() -- ПОЛНОСТЬЮ retail API, не тронуто
+    ↓ клиент шлёт нам 9102(accept, abandon=0) -- ПОЛНОСТЬЮ retail сеть, не тронуто
+    ↓ МЫ (GC) считаем: 1 real accept + предполагаем N fake accepts (наша собственная, не retail, бухгалтерия -- 
+      ровно то место, где backend считает в реальности, 35.1) == required -- "матч готов"
+    ↓ отправляем клиенту MatchmakingGC2ClientUpdate(9104) с matchmaking==3 (HIGH CONFIDENCE триггер ReadyUpForMatch, 35.3)
+      ИЛИ иной сигнал, переводящий game/mmqueue в "connect" (точный эквивалент retail backend-сигнала, TODO уточнить какой именно)
+    ↓ retail: ReadyUpForMatch/game-mmqueue-connect → QueueConnect (ПОЛНОСТЬЮ retail, не тронуто) → connect to srcds
+```
+**Не реализовано в этом раунде.** Ключевое: fake participants существуют ТОЛЬКО как (а) записи в `account_ids`/`party_ids` протобуф-полей, которые retail уже умеет принимать без изменений схемы, и (б) как бухгалтерия в НАШЕМ будущем GC-коде (не retail) — никакого bypass'а retail required/accepted-condition не требуется, потому что такого condition на клиенте не существует.
+
+### 35.13 Нерешённые вопросы (честно, не придумано)
+
+- Кто именно (и когда) СИНХРОННО с кликом "Play" ставит `game/mmqueue` в `"searching"` — по-прежнему **не найдено** (35.3 п.1 только сузил окно, опровергнув 9104-гипотезу; сам setter не идентифицирован).
+- Идентичность `dword_15278634+8`'s vtable slot 0 с `sub_10581640` — **не проверена побайтово** (35.2).
+- Кто ПИШЕТ (не читает) `members/numSlots`/`members/numPlayers`/`members/machine%d/player0/xuid` — **не найдено**, кандидаты не декомпилировались (список функций-читателей есть, писателя среди них не идентифицировано явно).
+- Показывает ли Accept-попап конкретные имена/аватарки из `reservation.account_ids`, или использует ТОЛЬКО `members/`-дерево, или оба — **не определено** (JS/XML Panorama-ресурсы не распакованы).
+- `PartyMenu.ShowMatchAcceptPopUp`/`popup_accept_match.xml`/`.js` как отдельные, именованные символы — **не найдены заново** в бинарнике в этом раунде (вероятный кандидат — `sub_10418AC0("popup_accept_match_found", 0)`, но прямого текстового совпадения имени не установлено).
+- `cfg/qmmconnect.dt` — назначение/формат не исследованы (35.9).
+- Точный протокольный сигнал (9104 с каким именно значением `matchmaking`, либо другое сообщение), которым retail backend доводит до клиента "все приняли, го коннект" — известно только `matchmaking==3` как HIGH CONFIDENCE кандидат; полный список возможных значений этого enum (кроме `0` и `3`) не восстановлен.
+
+### 35.14 Sweep обоих source-деревьев + своего проекта — результат получен, дополняет 35.13 — **CONFIRMED** (прямое чтение source)
+
+Фоновый агент выполнил полнотекстовый поиск по `ida_deobfuscated_grok`/`cstrike15_src-master`/своему проекту. Главный вывод: **ни в одном дереве нет специально построенной "fake test player"/"simulate Accept"-системы для matchmaking.** Значимые находки:
+
+**`IsFakePlayer`/`m_bFakePlayer`/`bFakePlayer`** (`public/igameresources.h:28`, `engine/baseclient.h:119,332`, `engine/baseclient.cpp:654-684`) — это **общий движковый механизм** "клиент — бот, занимающий слот" (`CBaseClient::Connect(..., bool bFakePlayer, ...)`), используемый обычными in-game ботами (`bot_add`), **НЕ** специфичен для matchmaking/Accept-симуляции. Существует идентично в обоих деревьях.
+
+**QMM dead-code блок** (`game/server/cstrike15/bot/cs_bot_manager.cpp:1230-1267`, ida_deobfuscated_grok) — полный текст получен:
+```cpp
+//
+// In Queued Matchmaking mode bots are always taking spots of humans
+// find a human that is not yet connected and use that human's stats
+// TODO: <vitaliy> this would allow bots to take over humans
+//
+if ( 0 && CSGameRules() && CSGameRules()->IsQueuedMatchmaking() && CSGameRules()->m_mapQueuedMatchmakingPlayersData.Count() )
+{
+    CUtlVector< uint32 > arrConnectedHumans;
+    for ( int i = 1; i <= gpGlobals->maxClients; ++i ) {
+        CCSPlayer *pHuman = dynamic_cast<CCSPlayer *>(UTIL_PlayerByIndex( i ));
+        if ( pHuman ) { uint32 uiAccountId = pHuman->GetHumanPlayerAccountID(); if (uiAccountId) arrConnectedHumans.AddToTail(uiAccountId); }
+    }
+    FOR_EACH_MAP( CSGameRules()->m_mapQueuedMatchmakingPlayersData, idxQueuedPlayer ) {
+        CCSGameRules::CQMMPlayerData_t &qmmPlayerData = *CSGameRules()->m_mapQueuedMatchmakingPlayersData.Element(idxQueuedPlayer);
+        if ( arrConnectedHumans.Find(qmmPlayerData.m_uiPlayerAccountId) != arrConnectedHumans.InvalidIndex() ) continue; // уже подключён
+        bool bThisPlayerIsFirstTeam = ( qmmPlayerData.m_iDraftIndex < 5 );
+        ... // team-assignment logic
+        bot->SetHumanPlayerAccountID( qmmPlayerData.m_uiPlayerAccountId );
+        engine->SetFakeClientConVarValue( bot->edict(), "name", CFmtStr("BOT %u", qmmPlayerData.m_uiPlayerAccountId).Access() );
+    }
+}
+```
+**Навсегда мёртвый код** (`if (0 && ...)`, короткое замыкание). **Важная оговорка (честно, не факт)**: этот блок работает **ПОСЛЕ** формирования матча/резервации (на СЕРВЕРНОЙ, не клиентской стороне, в `server.dll`/game DLL) — он про "бот подменяет ЕЩЁ НЕ ПОДКЛЮЧИВШЕГОСЯ зарезервированного человека своим account ID", НЕ про "симулировать Accept-клик в лобби". Другая стадия конвейера, чем то, что нужно для Accept popup.
+
+**`CCSGameRules::CQMMPlayerData_t` / `m_mapQueuedMatchmakingPlayersData`** (`cs_gamerules.h:1226-1235,1326-1334`) — **это НЕ мёртвый код**, активно используется (30+ мест) в `cs_player.cpp` для трекинга per-round статистики по account_id. Это **серверная (game DLL) roster-структура для зарезервированного матча** — по всей архитектуре reservation-протокола (§26-28) она, вероятнее всего, заполняется ИЗ account-list'а `sv_mmqueue_reservation`-payload'а (`[accountid_hex]...` bracket-токены, §28.4-28.5) — **правдоподобная, не 100%-но прослеженная связь**, но она даёт: **если мы хотим "fake participants" на СЕРВЕРНОЙ стороне (не только client UI), кандидат-точка — заполнение ЭТОГО account-списка в payload'е `ReserveServerForQueuedGame`, а не что-либо на клиенте.**
+
+**Независимое кросс-подтверждение 35.7 через source** — `matchmaking/mm_session_online_host.cpp:1663-1669`:
+```cpp
+int numPlayers = 1;
+...
+pMembers->SetInt( "numPlayers", numPlayers );
+pMembers->SetInt( "numSlots", MAX( numSlotsCreated, numPlayers ) );
+```
+и `matchmaking/cstrike15/mm_title_gamesettingsmgr.cpp:1536-1567` (`"Filter>=/members:numPlayers"`, `"Near/members:numPlayers"`) — **байт-в-байт совпадает** с найденными в бинарнике KV-путями `members/numPlayers`/`members/numSlots`/`members:numSlots` (35.7)! Это **поднимает уверенность 35.7 с HIGH CONFIDENCE до CONFIRMED**: `members/numPlayers`/`members/numSlots` — реальная, задокументированная в source KeyValues-конвенция для представления состава лобби (`CSysSessionBase`/`SessionMembersFindPlayer(pSettings, xuid)`, `sys_session.cpp:850-851`), используемая как для party (pre-queue), так и, по всей видимости, general session-member accounting в целом — источник НЕ уточняет однозначно party-only это или также match-found-specific (открытый вопрос 35.7 остаётся).
+
+**`required_count`/`accepted_count`/`needed_count`** — **0 совпадений** ни в одном дереве. Единственный близкий эквивалент — `numPlayers`/`numSlots` через KeyValues (выше) — **подтверждает 35.4/35.5's вывод**: явного "required/accepted counter" как отдельной, специально названной переменной не существует нигде в доступном коде.
+
+**`IExternalTestClient`/`IExternalTestClientManager`** (`public/iexternaltest.h`) — существует, это **generic QA/load-testing интерфейс** (массовое создание тестовых game/server клиентов для стресс-тестов), **без видимой связи с matchmaking Accept-симуляцией** — не то, что нужно для нашей задачи.
+
+**Собственный проект (`D:\csgo2021_gc`)** — `test_mm.h/.cpp` (уже задокументированы, §26-33, остаются неиспользуемыми) — единственный "test"-помеченный код, и по собственным комментариям явно НЕ fake-player/Accept-симулятор, а протокол-верификационный responder. `gc_shared.cpp:108-201` уже РЕГИСТРИРУЕТ обработчики party-протокола (`k_EMsgGCInviteToParty`/`PartyInviteResponse`/`KickFromParty`/`LeaveParty`/`Party_Register`/`Unregister`/`Search`/`Invite`/`ClientPartyJoinRelay`/`ClientPartyWarning`) — **реальные, уже объявленные message ID, тела обработчиков не содержат fake-player логики** (не проверялось построчно в этом раунде, только факт регистрации в диспетчере).
+
+---
+
+## 36. Matchmaking State Writers, Accept Propagation and Fake-Player Injection Point (read-only RE)
+
+Код НЕ менялся, сборка/деплой/Git не выполнялись. Использованы IDA-базы `client.dll`, `client_panorama.dll`, `engine.dll`, `project446/csgo_gc.dll` (уже были) и **две новые**, снятые в этом раунде с реальных retail-файлов игры: `matchmaking.dll` (`csgo/bin/`, 624 KB) и `server.dll` (`csgo/bin/`, 12 MB), плюс loose-файл `csgo/gamemodes.txt`. Source-деревья использованы как source (не как IDA-дамп). Скрипты: `q36_*.py` в scratchpad. **Ключевой вывод раунда меняет постановку**: у Accept НЕТ "внутриклиентского счётчика, который надо обманывать" — счёт делает **игровой сервер (`CBaseServer`)** по per-player `reservationStage`, а клиент лишь показывает результат (см. 36.F).
+
+### 36.A `game/mmqueue` — точный writer и последовательность записей — **CONFIRMED** (client.dll, прямая декомпиляция + raw disasm)
+
+Раздел 35.13 п.1 ("кто ставит `searching`") **закрыт**, и уточнена формулировка §35.3: `searching`/`connect` пишет обработчик 9104, а **первое** значение пишет отправитель 9101 — `registering`.
+
+| Значение `game/mmqueue` | Кто пишет | Функция (client.dll / client_panorama.dll) | Условие |
+|---|---|---|---|
+| *(нет ключа)* | сессия при создании | `CMatchSession*::InitializeGameSettings` (matchmaking.dll) | до Play |
+| **`registering`** | **отправитель `MatchmakingStart`** | **`sub_103F6240`** (client.dll, RVA `0x103F6240`) / `sub_103DDCB0` (client_panorama, `0x103DDCB0`) | `game/mmqueue` был пуст (`v73==0`) — шаблон `"Update { game { mmqueue registering } }"` @ `0x10bcc5c0`, raw disasm `0x103f6ab0-0x103f6ac0`: `test al,al; cmovz edx, ecx` |
+| **`heartbeating`** | тот же `sub_103F6240` | то же место | `game/mmqueue` уже был непуст — шаблон `0x10bcc574` |
+| **`searching`** | обработчик 9104 | **`sub_103F1C00`** (client.dll) / `sub_103D9900` (client_panorama) | gate `game/mmqueue` непуст **И** поле `matchmaking != 0` **И `!= 4`**: raw `0x103f1ffd: cmp [ecx+0A8h],4; ...; cmovnz edx,eax` → `"Update { system { lock #empty# } game { mmqueue searching } }"` @ `0x10bcaee8` |
+| **`connect`** | 9104 при `matchmaking == 4`; также `sub_103F7C00` (net-callback, status 4) | те же | `"Update { system { lock mmqueue } game { mmqueue connect } }"` @ `0x10bcaf28`, xrefs `0x103f2009`, `0x103f7dac` |
+| **`reserved`** | обработчик 9107 (`sub_103F49F0`/`sub_103DC4B0`), `sub_103F6240` (reconnect-ветка), `sub_103F7C00` | — | `"Update { system { lock mmqueue } game { mmqueue reserved } }"` @ `0x10bcc020`, xrefs `0x103f4a98`,`0x103f633c`,`0x103f7d07` |
+| *(удаление)* | `sub_103F6DD0` (cancel), 9104 при `matchmaking==0` | — | `"Delete { system { lock #empty# } game { mmqueue #empty# } }"`, `"Delete/game/mmqueuestop"` |
+
+**`sub_103F6240` — отправитель `MatchmakingStart` (RVA `0x103F6240`, client.dll, 2956 байт)** — **CONFIRMED**: содержит vftable `CProtoBufMsg<CMsgGCCStrike15_v2_MatchmakingStart>` (xref `0x103f6d88`); это **виртуальный метод `CLobbyMenuSingleton`** (client.dll vtable `0x10bccbf0`: slot2=`sub_103F6240`, slot3=`sub_103F6DD0` cancel; client_panorama vtable `0x10b6a410`: slot2=`sub_103DDCB0`, slot3=`sub_103DE630`), вызываемый только через vtable/data. Поля 9101 берутся так (прямо из декомпиляции):
+- `account_ids` ← **цикл по KV `members/machine%d/player0/xuid`** (сначала локальный Steam ID, затем остальные machine-записи ≠ себя);
+- `game_type` ← `game/mapgroupname` (+ `"reconnect"`-ветка) через `sub_103F1240`, затем `<<8`-композиция mapgroup;
+- `client_version` ← `INETSUPPORT_003`→vtbl+36 (=13805, совпадает с нашим логом);
+- `prime_only` ← `game/prime`; поле flags ← `game/gamemodeflags`; турнирные `tm_event_id/tm_event_stage_id/tm_team_id_ct/tm_team_id_t` в KV `Game::EnteringQueue`.
+Метод **пере-вызывается периодически** (при непустом mmqueue пишет `heartbeating`, обновляет `this[1]=Plat_MSTime()`, снова шлёт 9101) — **HIGH**: частота и вызывающий таймер не найдены (вызов только через vtable).
+
+**Реальная последовательность (client-side, подтверждено кодом):** `Play` → `CLobbyMenuSingleton::vfn2` (`sub_103F6240`): пустой mmqueue ⇒ `registering` + 9101 → GC шлёт 9104 (`matchmaking`≠0,≠4) ⇒ `searching` → (повторные 9101 ⇒ `heartbeating`) → 9107 ⇒ `reserved` → status 4 ⇒ `connect`. **Почему наш Casual-тест проходил gate 9107 без 9104**: `registering` уже был выставлен `sub_103F6240` на клике Play, gate (`mmqueue` непуст) выполнялся сам собой.
+
+### 36.B `sub_103D8AF0` — **CONFIRMED** (полная цепочка)
+
+`sub_103D8AF0` (client_panorama `0x103D8AF0`, 90 байт; client.dll-аналог `sub_103F0C70`) — **ленивый singleton-getter** глобального `dword_15278634` (объект 12432 байт, ctor `sub_1057F440` = **`CUiComponent_Lobby`**, vtables `0x10bbdf44/0x10bbdf60/0x10bbdf74`); возвращает `obj+8` **только если `byte_1519DDEE`** (Panorama-лобби включено). `obj+8` — встроенный **`CLobbyMenuSingleton`** (ctor `sub_103DDA40`). Вызывается из 5 мест: 9104-хендлер ×1 (`0x103d9d5b`) и `sub_103DF430` ×4. Дальше `(**v)(v, a, b, c)` = виртуальный слот 0 подобъекта (в `CUiComponent_Lobby` vtable `0x10bbdf60`) = **`sub_1057FF90`**.
+
+### 36.C `ReadyUpForMatch` — **CONFIRMED** (native→Panorama путь)
+
+- **Определение события**: `sub_10581640` (client_panorama `0x10581640`) регистрирует тип `"PanoramaComponent_Lobby_ReadyUpForMatch"`, id **`word_10D54BF8`**, 3 аргумента. Вызывается только через таблицу трамплинов (`sub_100502C0`, data `0x10a98d30`) — это **регистрация схемы события, не его вызов**.
+- **Создание аргументов**: `sub_1057F030` = конструктор **`panorama::CUIEvent3<bool,int,int>`** для того же `word_10D54BF8`.
+- **Raiser**: **`sub_1057FF90(this, bool bShow, int a3, int a4)`** (`0x1057FF90`, 100 байт): `this+16 = bShow ? Plat_MSTime() : 0`; если у Panorama есть слушатель события `word_10D54BF8` (`dword_15280F00` vtbl+216) — диспатчит `CUIEvent3<bool,a3,a4>` (vtbl+208). Совпадение id `word_10D54BF8` в регистрации и в raiser'е — подтверждение идентичности (ответ на "CONFIRMED / NOT CONFIRMED" из задания: **CONFIRMED**).
+- **Точки вызова raiser'а** (все = `RaiseReadyUp(bool, int, int)`):
+  1. `sub_103DF430` (net-callback `CServerConfirmedReservationCheckCallback`, `0x103DF430`): `stage==2` и статус "ещё ждём" → **`(true, accepted, total)`** (обновление счётчика попапа); `stage==1` и status==4 → **`(true, 0, total)`** (показ ready-up после `popup_accept_match_found`); при `!byte_1519DDEE` — ещё `(false,0,total)`.
+  2. 9104-хендлер (`sub_103D9900`) при **`matchmaking == 3`** → `(false, 0, 0)` (`0x103d9d5b`) — это **сброс/закрытие ready-up**, а НЕ показ попапа. **Это уточняет §35.3 п.2** (там `matchmaking==3` трактовалось как триггер показа): показ идёт из 0x21/0x25-цикла (36.F).
+- `ServerReserved`: `sub_103E1390` — регистрация события, `sub_103D7750` строит `CUIEvent2<char const*,double>` для **`word_10D501B4`**, raiser — `sub_103DEA80(kv, mode)` (`0x103DEA80`): при `mode==2` и `dword_15278694` (отложенный QueueConnect KV) берёт `map` и диспатчит `word_10D501B4` ⇒ **`ServerReserved(map,time)`** — **HIGH** (id совпадают, raiser найден, JS-слушатель не распакован).
+- Значения поля `matchmaking` (proto field 1) по коду 9104-хендлера: `0`→очистка (`Delete`, `cfg/qmmconnect.dt`), `3`→`RaiseReadyUp(false,0,0)`+`searching`, `4`→`connect`, прочие ненулевые→`searching`. Смысловые имена enum — **не восстановлены**.
+
+### 36.D `members/numSlots` — writer — **CONFIRMED** (matchmaking.dll binary + source)
+
+`members/*` — **локальное KV party/session-настроек**, пишется **клиентским `matchmaking.dll`**, не GC:
+- **`sub_10024F70`** (matchmaking.dll `0x10024F70`) = `CMatchSessionOnlineHost::InitializeGameSettings` (строка `"CMatchSessionOnlineHost::InitializeGameSettings adjusted settings:"`, в начале читает `members/numSlots` = `numSlotsCreated`); caller `sub_10022720`.
+- **`sub_1001BEA0`** (`0x1001BEA0`) = `CMatchSessionOfflineCustom::InitializeGameSettings` (тот же паттерн); caller `sub_1001B0A0`.
+- Пишут: `members{ numMachines=1, numPlayers=1, numSlots=MAX(numSlotsCreated,numPlayers), machine0{ id, flags, numPlayers, dlcmask, tuver, ping, player0{ xuid, name } } }` из **локального player manager** — 1:1 с `mm_session_online_host.cpp:1658-1700` (source) и `mm_session_offline_custom.cpp:430`.
+- Дальнейшие модификации (source): `mm_title_gamesettingsmgr.cpp:841-860` — `numSlots` (по умолчанию 10) принудительно = `GetMaxPlayersForTypeAndMode` **только** для official-search (`options/createreason=="searchempty"` && `!game/hosted`); `:321` — "all CS:GO online lobbies are 10-slots"; `sys_session.cpp:956` — при входе машины `numSlots = machine.numPlayers`; чужие члены приходят через `SysSession` (Steam Lobby), не GC.
+- `sub_105807B0` (client_panorama, vtable slot1 `CLobbyMenuSingleton`) = "я хост/соло-лидер?": `Members/numSlots == 1` ⇒ true, иначе сравнение `xuidHost` с локальным.
+- **Мост `members/` ↔ `account_ids`**: **CONFIRMED только в одну сторону** — `members/machine%d/player0/xuid` ⇒ `MatchmakingStart.account_ids` (`sub_103F6240`, 36.A). **Обратной связи `reservation.account_ids` (9107) ⇒ `members/` в декомпилированном 9107-хендлере нет** (используется только `& 0xF` game_type; полевой копировщик `sub_103DFBE0` не декомпилировался — **TODO, MEDIUM**). Значит `members/` = **party до очереди**, не состав найденного матча.
+
+### 36.E Реальный Accept — путь от Panorama до сервера — **CONFIRMED (код) / MEDIUM (JS-reason)**
+
+```
+Panorama Accept-кнопка → JS LobbyAPI.SetLocalPlayerReady(reason)         [JS popup_accept_match.js не распакован]
+  → sub_10583500 (V8 template) → sub_10584F70 (маршалинг) → sub_10585B00 (client_panorama)
+  → sub_10580C20(reason):
+       reason == "deferred": sub_103DF3A0(dword_15278690)               <== ЕДИНСТВЕННОЕ место, меняющее stage
+            if (callback.stage(this+140) < 2) { callback.stage=2;
+               cancel prev request: callback.this+128 handle → vfunc+20;
+               INETSUPPORT_003 vtbl+60 (тот же вызов, что в ctor) с reservationStage=2 }
+       иначе:  sub_103DEA80(0, 2)                                         (отложенный QueueConnect KV → ServerReserved event)
+  → engine: новый A2S_RESERVE_CHECK (0x21) с reservationStage = 2, SteamID клиента
+```
+`CServerConfirmedReservationCheckCallback` ctor (`sub_103DF1C0(this, kv, a3=stage, a4=mode)`, client_panorama `0x103DF1C0`) кладёт `this+140 = a3` (stage), `this+132 = a4` (mode), печатает `"Server reservation check %p heartbeating"` и регистрирует запрос в `INETSUPPORT_003` vtbl+60 с `a3` как reservationStage. 9107-хендлер выбирает: nested `reservation.game_type & 0xF` ∈ {8,9,10,11,13} ⇒ `sub_103DF1C0(kv, **1**, 0)` (stage 1, mode 0 — Accept-ветка), иначе ⇒ `sub_103DF1C0(kv, **2**, 2)` (stage 2, mode 2 — прямой connect). При **отсутствии nested `reservation`** берётся глобальный search-state (`dword_10D9A180+32`) — то есть наш нынешний 9107 без `reservation` уже пойдёт по Accept-ветке для `eGame∈{8,10,13}`. **Не подтверждено**, какой `reason` реально передаёт retail-JS Accept-кнопки (единственная нативная ветка, меняющая stage, — `"deferred"`; **HIGH**, что это и есть Accept).
+
+### 36.F Где реально считается accepted/required — **CONFIRMED** (source engine + binary engine.dll + server.dll)
+
+**Источник истины — игровой сервер, а не клиент и не (в retail-модели) backend.** `CBaseServer::ReplyReservationCheckRequest` — engine.dll **`sub_101BC1D0`** (RVA `0x101BC1D0`, 2189 байт; строки `"Reservation from client %u: %u"` @ xref `0x101bc533`, `"Match start status: %u/%u"` @ `0x101bc69e`, дефолт `awaiting=127`), source `engine/baseserver.cpp:2165-2308`:
+- **Roster** = `m_arrReservationPlayers` (`QueueMatchPlayer_t{account, adr, token, stage}`), строится в `SetReservationCookie` (`baseserver.cpp:4217-4296`) **только когда cookie ≠ текущего** и `sv_mmqueue_reservation` начинается с `Q<cookie>,`: каждый токен `[%x]` с **ненулевым** account → игрок (stage 0); `m_numGameSlots = Count()`. Для `G` roster очищается, `m_numGameSlots=0`. (Серверный game-rules строит свой `m_mapQueuedMatchmakingPlayersData` из тех же токенов, **`m_iDraftIndex` = позиция токена, включая `[0]`**; команда = `draftIndex < kNumPlayersPerSide` — `cs_gamerules.cpp:4636-4653,18383`; отсюда padding `[0]` у project446, §28.5.)
+- **Обработка 0x21** (33 байта, §26): нужны `cookie == m_nReservationCookie`, `stage != 0`, `steamid != 0`, `sv_mmqueue_reservation[0]=='Q'`; игрок ищется по `CSteamID(steamid).GetAccountID()`; если найден: сохраняются `adr`,`token`, `qmp.stage = stage`; **`awaiting = #(игроков со stage < запрошенного stage)`, `total = Count()`**. Если аккаунта **нет в roster** — `awaiting` остаётся `127`, `total=0` (клиент никогда не получит status 4).
+- Ответ `S2A_RESERVE_CHECK_RESPONSE` (0x25) `... stage, awaiting(byte), total(byte)`; **при `awaiting==0` сервер сам рассылает 0x25 ВСЕМ игрокам roster'а** (на сохранённые `adr`/`token`).
+- `serverGameDLL->ReportGCQueuedMatchStart(minStage, confirmedAccounts[], count)` вызывается при каждом "just confirmed" (engine.dll: `(*(dword_139097E8 vtbl + 188))`, offset **188 = slot 47**). Есть встроенный **spoof auto-accept**: `bSpoofForcefulConnect = (awaiting && bReady && stage==2)` → сервер принудительно ставит stage всем остальным. **В retail `server.dll` 2021 этот метод — заглушка: `CServerGameDLL` vtable `0x1085cb10`, slot 47 = `sub_10145510` (RVA `0x10145510`, 5 байт) = `char __stdcall (int,int,int){return 0;}` → `bReady == false` всегда → spoof НЕ срабатывает, GC о подтверждениях не уведомляется** — **CONFIRMED** (прямая декомпиляция). project446 не случайно хукает именно этот слот (§6, `sub_100BADE0`).
+- Клиент (36.C): аргументы `RaiseReadyUp(true, accepted, total)` вычисляются из ответа 0x25: `sub_103DF430` берёт 64-битный результат `a2->vfunc+8()` (два байта `awaiting`/`total`), `accepted = clamp(byte1 − byte0, 0, 64)`, `total = byte1` — **HIGH** (порядок байт не сверен побайтно; согласуется с project446 `"[ReadyUp] popup counter set to %d/%d"`, `sub_100EA660`).
+- **Клиент поднимает Accept-попап**, когда для **stage 1** пришёл status 4 (`awaiting==0` ⇒ **все** игроки roster'а прислали stage≥1) — `sub_103DF430`, `this+140==1` → `DevMsg("Server reservation check %p ready-up!")`, `popup_accept_match_found`, `RaiseReadyUp(true,0,total)`. После Accept (stage 2) прогресс `accepted/total` идёт из очередных 0x25; при `awaiting==0` на stage 2 — ветка `QueueConnect` (KV с `adronline`,`reservationid`,`map`,`gametype/gamemode` по `this+92`), при `this+132 != 0`.
+
+**project446-модель (для сравнения, §6/§28, повторно проверена)**: `sub_100789A0` форвардит Accept наружу без подсчёта (`sub_100BFC20`, 20+ call sites), подсчёт "все приняли" делает **их backend**; после этого GC получает **второй 9107 с `game_type==0`** — `"[GC] Connect reserve received (all players accepted)"` (`sub_1006EAD0`, xref `0x1006ede1`) → state 3 → proceed (`sub_100774E0`); счётчик попапа они выставляют нативно (`sub_100EA660`, RVA-параметры `GC_CLIENT_READYUP_ACTIVE_RVA`/`GC_CLIENT_READYUP_COMP_RVA`). Это согласуется с клиентским кодом 9107-хендлера: 9107 с не-accept `game_type` (например 0) создаёт callback `(stage 2, mode 2)` ⇒ direct-connect. Два способа довести до connect.
+
+### 36.G Fake players — минимальная точка внедрения — вывод по подтверждённым фактам
+
+**Ответ на п.9 (нужен ли отдельный fake GC client): НЕТ.** Участники в retail-модели — не GC-клиенты, а **записи roster'а game-сервера + UDP-пакеты `A2S_RESERVE_CHECK`**:
+1. **Принадлежность к матчу** = fake-аккаунты как **`[%x]`-токены `Q`-payload'а** (`SetReservationCookie`). Тот же payload обязан содержать **реальный account игрока** (иначе его 0x21 получит `awaiting=127,total=0`, status 4 не придёт никогда).
+2. **"Accept" fake-участника** = per-player `m_uiReservationStage`, который меняет **только входящий 0x21** с подходящим `SteamID.account` и совпавшим cookie (проверка личности — только nonzero steamid из пакета; Steam-auth/GC-сессия для этого пути **не нужны**). Нужно **два прохода**: stage 1 (для показа попапа — иначе клиент ждёт `awaiting==0` на stage 1) и stage 2 (после реального Accept). Встроенный spoof (36.F) покрывает **только stage 2** и в retail-`server.dll` выключен (`return 0`); stage 1 он не покрывает вообще.
+3. Точка внедрения без изменения retail-условий: **`ServerGC` внутри `srcds`** (уже владеет вызовом `ReserveServerForQueuedGame`, §33): (а) строит `Q`-payload из `[real, fake…]` (сейчас строит `G`), (б) шлёт 33-байтные 0x21 от имени fake-account'ов на собственный UDP-порт сервера (формат — §26, byte-exact). Никаких изменений клиента, `Accept`-условия, required-count, QueueConnect, Panorama, protobuf.
+4. **Что сервер должен знать заранее**: account реального игрока. `ServerGC` его не знает (клиент/сервер — разные процессы; account приходит в 9101 к `ClientGC`). Варианты (не реализовано, только фиксация ограничения): test-only параметр в `config.txt` сервера либо передача аккаунта существующим каналом. **Это реальное архитектурное ограничение.**
+5. Со стороны `ClientGC`, отправляющего 9107: для Accept-ветки достаточно `reservation.game_type ∈ {8,9,10,11,13}` (или отсутствия nested `reservation` + search game_type из 9101); nested `reservation.account_ids/party_ids/rankings` в клиентском хендлере для accept-логики **не используются** (только `& 0xF`; **NOT PROVEN**, что попап рисует по ним имена).
+
+### 36.H Режимы — сравнение — **CONFIRMED (client/server код) / NOT PROVEN (DZ-roster)**
+
+| | Competitive (8) | Wingman (10) | Danger Zone (13) |
+|---|---|---|---|
+| Accept-ветка клиента (stage1→popup→stage2) | да | да | да — **идентичная** машина состояний |
+| Server accounting | `CBaseServer` Q-roster, идентично | идентично | идентично (тот же `CBaseServer`) |
+| `gamemodes.txt` `maxplayers` (retail, `csgo/gamemodes.txt`) | **10** (стр.96) | **4** `scrimcomp2v2` (стр.183) | **16** `freeforall/survival` (стр.781) |
+| Team split токенов (`kNumPlayersPerSide`) | 5+5 (project446 pad 5) | 2+2 (project446 pad 2) | **не подтверждено** — project446 `sub_10094120` вообще не строит Q для 13; DZ — freeforall |
+| Required count | `Count()` ненулевых токенов Q — **не зашит в клиенте/движке**, определяется составом payload'а | то же | то же |
+
+`members/numSlots` НЕ различает режимы для найденного матча (party-настройка, 36.D). **Ошибочно** было бы заключить "три режима требуют одинакового числа fake players": `maxplayers` разные (10/4/16), но движок **не требует**, чтобы roster был равен `maxplayers` — он считает то, что в payload. "Похожее на retail" наполнение — 9 / 3 / до 15 fake (при 1 реальном), но это **выбор теста**, а не подтверждённое условие retail. Party-флаг "full" (`UpdateAggregateMembersSettings`, `mm_title_gamesettingsmgr.cpp:1197-1200`): `numSlots = 5`, для `cooperative` = 2 — только party, не матч.
+
+### 36.I Итоговая подтверждённая цепочка (реальные функции)
+
+```
+Real Player (Play)
+  → CLobbyMenuSingleton::vfn2 sub_103F6240 [client]: mmqueue=registering; MatchmakingStart(account_ids ← members/machine*/player0/xuid)
+  → GC (наш ClientGC): 9101; [опц.] 9104 matchmaking≠0,≠4 ⇒ client пишет mmqueue=searching
+  → GC/backend → сервер: ReserveServerForQueuedGame("Q<cookie>,<matchid>,<n>:[real][fake…]")   [CBaseServer::SetReservationCookie → m_arrReservationPlayers]
+  → GC: 9107 (game_type ∈ {8,10,13}) ⇒ client sub_103DC4B0: mmqueue=reserved; CServerConfirmedReservationCheckCallback(stage=1, mode=0)
+  → client → server: 0x21(stage=1, steamid=real)        ;  fake accounts → server: 0x21(stage=1, steamid=fake_i)   [UDP, harness]
+  → server sub_101BC1D0: awaiting=0 ⇒ 0x25(awaiting=0,total=N) всем roster
+  → client sub_103DF430: status 4 & stage 1 ⇒ popup_accept_match_found; RaiseReadyUp(true,0,total) [sub_1057FF90, id word_10D54BF8]
+  → Real Accept: LobbyAPI.SetLocalPlayerReady → sub_10580C20 → sub_103DF3A0: stage=2, 0x21(stage=2, steamid=real)
+  → server: awaiting = #fake со stage<2 ⇒ 0x25(awaiting=k,total=N) ⇒ client RaiseReadyUp(true, N−k, N)   (счётчик попапа — retail)
+  → fake accounts → server: 0x21(stage=2, steamid=fake_i)                                            [UDP, harness]
+  → server: awaiting=0 ⇒ 0x25(awaiting=0) всем ⇒ client sub_103DF430: stage 2 & status 4 ⇒ (см. оговорку) QueueConnect / ServerReserved
+```
+**Оговорка по последнему звену (NOT PROVEN)**: для Accept-ветки ctor получает `mode=0` (`this+132==0`), а `sub_103DF430` при `mode==0` делает `return` до формирования `QueueConnect` — то есть **финальный connect для accept-режимов, вероятно, запускается ВТОРЫМ 9107 (не-accept `game_type`, ctor `(stage 2, mode 2)`) либо через `sub_103DEA80(kv,2)`**, а не самим stage-1 callback'ом. project446 подтверждает второй вариант (второй 9107 с `game_type=0` после "all players accepted"). Точная retail-последовательность финального звена не доказана — **главный открытый вопрос перед дизайном harness** (36.J).
+
+### 36.J Нерешённое (честно)
+
+- **Финальный триггер QueueConnect в accept-режимах**: второй 9107 (`game_type=0`, ctor `(2,2)`) vs `sub_103DEA80(kv,2)` после stage 2 — по коду `mode=0` не даёт QueueConnect из `sub_103DF430`; нужен либо RE `sub_103DFBE0`/`sub_103DEA80` mode-семантики до конца, либо живой тест.
+- Какой `reason` шлёт retail-JS Accept-кнопки (нужна распаковка Panorama `code.pbin`).
+- Кто и с каким периодом периодически вызывает `sub_103F6240` (heartbeat).
+- Как retail-`server.dll` принимает 9105 (`GC2ServerReserve`): найден только `ClientJob_EMsgGCCStrike15_v2_GC2ServerReservationUpdate` (9142 — счётчики зрителей, к Accept не относится) и RTTI `CProtoBufMsg<MatchmakingServerReservationResponse>` (server→GC 9106); сам обработчик 9105 по RTTI не найден.
+- Danger Zone: как строится Q-roster (`freeforall`), team-split.
+- Смена cookie: `SetReservationCookie` пересобирает roster только при `cookie != текущий`, а `ReserveServerForQueuedGame` для `Q` отвергает reservation с другим cookie, пока сервер `IsReserved()` (source `baseserver.cpp:~4199-4215`) — важно для многоматчевого сценария (связано с §34, не чинится).
+
+### Итог раунда (одним абзацем)
+
+Источник истины participant/accept-state в retail-модели — **roster `CBaseServer::m_arrReservationPlayers` на game-сервере**, наполняемый `[%x]`-токенами `Q`-payload'а (`SetReservationCookie`), и **per-player `reservationStage`**, который меняют только входящие `A2S_RESERVE_CHECK`; клиент лишь показывает `awaiting/total` из ответов 0x25 (`RaiseReadyUp(bool,int,int)` = `sub_1057FF90`, id `word_10D54BF8`) и переводит **свой** stage 1→2 через `LobbyAPI.SetLocalPlayerReady` (`sub_103DF3A0`). Retail `server.dll::ReportGCQueuedMatchStart` — заглушка `return 0`. Минимально безопасная точка для fake participants — **`ServerGC` в `srcds`**: `Q`-payload с [real+fake] аккаунтами и UDP-0x21 от fake-account'ов (stage 1 и 2), без fake GC-клиентов и без изменения Accept/required/QueueConnect/Panorama/protobuf. Оговорка: финальный connect в accept-режимах требует уточнения (36.J).
+
+---
+
+## 37. CHECKPOINT — полная консолидация §35 + §36 (для продолжения без потери контекста)
+
+Этот раздел — **самодостаточный чекпоинт**: собирает ВСЕ подтверждённые результаты §35 и §36 (включая промежуточные находки), состояние проекта и открытые вопросы. Новых исследований при его записи не проводилось, код/сборка/деплой/Git не менялись. Детали и RVA — в §35/§36 выше; здесь — то, что нельзя потерять, плюс пункты, которые в §35/§36 были разбросаны или сформулированы кратко. Уровни: **CONFIRMED** (прямая декомпиляция/raw disasm/source), **HIGH**, **MEDIUM**, **TODO/NOT PROVEN**.
+
+### 37.0 Состояние проекта на момент чекпоинта
+
+- Ветка `experimental-native-mm`, **0 коммитов** сверх `2455dcf`; всё — рабочее дерево. Изменены: `csgo_gc/{CMakeLists.txt,config.cpp,config.h,gc_client.cpp,gc_client.h,gc_server.cpp,gc_server.h,gc_shared.h,platform.h,platform_unix.cpp,platform_windows.cpp,steam_hook.cpp}`, `examples/config.txt`, `RESEARCH_FINDINGS.md`; новые `test_mm.cpp/.h` (в DLL компилируются, **не вызываются**).
+- Реализовано и **подтверждено live-тестом (Casual, клиент + отдельный `srcds`, 192.168.1.150:27016)**: клиентский reservation bridge (§31: `HostEvent::ReserveServerForQueuedGame` → `Hk_SteamAPI_RunCallbacks` → `DispatchReserveServerForQueuedGame` → `IVEngineServer` `VEngineServer023` vtable slot 149), серверный аналог (§33: `ServerGC::ReserveServerForOurCookie()` после `k_EMsgGCServerHello`, payload `G<cookie>,<cookie>,1:`, диспатч через `Hk_SteamGameServer_RunCallbacks`), fallback `SteamGameServer014→010` (§33.8, флаг `s_steamGameServerIsV010`, `BLoggedOn` slot 8 в 011-014 vs slot 2 в 010). Первый матч Casual доходил до `srcds` и подключал клиента.
+- Известная неисправленная проблема (**§34, НЕ чинится**): `ReserveServerForOurCookie()` вызывается **один раз** за жизнь `srcds` → повторный матч даёт "Failed to connect to the match". Минимальная точка исправления (не реализована): повторный/периодический вызов из `Hk_SteamGameServer_RunCallbacks`.
+- Сборка: `build_local.bat` (ninja, MSVC x86, `x86-windows-static`); `srcds` — отдельно `cmake --build Build\build_ninja --target srcds`. Артефакты в `Build/release/` (`csgo_gc/csgo_gc.dll`, `srcds.exe`, `csgo.exe`). Runtime-игра: `C:\Program Files (x86)\Steam\steamapps\common\csgo legacy` (DLL в `csgo_gc\csgo_gc.dll`, config `csgo_gc\config.txt` — секция `matchmaking{test_server_address,test_server_port}`); лаунчер грузит `<exe_dir>\csgo_gc\csgo_gc.dll` и зовёт `InstallGC(dedicated)`.
+- RE-инфраструктура (scratchpad `...\scratchpad\re\`): `rh.py` (helper), скрипты `q36_a..x.py`, базы `.i64`: `client.dll`, `client_panorama.dll`, `engine.dll`, `p446_csgo_gc.dll` (были) + **новые** `matchmaking.dll.i64`, `server.dll.i64` (снято в §36).
+
+---
+
+### 37.1 Accept-требование по режимам — матрица (§5/§9/§35)
+
+Клиентская проверка `sub_103D7640` (client_panorama RVA `0x103D7640`, `bool(gameType)`), результат **true = Accept нужен**:
+
+| eGame | режим | Accept |
+|---|---|---|
+| 4 | ArmsRace | НЕ нужен |
+| 5 | Demolition | НЕ нужен |
+| 6 | Deathmatch | НЕ нужен |
+| **7** | **Casual** | **НЕ нужен** |
+| **8** | **Competitive** | **нужен** |
+| 9 | Cooperative | нужен |
+| **10** | **Wingman** (`scrimcomp2v2`) | **нужен** |
+| 11 | ScrimComp5v5 | нужен |
+| 12 | Skirmish | НЕ нужен |
+| **13** | **Danger Zone** (`freeforall/survival`) | **нужен** |
+
+- Тот же набор `{8,9,10,11,13}` используется в **9107-хендлере** (`sub_103DC4B0`/`sub_103F49F0`): `v10 = reservation.game_type & 0xF; v10==9||13||11||(v10-8)==0||(v10-8)==2` → accept-ветка. **Согласованность**: `sub_103D7640` и 9107-хендлер совпадают; расхождение с project446 GC-стороной (`sub_100694A0`: `{8,10,13}`, §9) — это **их** (более узкий) выбор, не расхождение самого retail-клиента (для 9/11 project446 не реализует accept-цикл; **MEDIUM**, не доказано намерение).
+- `game_type` в 9101/9107 = `(eGame & 0xF) | (eMapGroup << 8)`; live-подтверждено: `game_type=519` → `eGame=7`, `eMapGroup=2`=`mg_dust247`.
+- Gametype/gamemode строки в `QueueConnect` KV по `this+92` (`sub_103DF430`): 4→gungame/gungameprogressive, 5→gungame/gungametrbomb, 6→gungame/deathmatch, 7→classic/casual, 8→classic/competitive, 9→cooperative/cooperative, 10→classic/**scrimcomp2v2**, 11→classic/scrimcomp5v5, 12→skirmish/skirmish, 13→freeforall/**survival**, иначе unknown/unknown.
+- `maxplayers` (retail `csgo/gamemodes.txt`): casual 20, competitive **10** (стр.96), scrimcomp2v2 **4** (183), scrimcomp5v5 10, deathmatch 16, skirmish 12, survival **16** (781). **Не** являются "required count" (см. 37.4).
+
+### 37.2 Accept UI / native-мост (client_panorama.dll) — §5/§35/§36
+
+- **Попап**: `sub_10418AC0("popup_accept_match_found", 0)` и `("popup_accept_match_confirmed", 0)` вызываются из `sub_103DF430` (RVA `0x103DF430`); для live-join (accept не нужен) — `popup_accept_match_found` + строка `"@<map>"`. JS/XML (`popup_accept_match.xml/.js`, `PartyMenu.ShowMatchAcceptPopUp`) **не распакованы** (Panorama `code.pbin`) — как отдельные символы **не найдены**; нативная сторона попапа — `sub_10418AC0`. **TODO/NOT PROVEN**: что именно рисует попап (имена/аватары участников или только счётчик).
+- **`LobbyAPI.SetLocalPlayerReady(reason: string)`** (описание `"Tell matchmaking this player is ready to play a queued match (which leave peanalties)."` @ `0x10bbd940`): цепочка `sub_10583500` (`0x10583500`, V8 FunctionTemplate, параметр `reason`) → **`sub_10584F70`** (`0x10584F70`, JS-маршалинг + `sub_10512130` проверка объекта) → **`sub_10585B00`** (`0x10585B00`, пишет `this+12` ← `dword_15280F00` vtbl+516 +76/+80 в зависимости от результата) → **`sub_10580C20`** (`0x10580C20`, reason-классификатор): `reason=="deferred"` → `sub_103DF3A0(dword_15278690)`; иначе → `sub_103DEA80(0,2)`.
+- **Вывод (CONFIRMED)**: `SetLocalPlayerReady` работает **только с локальным игроком** (нет параметра account/участника). API "пометить участника B ready" в клиенте **не существует**.
+- `LobbyAPI` регистрируется `sub_1057F2D0` (`0x1057F2D0`), класс `CUiComponent_Lobby`, таблица методов `sub_1057F1E0` (21 запись); `CUiComponent_Lobby` ctor `sub_1057F440`, содержит `IMatchEventsSink` (+4; OnEvent = `sub_1057F9F0`, обрабатывает `OnMatchSessionUpdate/OnPlayerRemoved/OnPlayerUpdated/OnPlayerLeaderChanged/ScaleformComponent_GC_Hello`, шлёт Panorama-события PlayerJoined/Removed/Updated/LeaderChanged с xuid — **party-события**) и `CLobbyMenuSingleton` (+8).
+- Отсутствие client-side `required_count` / `accepted_count` — **CONFIRMED** (нет такой переменной ни в client.dll, ни client_panorama.dll, ни в обоих source-деревьях: grep `required_count|accepted_count|needed_count` — 0 совпадений; единственный близкий эквивалент — KV `members/numPlayers|numSlots`, это party).
+
+### 37.3 Reservation callback — stage/mode и Accept → 0x21 stage=2 (§36.E)
+
+- `CServerConfirmedReservationCheckCallback` ctor **`sub_103DF1C0(this, kv, a3=stage, a4=mode)`** (client_panorama `0x103DF1C0`; client.dll-аналог `sub_103F7980`): `this+140 = a3` (**stage**), `this+132 = a4` (**mode**), `this+92` = game_type, `this+128` = handle сетевого запроса (out-параметр), лог `"Server reservation check %p heartbeating"`, регистрация в **`INETSUPPORT_003` vtbl+60** с `a3` как **reservationStage** (5-й аргумент).
+- **Выбор stage/mode в 9107-хендлере** (`sub_103DC4B0` client_panorama / `sub_103F49F0` client.dll): `v10 = (*(nested reservation +32)) & 0xF`; **nested `reservation` отсутствует** (`*(v31+32)==0`) → fallback на глобальный search-state `dword_10D9A180+32` (client_panorama) — т.е. наш 9107 без `reservation` использует `game_type` исходного поиска. accept-режим (`{8,9,10,11,13}`) → `sub_103DF1C0(kv, **1**, **0**)` (stage 1, mode 0); иначе → `sub_103DF1C0(kv, **2**, **2**)` (stage 2, mode 2, direct connect; Casual). Reconnect-ветка `sub_103DDCB0`/`sub_103F6240` → `sub_103DF1C0(kv, 2, 1)`.
+- **`sub_103DF3A0`** (client_panorama `0x103DF3A0`, 132 байта) — вызывается из `sub_10580C20` при `reason=="deferred"` — **единственное место, меняющее stage**: `if (cb.stage(+140) >= 2) return 0; cb.+35dw(stage)=2; if (cb.+128 handle) handle->vfunc+20 (отменить прежний запрос); INETSUPPORT_003 vtbl+60(this+24, +40, +44, stage=2, cb, cb+128)` — **перерегистрация сетевого запроса резервации со stage=2**. Следствие: **Accept → новые `A2S_RESERVE_CHECK (0x21)` с `reservationStage=2` и SteamID клиента** (**CONFIRMED** код; **HIGH**, что именно эта ветка = кнопка Accept; **MEDIUM**: какой `reason` передаёт retail-JS — не распаковано; ветка `else` → `sub_103DEA80(0,2)`).
+- **`sub_103DF430`** (net-callback, `a2` = `CServerMsg_CheckReservation*`, условие `a2 == this+128`; `vfunc+4(a2)` = status, `4` = "все подтвердили"; `vfunc+8(a2)` = 64-бит, из которых `byte0`=awaiting, `byte1`=total — **HIGH**, порядок байт не сверен побайтно):
+  - status "ещё нет" и `stage==2` → `RaiseReadyUp(true, accepted, total)`, `accepted = clamp(byte1 − byte0, 0, 64)`, `total = byte1` (**счётчик попапа "x/N принято"**);
+  - status 4 и `stage==1` → `DevMsg("Server reservation check %p ready-up!")`, `popup_accept_match_found`, `RaiseReadyUp(false,0,total)` (если `!byte_1519DDEE`) и `RaiseReadyUp(true,0,total)`;
+  - status 4 и `stage!=1`: `if (!this+132) return;` (mode 0 — выход **без QueueConnect**), иначе `"queue connect"`: `popup_accept_match_confirmed` (accept-режим) либо `popup_accept_match_found`+`@map`, затем **KV `QueueConnect`** (`adronline`, `reservationid` (64-бит `this+40/44`), `helper_pSession`, `helper_time` (+2000 мс при live-join), `auto_close_session` (0 если `members/numMachines>1`), `map`, `gametype`, `gamemode`) → `sub_103DEA80(kv, mode)`;
+  - иначе `"will not queue connect"` (fallback-ветка, §20/§21).
+
+### 37.4 ReadyUpForMatch / ServerReserved — native→Panorama (§36.B/C)
+
+- **`sub_103D8AF0`** (client_panorama `0x103D8AF0`, 90 байт; client.dll `sub_103F0C70`): **ленивый singleton-getter `CLobbyMenuSingleton`**; глобал `dword_15278634` (объект `CUiComponent_Lobby`, 12432 байт, аллокация через `g_pMemAlloc`, ctor `sub_1057F440`); возвращает `obj+8`, **только если `byte_1519DDEE`** (Panorama-лобби включено). 5 caller'ов: `sub_103D9900` (9104, `0x103d9d5b`) ×1 и `sub_103DF430` ×4 (`0x103df4a0`, `0x103df581`, `0x103dfb9e`, `0x103dfba7`). Слот 0 подобъекта (vtable `CUiComponent_Lobby` `0x10bbdf60`) = **`sub_1057FF90`**.
+- **`sub_1057FF90(this, bool a2, int a3, int a4)`** (`0x1057FF90`, 100 байт) = **`RaiseReadyUp(bool,int,int)`**: `this+16 = a2 ? Plat_MSTime() : 0`; при наличии Panorama-слушателя события `word_10D54BF8` (`dword_15280F00` vtbl+216) диспатчит `panorama::CUIEvent3<bool,int,int>` (конструктор `sub_1057F030`, vtbl+208).
+- **`sub_10581640`** (`0x10581640`) = **регистрация (определение схемы)** события `"PanoramaComponent_Lobby_ReadyUpForMatch"`, id `word_10D54BF8`, дескриптор `v5=3`; вызывается только через таблицу трамплинов (`sub_100502C0`, data `0x10a98d30`). **Совпадение `word_10D54BF8` в регистрации и raiser'е ⇒ CONFIRMED**: `sub_10581640` — определение именно того события, которое поднимает `sub_1057FF90`.
+- **Вызовы raiser'а**: `sub_103DF430` (см. 37.3) и 9104-хендлер при `matchmaking == 3` → `RaiseReadyUp(false,0,0)` (**сброс**, не показ — **исправляет §35.3 п.2**).
+- **`ServerReserved`**: `sub_103E1390` (`0x103E1390`) регистрирует `"ServerReserved"`; **`sub_103D7750`** (`0x103D7750`) строит **`panorama::CUIEvent2<char const*,double>`** (`ServerReserved(const char* map, double time)`) для id **`word_10D501B4`**; raiser — **`sub_103DEA80(kv, mode)`** (`0x103DEA80`): при `mode==2` и наличии отложенного QueueConnect-KV (`dword_15278694`) берёт `map`, `sub_10496C10(map, skirmishmode)` и диспатчит `word_10D501B4`. **HIGH** (id совпадают, raiser найден; JS-слушатель не распакован). Связь с reservation state: событие поднимается из `sub_103DEA80`, вызываемой (а) `sub_103DF430` в конце ветки QueueConnect (`sub_103DEA80(kv, v29)`), (б) `sub_10580C20` (Accept, `(0,2)`), (в) `sub_103DEC40`/`dword_15278694`-механика отложенного connect — т.е. `ServerReserved` = "сервер зарезервирован, можно коннектиться", завязано на `dword_15278694` (KV `QueueConnect`) и `dword_15278690` (активный reservation-check callback).
+- Значения `matchmaking` (proto field 1, 9104): `0`→очистка (Delete mmqueue, `cfg/qmmconnect.dt`), `3`→`RaiseReadyUp(false,0,0)`+`searching`, `4`→`connect`, прочие≠0→`searching`. Смысловые имена enum — **не восстановлены**.
+
+### 37.5 `game/mmqueue` — writer и последовательность (§36.A)
+
+- **`sub_103F6240`** (client.dll `0x103F6240`, 2956 байт; client_panorama-аналог `sub_103DDCB0`) = **`CLobbyMenuSingleton::vfn2`** (vtable client.dll `0x10bccbf0` slot2; client_panorama `0x10b6a410` slot2; slot3 = `sub_103F6DD0`/`sub_103DE630` — cancel/`MatchmakingStop`). Вызывается только через vtable.
+  - **отправляет `MatchmakingStart`** (vftable `CProtoBufMsg<CMsgGCCStrike15_v2_MatchmakingStart>` xref `0x103f6d88`);
+  - **пишет `registering`**, если `game/mmqueue` был пуст (`test al,al; cmovz` @ `0x103f6ab6-0x103f6ac0`, шаблон `"Update { game { mmqueue registering } }"` @ `0x10bcc5c0`), иначе **`heartbeating`** (`0x10bcc574`); обновляет `this[1]=Plat_MSTime()` (метод перевызывается периодически — **HIGH**, вызывающий таймер/период не найдены);
+  - **`account_ids`** ← цикл по KV **`members/machine%d/player0/xuid`** (`sub_1094F4C0` GetUint64): сначала локальный SteamID (`dword_14DEDADC` vtbl+8), затем остальные machine-записи ≠ себя ⇒ **`members/` (party) → `MatchmakingStart.account_ids`**;
+  - `game_type` ← `game/mapgroupname` (`"reconnect"`-ветка → `sub_103F1240`), `<<8`-композиция mapgroup; `client_version` ← `INETSUPPORT_003` vtbl+36 (13805); `prime_only` ← `game/prime`; flags ← `game/gamemodeflags`; турнирные `tm_event_id/tm_event_stage_id/tm_team_id_ct/tm_team_id_t` в KV `Game::EnteringQueue`; также создаёт `dword_152EACBC` (384-байт объект статус-UI) и `game/map` (`Update/game/map`).
+- **Полная последовательность**: `#empty#` → **`registering`** (Play, `sub_103F6240`) → **`heartbeating`** (повторные 9101) → **`searching`** (9104 при `matchmaking∉{0,4}`, `sub_103F1C00`/`sub_103D9900`, raw `0x103f1ffd cmp [ecx+0A8h],4; cmovnz`) → **`reserved`** (9107, `sub_103F49F0`/`sub_103DC4B0`, также `sub_103F7C00`/`sub_103F6240`) → **`connect`** (9104 при `matchmaking==4`, и `sub_103F7C00` при status 4). Шаблоны `Update { system { lock … } game { mmqueue … } }` — только в **client.dll** (literals @ `0x10bcae78`(Delete), `0x10bcaee8`(searching), `0x10bcaf28`(connect), `0x10bcc020`(reserved), `0x10bcc574`(heartbeating), `0x10bcc5c0`(registering), `0x10bcc678`(Delete/game/mmqueuestop)).
+- **Gate** 9104- и 9107-хендлеров: `game/mmqueue` **уже непуст**, иначе клиент сам шлёт `MatchmakingStop`. Поэтому наш Casual-тест без 9104 проходил: `registering` выставлен `sub_103F6240` на клике Play. **Связь 9104 → `searching`**: 9104 — writer `searching`/`connect` (не initial); §35.3 п.1 корректно: 9104 сам не может быть initial-setter'ом (gate), initial = `registering`.
+
+### 37.6 `members/*` — party-KV (§35.7 + §36.D)
+
+- KV-пути (client_panorama/client.dll — только **readers**): `members/numSlots`, `members/numPlayers`, `members/numMachines`, `members/numSpectators`, `numTSlotsFree/numCTSlotsFree`, `members/timeout`, `members/machine%d/player0/xuid`, `members/machine0/player0/game/offjoin`, `members:numSlots`.
+- **Writers (CONFIRMED, matchmaking.dll)**: `sub_10024F70` (`0x10024F70`, `CMatchSessionOnlineHost::InitializeGameSettings`, caller `sub_10022720`) и `sub_1001BEA0` (`0x1001BEA0`, `CMatchSessionOfflineCustom::InitializeGameSettings`, caller `sub_1001B0A0`): `members{numMachines=1,numPlayers=1,numSlots=MAX(numSlotsCreated,numPlayers),machine0{id,flags,numPlayers,dlcmask,tuver,ping,player0{xuid,name}}}` из **локального player manager**; 1:1 с source `mm_session_online_host.cpp:1658-1700`, `mm_session_offline_custom.cpp:430`. Дальше — `mm_title_gamesettingsmgr.cpp:841-860` (`numSlots` по умолчанию 10; = `GetMaxPlayersForTypeAndMode` только для official-search `searchempty`&&`!game/hosted`), `:321` (online lobby 10 слотов), `sys_session.cpp:956` (join машины), чужие члены — Steam Lobby (`SysSession`).
+- `sub_105807B0` (client_panorama vtable slot1 `CLobbyMenuSingleton`): `Members/numSlots==1` ⇒ "я хост/соло".
+- **Вывод**: `members/` = **локальное party/session KV (до очереди)**, не состав найденного матча и не приходит из GC. Мост `reservation.account_ids (9107)` → `members/` — **не найден** (9107-хендлер использует только `&0xF`; полевой копировщик `sub_103DFBE0` не декомпилирован — **TODO/MEDIUM**).
+
+### 37.7 GC-протокол — участники (§35.6, схема существующая, менять не нужно)
+
+`CMsgGCCStrike15_v2_MatchmakingGC2ClientReserve` (9107): `serverid(1) direct_udp_ip(2) direct_udp_port(3) reservationid(4) reservation(5, nested MatchmakingGC2ServerReserve) map(6) server_address(7)`. Вложенное **`CMsgGCCStrike15_v2_MatchmakingGC2ServerReserve`** (то же, что 9105 на сервер): `account_ids(1, repeated uint32)`, `game_type(2)`, `match_id(3)`, `server_version(4)`, `flags(18)`, `rankings(5, repeated PlayerRankingInfo)`, `encryption_key(6)`, `encryption_key_pub(7)`, `party_ids(8, repeated uint32)`, `whitelist(9)`, `tv_master_steamid(10)`, `tournament_event(11)`, `tournament_teams(12)`, **`tournament_casters_account_ids(13)`** (↔ `{%x}` в Q-payload), `tv_relay_steamid(14)`, `pre_match_data(15)`, `rtime32_event_start(16)`, `tv_control(17)`. `CMsgGCCStrike15_v2_MatchmakingGC2ClientUpdate` (9104): `matchmaking(1,int32)`, `waiting_account_id_sessions(2)`, `error(3)`, `ongoingmatch_account_id_sessions(6)`, `global_stats(7)`, `failping/penalty/failready/vacbanned/…(8..18)` — **очередь-статус per-player**, не состав матча; `waiting_account_id_sessions` печатается как `"Matchmaking waiting for %d accounts (%X, ...)"` (**MEDIUM** трактовка).
+- В **клиентском** 9107-хендлере `account_ids/party_ids/rankings` для Accept-логики **не используются** (только `game_type & 0xF`); что попап рисует по ним — **NOT PROVEN**.
+
+### 37.8 Где реально считается accepted/required — game-сервер (§36.F) — **CONFIRMED**
+
+- **`CBaseServer::ReplyReservationCheckRequest`** = engine.dll **`sub_101BC1D0`** (`0x101BC1D0`, 2189 байт; `"Reservation from client %u: %u"` @ `0x101bc533`, `"Match start status: %u/%u"` @ `0x101bc69e`, awaiting-дефолт `127`), source `engine/baseserver.cpp:2165-2308`.
+- Roster **`m_arrReservationPlayers`** (`QueueMatchPlayer_t{m_uiAccountID, m_adr, m_uiToken, m_uiReservationStage}`) строит **`SetReservationCookie`** (`baseserver.cpp:4217-4296`) **только если cookie ≠ текущего** и `sv_mmqueue_reservation` начинается `Q<cookie_hex>,`: по каждому токену `[%x]` с **ненулевым** account → игрок (stage 0, token 0); `m_numGameSlots = Count()`; для `G` roster очищается, slots=0.
+- **`CSGameRules::m_mapQueuedMatchmakingPlayersData`** (`cs_gamerules.cpp:4631-4653`, `cs_gamerules.h:1226-1235,1326-1334`; включён при `sv_mmqueue_reservation[0]=='Q'`, `cs_gamerules.cpp:18604`): игровая логика (game DLL) строит **свой** roster `CQMMPlayerData_t{m_uiPlayerAccountId, m_iDraftIndex}` из тех же `[%x]`; **`m_iDraftIndex` = позиция токена, считая `[0]`**; команда = `draftIndex < kNumPlayersPerSide` (`cs_gamerules.cpp:18383`), отсюда padding `[0]` у project446 (§28.5: cap 5 Competitive / 2 Wingman). Используется 30+ мест в `cs_player.cpp` (per-round стата по account_id). Dead-code блок `if(0 && ...)` `cs_bot_manager.cpp:1230-1267` — "бот подменяет ещё не подключившегося зарезервированного игрока" (`SetHumanPlayerAccountID`, имя `"BOT %u"`) — **навсегда отключён**, работает ПОСЛЕ формирования матча, не про Accept.
+- **Обработка 0x21**: условия `cookie==m_nReservationCookie`, `stage!=0`, `steamid!=0`, `sv_mmqueue_reservation[0]=='Q'`; игрок ищется по `CSteamID(steamid).GetAccountID()`; если найден → сохраняются `adr`,`token`, `stage=stage`; **`awaiting = #(stage < запрошенного)`, `total = Count()`**; если аккаунта нет в roster → `awaiting=127,total=0` (status 4 не придёт). Для `G`: `awaiting=0` всегда (**поэтому Casual/`G` работает**). Ответ `0x25`: `header,0x25,hostVersion,token,stage,awaiting(byte),total(byte)`; **при `awaiting==0` сервер рассылает 0x25 ВСЕМ игрокам roster'а** на сохранённые `adr/token`.
+- **`serverGameDLL->ReportGCQueuedMatchStart(minStage, confirmedAccounts[], count)`** — engine.dll вызывает `(*(dword_139097E8 vtbl + 188))` (slot **47**). Встроенный **spoof auto-accept** `bSpoofForcefulConnect = (awaiting && bReady && stage==2)`. **В retail `server.dll` 2021**: `CServerGameDLL` vtable `0x1085cb10`, slot 47 = **`sub_10145510` (`0x10145510`, 5 байт): `char __stdcall(int,int,int){return 0;}`** ⇒ `bReady==false`, spoof **не срабатывает**, GC о подтверждениях не уведомляется (**CONFIRMED**). Spoof покрывает **только stage 2**; stage 1 (показ попапа) он не покрывает.
+- Клиентская интерпретация ответов — 37.3 (`RaiseReadyUp(true, total−awaiting, total)`).
+- Retail `server.dll` содержит job `ClientJob_EMsgGCCStrike15_v2_GC2ServerReservationUpdate` (9142, **только счётчики зрителей**, не Accept) и `CProtoBufMsg<MatchmakingServerReservationResponse>` (9106); обработчик 9105 по RTTI **не найден** (TODO).
+- **Важное ограничение для многоматчевости (связано с §34)**: `ReserveServerForQueuedGame` для нового `Q` с другим cookie отвергается, пока сервер `IsReserved()` (source ~`baseserver.cpp:4199-4215`); roster пересобирается только при смене cookie; повторный вызов с тем же cookie ничего не пересобирает и не логирует `-> Reservation cookie` (виден в client console.log: лог движка был только у первой попытки).
+
+### 37.9 project446 — модель backend-side Accept (§6/§28/§36.F, повторно проверено)
+
+- **`sub_100789A0`** (`0x100789A0`, 1426 байт, 9102-handler / Accept state machine по `this+1568`): для accept-режимов `"Matchmaking: Player ACCEPTED, waiting for all players"` → **форвардит сигнал наружу** `sub_100BFC20(9102,…)` (20+ call sites) и остаётся в waiting; **подсчёта "все приняли" в DLL нет — на их backend** (**CONFIRMED**). Accept-инжектор `sub_100787F0`: `"Accept hook: injecting MatchmakingStop(abandon=0) — legacy client omits 9102 on Accept"` ⇒ retail-клиент **не шлёт 9102 при Accept** (Accept идёт как 0x21 stage 2 на сервер, 37.3). `sub_100694A0` (`NeedsAccept`): `{8,10,13}`.
+- **`sub_1006EAD0`** (`0x1006EAD0`, reserve-handler): `"[GC] Match found! server=… game_type=…"` (ready-up reserve) → state 2; **второй 9107 с `game_type==0`** → `"[GC] Connect reserve received (all players accepted)"` → state 3 → `sub_100774E0(…)` (proceed). Также `"Duplicate reserve resId=%llu ignored (ready-up active)"`, `"Delayed ready-up reserve ignored after local search cancel"`, `"Ignoring spurious matchmaking=0 during active ready-up/connect"`.
+- **`sub_100EA660`** — нативно выставляет счётчик попапа `"[ReadyUp] popup counter set to %d/%d"` (`min(x,total)/total`), через RVA-параметры в `client.dll` (`GC_CLIENT_READYUP_ACTIVE_RVA`, `GC_CLIENT_READYUP_COMP_RVA`), т.е. вызывает эквивалент `RaiseReadyUp`; `sub_100F5D00` — обработка ReadyUp counter/cancel событий backend'а (`"[ReadyUp] ignored malformed counter event (%zu bytes)"` — событие 12 байт, `"ignored stale status for reservation %llu"`, `"cancelled native reservation check %p (kind=%u stage=%u)"`, `"native connect armed (check=%p kind=%u stage=%u)"` — `kind`≙`this+132`(mode), `stage`≙`this+140`). Хук `sub_100BADE0` ставит vtable-хук на `ReportGCQueuedMatchStart` (slot 47 default, env `GC_VTBL_REPORT_MATCH_START`), т.к. в retail это `return 0`-заглушка.
+- Согласуется с клиентским 9107-хендлером: 9107 с не-accept `game_type` (например 0) создаёт callback `(stage 2, mode 2)` = direct connect.
+
+### 37.10 Режимы Competitive / Wingman / Danger Zone (§35.10/§36.H) — сходства и различия
+
+- **Сходство (CONFIRMED)**: клиентская Accept-машина состояний одна (stage 1 → popup → Accept → stage 2 → connect); серверный accounting одинаков (`CBaseServer`, Q-roster); `sub_103D7640`/9107-хендлер не различают 8/10/13 по счёту.
+- **Различия**: `maxplayers` 10/4/16; team-cap padding у project446 5/2 (`sub_10094120`, только 8 и 10; для 13 Q **не строится** — DZ NOT PROVEN); `gamemode` строки в QueueConnect (`competitive`/`scrimcomp2v2`/`survival`); DZ — `freeforall`, team-split не подтверждён. **Required count не зашит** ни в клиенте, ни в движке — это `Count()` ненулевых токенов Q. **Ошибочный вывод "все три режима требуют одинакового числа fake players" не подтверждён и не делается**; "похожие на retail" 9/3/до 15 fake (при 1 real) — выбор теста, не условие retail.
+
+### 37.11 Fake GC clients — гипотеза и опровержение; test-only fake participants (§35.12/§36.G)
+
+- **Исходная гипотеза (задание §36 п.9)**: fake players требуют отдельных виртуальных GC clients/соединений. **Опровергнуто (CONFIRMED по коду/source)**: участие в матче определяется **(а) токеном `[account]` в Q-payload'е сервера** и **(б) UDP-пакетами `A2S_RESERVE_CHECK` с этим account в SteamID** (сервер проверяет лишь ненулевой steamid, cookie, stage; Steam-auth/GC-сессия в этом пути не нужны); GC-уровень (наш `ClientGC`) — один, он сам является "backend'ом". **Отдельные GC connections для fake players не нужны.**
+- **Test-only fake participant concept (архитектура, НЕ реализовано)**: `ServerGC` (в `srcds`, уже владеет `ReserveServerForQueuedGame`, §33): (1) строит **`Q<cookie>,<matchid>,<n>:[real][fake…]`** (сейчас `G`), (2) от имени fake account'ов шлёт на свой UDP-порт 33-байтные 0x21 (формат §26): **stage 1** (чтобы `awaiting` на stage 1 стал 0 → клиент покажет попап) и **stage 2** (после реального Accept). Не трогаем: Accept-матрицу, required-count, Panorama, protobuf, QueueConnect, `SetLocalPlayerReady`. Ограничение: **`ServerGC` должен знать account реального игрока** (иначе его 0x21 → `awaiting=127`); `ClientGC`/`ServerGC` — разные процессы; вариант — test-only параметр в server `config.txt`. Со стороны `ClientGC` для accept-ветки достаточно `reservation.game_type∈{8,9,10,11,13}` (или отсутствие nested `reservation` + search game_type).
+- **Не** годятся: `required_count=1`, ручная подстановка `accepted_count`, вызов `OnAccept`/`QueueConnect` напрямую, отключение попапа, ручной stage-write в `m_arrReservationPlayers` (memory patch).
+
+### 37.12 Итоговая подтверждённая цепочка (реальные функции)
+
+```
+Play → CLobbyMenuSingleton::vfn2 sub_103F6240: mmqueue=registering; 9101(account_ids ← members/machine*/player0/xuid)
+ → GC(ClientGC): [9104 matchmaking≠0,4 ⇒ mmqueue=searching (sub_103F1C00)]
+ → сервер: ReserveServerForQueuedGame("Q<cookie>,<id>,<n>:[real][fake…]") ⇒ SetReservationCookie ⇒ m_arrReservationPlayers
+ → GC: 9107 (game_type∈{8,9,10,11,13}) ⇒ sub_103DC4B0: mmqueue=reserved; callback sub_103DF1C0(stage=1,mode=0)
+ → client 0x21(stage1) + fakes 0x21(stage1) ⇒ server sub_101BC1D0: awaiting=0 ⇒ 0x25 всем
+ → sub_103DF430: status4&stage1 ⇒ popup_accept_match_found; RaiseReadyUp(true,0,total) [sub_1057FF90, word_10D54BF8]
+ → Accept: LobbyAPI.SetLocalPlayerReady → sub_10580C20 → sub_103DF3A0: stage=2; INETSUPPORT_003 vtbl+60 ⇒ 0x21(stage2, real)
+ → server: awaiting=#fake stage<2 ⇒ 0x25(awaiting,total) ⇒ RaiseReadyUp(true,total−awaiting,total)   [счётчик попапа]
+ → fakes 0x21(stage2) ⇒ awaiting=0 ⇒ 0x25 всем ⇒ sub_103DF430 stage2&status4 ⇒ QueueConnect KV / ServerReserved (sub_103DEA80, word_10D501B4)
+```
+**Оговорка (NOT PROVEN, главный открытый вопрос перед дизайном harness)**: в accept-ветке ctor даёт `mode=0`, а `sub_103DF430` при `this+132==0` возвращается до формирования QueueConnect. Финальный connect, вероятно, запускается **вторым 9107** (не-accept `game_type`, ctor `(2,2)`) — так делает project446 ("Connect reserve … all players accepted") — либо `sub_103DEA80(kv,2)`; retail-последовательность точно не доказана (нужен RE `sub_103DFBE0`/`sub_103DEA80` или live-тест).
+
+### 37.13 Unresolved (сводно §35 + §36)
+
+1. Финальный триггер QueueConnect в accept-режимах (второй 9107 vs `sub_103DEA80(kv,2)`), см. 37.12.
+2. Какой `reason` шлёт retail-JS Accept-кнопки (`"deferred"`?), `popup_accept_match.js/.xml`, `PartyMenu.ShowMatchAcceptPopUp` — не распакованы.
+3. Что попап показывает (имена из `reservation.account_ids`? только счётчик?).
+4. Кто и с каким периодом вызывает `sub_103F6240` (heartbeat 9101).
+5. Полное enum-значение `matchmaking` (кроме 0,3,4).
+6. Идентичность порядка байт `awaiting/total` в `a2->vfunc+8()` (HIGH, не побайтно).
+7. `sub_103DFBE0` (полевой копировщик 9107) — копирует ли `reservation.account_ids` куда-либо.
+8. Кто ПИШЕТ `members/` при входе чужих участников (Steam Lobby / `SysSession`) — на уровне binary не разбирался.
+9. Danger Zone: как строится Q-roster, team-split; project446 для 13 Q не строит.
+10. Обработчик 9105 в retail `server.dll` (RTTI не найден); что делает retail `server.dll` при `ReserveServerForQueuedGame` помимо engine-части.
+11. Назначение `cfg/qmmconnect.dt` (пишется/читается 9104-хендлером при `matchmaking==0`).
+12. Смена cookie между матчами / `Unreserve` (§34) — не чинится в этом цикле.
+13. `sub_103D7640` vs project446 `{8,10,13}` — смысл расхождения (MEDIUM: их выбор).
+
+### 37.14 Ограничения, действовавшие в §35/§36
+
+READ-ONLY; без изменения кода/сборки/деплоя/Git; без protobuf/Panorama/QueueConnect-изменений; без обхода Accept/required-count; без исправления reservation (§34). Резервный следующий шаг (только после явного решения пользователя): закрыть п.1 из 37.13 (RE или live-тест), затем — дизайн test-only harness в `ServerGC` (Q-payload + UDP 0x21).
+
+### 37.15 Исправления к §35 (явный список; старый текст §35 не удалялся)
+
+| # | Что утверждалось в §35 | Исправление (источник — §36 / 37.x) | Уровень |
+|---|---|---|---|
+| 1 | §35.3 п.2: 9104 при `matchmaking==3` **показывает ReadyUp** | **Ошибочно.** 9104-хендлер при `matchmaking==3` вызывает `RaiseReadyUp(false,0,0)` (`sub_1057FF90`, id `word_10D54BF8`) — т.е. **закрывает/сбрасывает** ready-up и переводит состояние дальше (`searching`). Показ попапа делает `sub_103DF430` (status 4 + stage 1). См. 37.4. | CONFIRMED |
+| 2 | §35.1 (уточнение): accepted/required учёт в backend/клиенте | **Учёт — на game-сервере** (`CBaseServer::ReplyReservationCheckRequest`, engine `sub_101BC1D0`, `m_arrReservationPlayers`, per-player `m_uiReservationStage`); клиент лишь отображает `awaiting/total` из 0x25. Client-side `required_count`/`accepted_count` **не существует** (CONFIRMED, 37.2). project446 форвардит Accept на свой backend (37.9), retail — нет. | CONFIRMED |
+| 3 | Гипотеза: fake players = отдельные GC clients | **Опровергнута** (37.11): fake participant = токен `[account]` в Q-roster + UDP `0x21` stage 1/2 с этим account в SteamID. Отдельные GC-соединения не нужны. | CONFIRMED |
+| 4 | Возможное смешение `members/numSlots` с составом матча | **Не смешивать.** `members/*` (writers `matchmaking.dll` `sub_10024F70`/`sub_1001BEA0`, `InitializeGameSettings`) = локальный party/player-manager состав **до** очереди. Состав найденного матча = Q-roster на сервере. Writer, который переносил бы `reservation.account_ids` в `members/`, **не найден** (`sub_103DFBE0` не декомпилирован). См. 37.6. | CONFIRMED (writers) / TODO (мост) |
+| 5 | `maxplayers` (10/4/16) как ориентир roster size | `maxplayers` **не** равен размеру reservation roster; required count = `Count()` ненулевых токенов Q. Для Danger Zone Q-roster в project446 не подтверждён (37.10). | CONFIRMED / UNRESOLVED (DZ) |
+
+### 37.16 Быстрый чеклист «что сохранено» (для сверки будущим Claude)
+
+- §35: матрица 8/9/10/11/13 vs 4/5/6/7/12 → 37.1; `popup_accept_match*`, `PartyMenu.ShowMatchAcceptPopUp`, `LobbyAPI.SetLocalPlayerReady`, `sub_10583500→sub_10584F70→sub_10585B00→sub_10580C20`, local-player-only, no client counters → 37.2; `MatchmakingGC2ServerReserve` (`account_ids/party_ids/rankings/tournament_casters_account_ids`) → 37.7; `m_mapQueuedMatchmakingPlayersData` → 37.8; project446 `sub_100789A0` + backend-side forwarding → 37.9; Comp/Wingman/DZ → 37.10; fake GC clients гипотеза/опровержение, test-only fake participant → 37.11; unresolved → 37.13.
+- §36: `game/mmqueue` + `sub_103F6240` (`registering`/`heartbeating`/`account_ids` ← `members/machine*/player0/xuid`/последовательность/9104→`searching`) → 37.5; `sub_103D8AF0` + slot0 `sub_1057FF90`=`RaiseReadyUp(bool,int,int)` → 37.4; `sub_10581640` + `word_10D54BF8` CONFIRMED → 37.4; `sub_103DF3A0` stage=2, `INETSUPPORT_003`, Accept→0x21 stage=2 → 37.3; аргументы ReadyUp ← reservation-check / 0x25 / `awaiting,total` → 37.3, 37.8; `sub_103D7750` `ServerReserved(const char*,double)` → 37.4; 9107 `game_type` → выбор stage/mode → 37.3; `CBaseServer::ReplyReservationCheckRequest` `0x101BC1D0`, `m_arrReservationPlayers`, stage, `[%x]`-токены, zero skip, awaiting/total → 37.8; `ReportGCQueuedMatchStart` server.dll slot 47 `0x10145510` = `return 0` → 37.8; fake players как roster+0x21 → 37.11/37.12; `members/numSlots` writers → 37.6; исправление §35 → 37.15.
+
+### 37.17 CURRENT NEXT STEPS
+
+Только подтверждённые открытые вопросы (детали — 37.13):
+
+1. **Финальный Accept → QueueConnect path.** В accept-режимах stage-1 callback создаётся с `mode=0`, `sub_103DF430` при `this+132==0` выходит до QueueConnect. Что именно запускает connect после stage 2: второй 9107 с не-accept `game_type` (как у project446) или `sub_103DEA80(kv,2)` — **не доказано**. Требуется RE `sub_103DFBE0`/`sub_103DEA80` или live-тест.
+2. **Как сервер идентифицирует real player при `0x21`.** Известно (CONFIRMED): сервер берёт `CSteamID(steamid).GetAccountID()` из пакета и ищет в `m_arrReservationPlayers`; если аккаунта нет в roster — `awaiting=127,total=0`. Неизвестно: откуда `ServerGC` (отдельный процесс `srcds`) получит account реального игрока для Q-payload (config-параметр / другой канал).
+3. **Как именно реализовать fake-player stage=2.** Концепт есть (37.11): UDP `0x21` stage 2 от fake-аккаунтов после реального Accept; но как `ServerGC` узнаёт момент реального Accept (stage 2 от real виден серверу через `m_uiReservationStage`), в каком потоке и как формировать пакеты (формат §26) — не спроектировано.
+4. **Danger Zone Q-roster.** Как строится Q для eGame 13 (размер, team-split, `[0]`-padding) — не подтверждено; project446 для 13 Q не строит.
+5. **Cookie lifecycle / повторная reservation** (§34) — **отложено до server/backend этапа**; сейчас не чинится.
+
+**НЕ начинать реализацию fake players до закрытия пунктов 1–4** (п.5 отложен отдельно). Никаких изменений кода/сборки/деплоя/Git в рамках чекпоинта не производилось; Git ведёт пользователь.
+
+---
+
+## 38. Accept → QueueConnect — закрытие участка `???` между `0x25 awaiting=0` и `connect` (read-only статический RE)
+
+**Режим**: ТОЛЬКО чтение. Код/`.cpp`/`.h`/CMake/config/backend/Panorama НЕ менялись, сборка/деплой/Git не выполнялись, runtime-проверка не понадобилась (всё доказано статикой + читаемым JS из `csgo\panorama\code.pbin`). Источники: IDA-базы `client.dll`, `client_panorama.dll`, `engine.dll`, `matchmaking.dll`, `p446_csgo_gc.dll`; JS-ресурсы retail `code.pbin`; source-деревья `ida_deobfuscated_grok` (для `matchmaking/*`, `engine/cdll_engine_int.cpp`). Скрипты/дампы: scratchpad `...\re\q38_a..au.py`, `q38_*_out.txt`, `pb_accept_js*.txt`. Уровни: **CONFIRMED** (прямая декомпиляция/raw disasm/RTTI/читаемый JS), **HIGH**, **MEDIUM/HYPOTHESIS**, **UNRESOLVED**.
+
+### 38.0 Какой клиентский DLL реально живой — важная оговорка к §5/§35–§37
+
+- `engine.dll` жёстко грузит **`bin\client.dll`** (строка `'bin\\client.dll'` @ `0x10491790`, xref `0x101a8392`; строки `client_panorama` в engine **нет**). Значит **живой клиент = `client.dll`** (в нём Panorama-код `CUiComponent_Lobby` присутствует — `SetLocalPlayerReady`, `GetConfirmedMatchPlayerCount`, `ReadyUpForMatch` и т.д.). `client_panorama.dll` — соседний билд с **тем же кодом на других RVA** (подтверждено сопоставлением: `sub_103F7C00`≡`sub_103DF430`, `sub_103F49F0`≡`sub_103DC4B0`, `sub_105C3D90`≡`sub_10580C20`, `sub_103F7B60`≡`sub_103DF3A0`, `sub_103F7240`≡`sub_103DEA80`, `sub_103F7350`≡`sub_103DEB90`; структура decompile идентична). В §5/§35–§37 RVA даны в основном по `client_panorama.dll` — они **логически верны, но для хуков/патчей живого клиента нужны RVA `client.dll` (таблица 38.14)**. Совпадает с project446 (патчит именно `client.dll`).
+- **Panorama JS доступен как текст**: `csgo\panorama\code.pbin` (заголовок `PAN\x02`, внутри zip-подобные записи `PK…panorama\scripts\…`) содержит несжатые `.js` (проверено: `popup_accept_match.js` @ ≈`2532500-2546100`, `PartyMenu`/`ServerReserved` @ `1826716`, `LoadingScreen`/`QueueConnectToServer` @ `1267646`). Это закрывает прежнее «JS не распакован» (§35.2, §37.2, §37.13 п.2-3): достаточно читать байты `code.pbin` (скрипт `re\pb.py`, `pb2.py`).
+
+### 38.1 Короткий ответ — что находится в `???`
+
+```
+0x25 (awaiting=0) → engine sub_1008A610: state=4, callback(slot0)  [CServerConfirmedReservationCheckCallback::sub_103DF430]
+  ├─ callback stage=1 (ready-up)  → mmqueue=reserved; sound; ServerReserved(map) → JS popup; RaiseReadyUp(true,0,total)
+  ├─ callback stage=2 mode=0      → sub_103DF430: `if (!this+132) return;`  — НИЧЕГО (accept-режимы после полного Accept!)
+  └─ callback stage=2 mode!=0     → KV QueueConnect → sub_103DEA80 (store) → per-frame poller sub_103DEB90 → session Command("QueueConnect")
+                                    → matchmaking.dll → UpdateClientReservation + StartLoadingScreenForCommand("connect <adr>") → engine `connect`
+```
+
+**Главный вывод (CONFIRMED статикой):** в accept-режимах (`game_type&0xF ∈ {8,9,10,11,13}`) callback создаётся с `stage=1, mode=0` и после Accept (stage→2) **не способен запустить QueueConnect сам** — `mode` (`cb+132`) пишет только конструктор, а при `mode==0` `sub_103DF430` возвращается до формирования KV. Финальный переход обязан прийти **новым 9107**, у которого `reservation.game_type & 0xF ∉ {8,9,10,11,13}` (или `reservation` отсутствует → default instance → `game_type=0`): 9107-хендлер уничтожает старый callback и создаёт `(stage=2, mode=2)`, который сразу шлёт 0x21 stage 2 → 0x25 status 4 → QueueConnect по тому же пути, что и уже live-проверенный Casual. **Второй 9107 — единственный клиентски-допустимый триггер** (доказано data-flow'ом клиента, CONFIRMED); что именно retail-GC шлёт его в этот момент, подтверждено только косвенно — project446-бэкенд (§37.9) делает ровно так (HIGH). Ответ на «есть ли другой путь»: единственные другие создатели callback с `mode!=0` — reconnect-ветки `mode=1` (`sub_103DDCB0`/`sub_103DEC40`/хвост `sub_103DF430`), они про «переподключиться к идущему матчу» (`dword_1519C820`), не про Accept.
+
+### 38.2 Исправления к предыдущим разделам (старые тексты не удалялись; приоритет у §38)
+
+| # | Прежнее утверждение | Исправление | Уровень |
+|---|---|---|---|
+| C1 | §35.8/§36.E/§37.2-37.3: `sub_10580C20`: «`reason=="deferred"` → `sub_103DF3A0`; иначе → `sub_103DEA80(0,2)`» | **Инвертировано.** `sub_108F51B0` (client_panorama) / `sub_1094AD30` (client.dll) — **регистронезависимый `stricmp` (0 при равенстве)**; raw: `call sub_108F51B0; test eax,eax; jnz loc_10580C49` → **`reason != "deferred"` (в т.ч. `'accept'`) → `if (cb) sub_103DF3A0()` (stage→2)**; **`reason == "deferred"` → `sub_103DEA80(0,2)`**. Retail JS: кнопка Accept → `SetLocalPlayerReady('accept')`; NQMM-авто-ready → `SetLocalPlayerReady('deferred')` (38.7). Итог «Accept ⇒ 0x21 stage 2» остаётся верным, но по другой ветке. | CONFIRMED (raw disasm `0x10580c2e-0x10580c53` + JS) |
+| C2 | §36.C/§37.4: `sub_103D7750` строит `ServerReserved(const char*,double)`, id `word_10D501B4`, raiser `sub_103DEA80` | **Перепутано.** `sub_103E1390` регистрирует **`ServerReserved`** → id **`word_10D501B0`**, arity 1 (`CUIEvent1<const char*>`, builder `sub_103D76D0`, raiser **`sub_103E2DF0`**). `sub_103E05A0` регистрирует **`QueueConnectToServer`** → id **`word_10D501B4`**, arity 2 (`CUIEvent2<const char*,double>`, builder **`sub_103D7750`**, raiser **`sub_103DEA80`**); double = константа `qword_10C776A8 = 2.1` (сек, совпадает с порогом `>2100` мс в poller'е). Также `sub_103E04E0` = `CancelConnectToServer` (`word_10D501B8`), `sub_103E0660` = `MatchAssistedAccept` (`word_10D501AC`). | CONFIRMED (регистрационный код + константа) |
+| C3 | §5/§35.2/§37.2: `sub_10418AC0("popup_accept_match_found"/"…confirmed")` «показывает Accept-попап» | **Это звук.** `sub_10418AC0` → `sub_10415B40` строит `CUIPanelEvent2<const char*,const char*>` с id `word_10D5E09C`, зарегистрированным в `sub_107FE1D0` как **`PlaySoundEffect`** (JS использует те же имена: `$.DispatchEvent('PlaySoundEffect','popup_accept_match_confirmed','MOUSE')`). **Попап создаёт JS**: событие `ServerReserved` → `PartyMenu.ShowMatchAcceptPopUp(map)` → `UiToolkitAPI.ShowGlobalCustomLayoutPopupParameters('', popup_accept_match.xml, 'map_and_isreconnect='+map+',false')` + `ShowAcceptPopup`. | CONFIRMED (JS+регистрации) |
+| C4 | §37.3: 9107 без nested `reservation` → fallback «на глобальный search-state `dword_10D9A180+32`» | `dword_10D9A180` (client_panorama) / `dword_10E0AEA0` (client.dll) — **дефолтный экземпляр protobuf** (запись в статическом инициализаторе `sub_100E8C10`); fallback = `default_instance.reservation` ⇒ **`game_type = 0`**. Следствие: **9107 без nested `reservation` = «не accept-режим» ⇒ callback `(2,2)` (direct connect)** — это и есть наш Casual (для Casual результат тот же). Для accept-режимов первый 9107 **обязан** нести `reservation.game_type` из {8,9,10,11,13}. | HIGH (default-instance паттерн; не сверено байтами инициализации) |
+| C5 | §37.5: шаблоны `Update { … mmqueue … }` «только в client.dll» | Есть **в обоих** DLL (client_panorama: `0x10b6aeec/af2c/af74/bf20/c514/c540`, xrefs в `sub_103D9900`,`sub_103DC4B0`,`sub_103DDCB0`,`sub_103DF430`,`sub_103DE630`). | CONFIRMED |
+| C6 | §37.12: «stage 2 & status 4 ⇒ QueueConnect / ServerReserved» (accept-режим) | **Неверно для `mode=0`** (см. 38.1, 38.4). QueueConnect случается только у callback с `mode!=0` (после второго 9107 либо reconnect). | CONFIRMED |
+| C7 | §37.3/§37.13 п.6: порядок байт `awaiting/total` «HIGH, не сверен» | **CONFIRMED**: engine `sub_1008A610` читает из пакета `awaiting` (8 бит) затем `total` (8 бит) и пишет `*((_QWORD*)this+10) = awaiting | (total<<8)` (частичный ответ: `this+20 = awaiting | total<<8`); `sub_103DF430`: `v4=byte0=awaiting`, `v30=byte1=total`, `accepted = clamp(total−awaiting,0,64)`. | CONFIRMED |
+| C8 | §37.13 п.4: «кто/когда вызывает heartbeat `sub_103F6240`» | **Найдено**: per-frame `CUiComponent_Lobby::Update` → `sub_103DE9B0(this+2)`: если сессия есть, `game/mmqueue` непуст, `system/lock` пуст и mmqueue ∈ {`heartbeating`,`registering`} и `Plat_MSTime()-this[1] > 0xAFC8 (45000 мс)` → вызывает `vfn2` (`sub_103DDCB0`) → повторный `MatchmakingStart` (`heartbeating`). Для `searching` — по таймеру `sub_103DD8B0()` при `dword_152786A4`. В состояниях `reserved`/`connect` действует `lock mmqueue` ⇒ heartbeat НЕ шлётся. | CONFIRMED (кроме `sub_103DD8B0`: MEDIUM) |
+| C9 | §35.3/§37.4: `matchmaking` enum «не восстановлен» | Из 9104-хендлера: `0`→очистка; `4`→mmqueue=**connect** (raw `cmp [ecx+9Ch],4; cmovnz`); любое **другое ≠0** →**searching**; `3` дополнительно `RaiseReadyUp(false,0,0)`. Полные имена enum не нужны для connect. | CONFIRMED |
+| C10 | §37.13 п.3/п.7 (что рисует попап; копирует ли `sub_103DFBE0` `account_ids`) | `sub_103DFBE0` копирует **только** `reservationid`(поле 4, msg+24), `serverid`(msg+8), адрес (`direct_udp_ip/port`, `server_address`), `map`, флаг+`game_type&0xF`. `account_ids` **не копируются**. Список аватаров попапа — `LobbyAPI.GetConfirmedMatchPlayerCount/ByIdx` (client.dll `sub_105C70F0`/`sub_105C7220` → `sub_105C4080/40A0`) читает `RepeatedField` из глобального указателя `dword_10DBD140` (единственная запись в статике — обнуление в инициализаторе `0x10045df0`; в `client_panorama.dll` этих API **нет вообще**). Отрисовка списка идёт только при `numPlayers > 2`. Источник этого указателя в 9107-пути **не найден**. | CONFIRMED (что 9107-копировщик их не берёт) / UNRESOLVED (источник `dword_10DBD140`) |
+
+Дополнительное предупреждение (**`stricmp`-семантика**): все сравнения вида `if (sub_108F51B0(x,"literal"))` в client_panorama означают «**НЕ равно**». Это затрагивает трактовки `"connect"` в §35.3/§37.3 (9104 `matchmaking==0`-ветка: `v14 = (mmqueue != "connect")`; `sub_103DF430` fail-ветка: `mmqueue != "connect"` ⇒ CloseSession+ошибка `#SFUI_QMM_ERROR_NoOngoingMatch`). На connect-цепочку не влияет.
+
+### 38.3 Engine: как приходит `0x25` и как вызывается callback (engine.dll, live-проверено ранее §22-27)
+
+- Диспетчер connectionless `sub_1008E7C0`: `case 37` (0x25) → **`sub_1008A610`** (`CServerMsg_CheckReservation::OnResponse`). Проверки: `protocol const` (`dword_138EF1C4`=13805), `state==0` (pending), `reservationid` (`this+44`), `token` (`this+88`, `arg`), затем читает **`awaiting` (u8), `total` (u8)**:
+  - `awaiting != 0`: `DevMsg("Server reservation%u is awaiting %d/%d")`; если `awaiting==127` → `state=3` (failed), callback; иначе `this+80 = awaiting | total<<8`, **state остаётся 0**, callback;
+  - `awaiting == 0`: `DevMsg("Server confirmed all players reservation%u/%d")`; **если `state==0` → `state=4`**, `this+80 = total<<8`, callback. (Повторный 0x25 при `state!=0` игнорируется.)
+- Callback = `(**(cb_ptr@this+12))(cb, this)` — vtable slot 0 = **`CServerConfirmedReservationCheckCallback::vftable[0]`**: RTTI `??_7CServerConfirmedReservationCheckCallback@@6B@` @ `0x10b6a408` (client_panorama) → slot 0 = **`sub_103DF430`** (CONFIRMED по RTTI-имени); client.dll — vtable data xref `0x10bccbe8` → `sub_103F7C00`.
+- **Что значит `vfunc+4(a2)==4` в `sub_103DF430`**: `(*(*a2+4))(a2)` = vtable slot 1 `sub_100635B0` = `state` (`this+8`); `==4` ⇔ engine напечатал `"Server confirmed all players reservation%u/%d"` (ответ 0x25 с `awaiting==0` при `state==0`); `vfunc+4 == 0` ⇔ pending/partial. `vfunc+8(a2)` = slot 2 `sub_100A44C0` = qword `this+80`.
+- Состояния `CServerMsg_CheckReservation` (`this+8`): `0` pending; `2` отменён пользователем (slot 4 `sub_100A44B0` пишет 2; текст `"User canceled matchmaking"`); `3` неудача/таймаут (`"Matchmaking failed; Waiting on %d/%d clients"` / `"…We never heard from gameserver"`, `sub_1008A3E0`); `4` все подтвердили. slot0 `sub_100A5EE0` = `state>1` (done), slot1 `sub_100635B0` = `state`, slot2 `sub_100A44C0` = qword `this+80` (`byte0=awaiting`, `byte1=total`).
+- Создание запроса: `INETSUPPORT_003` vtable slot 15 (`+60`, `CNetSupportImpl` `sub_1024BC90`) → `sub_10098300(adr, reservationid_lo, reservationid_hi, stage, callback, &handle)` → `sub_1008A350` (объект 112 байт, CServerMsg_CheckReservation) регистрируется в списке pending; handle пишется в `cb+128`. Отправка `0x21` (33 байта, §23) повторяется движком (~1 c) до `state != 0`.
+- Отмена/уничтожение: `handle->vfunc+20` (slot 5, `sub_1008A3E0`).
+
+### 38.4 `CServerConfirmedReservationCheckCallback` и полная таблица решений `sub_103DF430` (client_panorama `0x103DF430`, 1966 байт; client.dll `0x103F7C00`)
+
+Поля callback (144 байта; ctor `sub_103DF1C0` / client.dll `sub_103F7980`): `+0` vftable; `+8` встроенная struct (88 байт: копия 9107-полей через `sub_103DF2C0`); **`+40/+44` = `reservationid`** (msg+24, поле 4; идёт в 0x21, в KV `reservationid`, в `UpdateClientReservation`); `+48/+52` = `serverid` (msg+8; потребитель не найден, MEDIUM); `+68` = `map` (std::string); **`+92` = `reservation.game_type & 0xF`** (если у msg есть `reservation`, иначе 0); **`+96..+127` = 32-байтный address (`sub_103DFED0`, строится из статического адреса, который `sub_103DFBE0` заполняет из `direct_udp_ip/port`/`server_address` — HIGH)**, он же цель 0x21 и `adronline`; **`+128` = handle engine-запроса**; **`+132` = mode** (`a4`: 0 accept-ready-up, 1 reconnect, 2 direct); `+136` = байт «был непустой ответ» (`=1` при первом status≠pending); **`+140` = stage** (`a3`: 1 ready-up, 2 accepted/direct). Единственные писатели: ctor (`+132`,`+140`) и `sub_103DF3A0` (`+140`←2) — **проверено сканом всех 12 функций, трогающих `dword_15278690`**.
+
+Решающая таблица `sub_103DF430(this, a2)` (условие входа `a2 == this+128`; `S=a2->state`, `T=stage`, `M=mode`, `G`= сессия есть ∧ `game/mmqueue` непуст):
+
+| Условие | Действие |
+|---|---|
+| `S==0` (pending/partial) | `if T==2`: `RaiseReadyUp(true, clamp(total−awaiting,0,64), total)`; return (T==1: ничего) |
+| `S!=0`, `G`, `S==4`, **`T==1`** | KV `Update{system{lock mmqueue} game{mmqueue reserved}}` (`0x103df537`) → сессия `vtbl+8`; звук `popup_accept_match_found`; если panorama-флаг (`byte_1519DDEE`): **`ServerReserved(map)`** (`sub_103E2DF0`, `map = cb+68` по raw disasm `0x103df56a-0x103df573`); `if !panorama: RaiseReadyUp(false,0,total)`; **`RaiseReadyUp(true,0,total)`**; return (**callback остаётся жить** для stage 2) |
+| `S!=0`, `G`, `S==4`, `T!=1`, **`M==0`** | **`return` — ничего не происходит** (accept-режимы после полного Accept; callback остаётся жить до следующего 9107/сброса) |
+| `S!=0`, `G`, `S==4`, `T!=1`, `M!=0` | **QueueConnect-ветка** (ниже) |
+| остальное (`S∈{3,2}` или `!G`) | «will not queue connect»: `M==1`/`M==2` → при условиях `CloseSession` + `sub_103D98D0("#SFUI_LobbyPrompt_MMFailedTitle","#SFUI_QMM_ERROR_NoOngoingMatch")`; затем `if (M!=0 \|\| !(dword_1519C894&2))` → cleanup (`RaiseReadyUp(false,0,total)` если `M!=0`&panorama&`v25!=1`; destroy cb; `dword_15278690=0`), иначе (M==0 и есть reconnect-данные) — `"failed to receive confirmation, but will reconnect to ongoing match!"` → новый cb `(2,1)` из `dword_1519C820` |
+
+**QueueConnect-ветка** (`T==2`, `M!=0`, `S==4`): KV `Update{system{lock mmqueue} game{mmqueue connect}}` (`0x103df5dc`); `if sub_103D7640(game_type)` (accept-required): звук `popup_accept_match_confirmed`, `v29=0`; **иначе** `v29=1`, звук `popup_accept_match_found`, `ServerReserved("@"+map)` (**NQMM-«announcement» попап**, 38.7). Затем строится KV **`QueueConnect`**: `adronline`(cb+96 как строка), `reservationid`(cb+40/44), `helper_pSession`(текущая сессия, ptr), `helper_time = Plat_MSTime() + (v29==1 ? 2000 : 0)`, `auto_close_session` (=1; для `M!=2` и `members/numMachines>1` → 0), `map`, `gametype`/`gamemode` (таблица §37.1 по `game_type`), затем **`sub_103DEA80(KV, v29)`** и cleanup (закрыть ready-up если `M!=0`&panorama&`v29!=1`; destroy cb; `dword_15278690=0`).
+
+`sub_103DEA80(kv, a2)` (client.dll `sub_103F7240`, `0x103DEA80`, 267 байт): **`a2==1`** → заменить сохранённый KV (`dword_15278694`=kv), событий нет; **`a2==2`** → если сохранённого KV нет → `return 0`, иначе только поднять событие; **`a2==0`/прочее** → заменить KV **и** поднять событие. Событие (при panorama): `map = KV["map"]`, `sub_10496C10(loadingScreenMgr, map, skirmishmode)` (подготовка loading-screen), затем **`QueueConnectToServer(map, 2.1)`** (`word_10D501B4`). Вызывающие: `sub_103DF430` (a2=v29), `sub_10580C20` (JS `deferred`, a2=2), `sub_10580430` (`StartListenServer`, a2=0).
+
+### 38.5 9107 (`MatchmakingGC2ClientReserve`) — полный lifecycle клиентского обработчика (`sub_103DC4B0` / client.dll `sub_103F49F0`)
+
+Обработчик **не имеет дедупликации и рассчитан на N вызовов**. На КАЖДОЕ 9107: (1) gate: сессия есть и `game/mmqueue` непуст, иначе клиент шлёт `MatchmakingStop`; (2) при `has(map)` — сессионный KV `Update/game/map = msg.map`; (3) **`Update{system{lock mmqueue} game{mmqueue reserved}}`** (`0x103dc534`) — `mmqueue=reserved` **на каждом** 9107; (4) `sub_103DFBE0` копирует поля msg→struct; `DevMsg("Matchmaking reservation confirmed: %llx/%s")` (`%llx`=`reservationid`, `%s`=адрес); (5) **старый callback уничтожается** (`sub_103DF330`: отмена его engine-запроса + free); (6) `v10 = (msg.reservation ?: default).game_type & 0xF`: **`{8,9,10,11,13}` → `cb=(stage 1, mode 0)`**, иначе **`cb=(stage 2, mode 2)`**; ctor сразу регистрирует запрос 0x21 с этим `stage`.
+
+Что реально используется из сообщения (data-flow): `reservationid` (поле 4) — 0x21 + KV + cookie для connect; адрес (`direct_udp_ip`, `direct_udp_port`, `server_address`) — цель 0x21 и `adronline`; `map` — сессионный KV и попап; **`reservation.game_type&0xF` — единственный селектор ветки**; `serverid` копируется, потребителя не найдено. **Не используются**: `account_ids`, `party_ids`, `rankings`, остальные поля `reservation`. Следствие для второго 9107: он должен нести **валидные `reservationid` и адрес** (они перечитываются из НОВОГО сообщения) и **не-accept `game_type`/отсутствие `reservation`**.
+
+Кросс-проверка (HIGH): project446 `sub_1006EAD0` читает `game_type` из разобранного 9107 (`*(a2+68)`, вероятно `reservation.game_type`): ненулевой accept-тип → «Match found!» → ready-up-состояние 2; **`game_type==0` при ready-up** → `"[GC] Connect reserve received (all players accepted)"` → состояние 3 → connect; `game_type==0` без ready-up → `"Live join: server sent game_type=0"`. Т.е. их backend шлёт «connect-reserve» именно как 9107 с `game_type=0`.
+
+### 38.6 9104 (`MatchmakingGC2ClientUpdate`, `sub_103D9900` / client.dll `sub_103F1C00`) и переходы `game/mmqueue`
+
+Обработка целиком **пропускается**, если активный callback имеет `mode==2` (`*(dword_15278690+132)==2`). При `matchmaking!=0` и непустом mmqueue: `matchmaking==4` → **`connect`**, иначе → **`searching`** (`0x103d9d28/9d2d`, `cmp [ecx+9Ch],4; cmovnz`); `matchmaking==3` дополнительно `RaiseReadyUp(false,0,0)` (закрыть попап). **9104 не запускает connect**, только пишет маркер. При `matchmaking==0` — очистка (`Delete{…mmqueue #empty#}`, `cfg/qmmconnect.dt`).
+
+Все писатели `game/mmqueue` (CONFIRMED по строкам/xrefs):
+
+| Значение | Писатель (client_panorama / client.dll) | Условие |
+|---|---|---|
+| `registering` | `sub_103DDCB0` / `sub_103F6240` (Play, `vfn2`) | mmqueue пуст |
+| `heartbeating` | тот же `vfn2` | mmqueue непуст; период 45 с (`sub_103DE9B0`) |
+| `searching` | 9104 (`sub_103D9900`/`sub_103F1C00`) | `matchmaking ∉ {0,4}` |
+| `reserved` | 9107-хендлер; `sub_103DF430` (ready-up ветка, stage 1, status 4); reconnect `sub_103DDCB0` | — |
+| `connect` | 9104 при `matchmaking==4`; `sub_103DF430` QueueConnect-ветка (перед KV `QueueConnect`) | — |
+| очистка | 9104 `matchmaking==0`; `sub_103DE630` (`MatchmakingStop`/cancel, **не выполняется** если `dword_15278694!=0` или `cb.mode==2`) | — |
+
+### 38.7 Accept-попап и native-мост (retail JS, `popup_accept_match.js` из `code.pbin`)
+
+- **Показ**: `PartyMenu` слушает `ServerReserved` → `ShowMatchAcceptPopUp(map)` → `popup_accept_match.xml` с `map_and_isreconnect=<map>,false`. `map` начинается с `@` ⇒ **NQMM-«announcement only»** (`m_isNqmmAnnouncementOnly=true; m_hasPressedAccept=true`): без кнопки Accept/таймера, `$.Schedule(1.9, _OnNqmmAutoReadyUp)`.
+- **Кнопка Accept** (`_OnAcceptMatchPressed`): `LobbyAPI.SetLocalPlayerReady('accept')` → `sub_10584F70`→`sub_10585B00`→`sub_10580C20('accept')` → **`sub_103DF3A0`** (`stage>=2 → return 0`; иначе `cb+140=2`, отмена старого запроса, **новый 0x21 stage 2** через `INETSUPPORT_003 vtbl+60`). Событие `MatchAssistedAccept` (`word_10D501AC`) вызывает тот же `OnAcceptMatchPressed`.
+- **NQMM auto** (`_OnNqmmAutoReadyUp`): звук `popup_accept_match_confirmed`, `SetLocalPlayerReady('deferred')` → `sub_10580C20('deferred')` → **`sub_103DEA80(0,2)`** → (если есть сохранённый KV) `QueueConnectToServer(map, 2.1)`; затем `CloseAcceptPopup`.
+- **Счётчик**: `PanoramaComponent_Lobby_ReadyUpForMatch(shouldShow, playersReadyCount, numTotalClientsInReservation)` → `_ReadyForMatch`: `!shouldShow` → закрыть попап; иначе слоты `AcceptMatchSlot0..total-1`, `accepted = playersReadyCount` (`"#match_ready_players_accepted"`); спец-случай `(1,1)` при ранее известном `total>1` — использует прежний total. Таймер: `LobbyAPI.GetReadyTimeRemainingSeconds()` (от `this+16 = Plat_MSTime()`, ставится `RaiseReadyUp(true,…)`).
+- **Потребитель `QueueConnectToServer`** — только `LoadingScreen.Init` (UI загрузочного экрана), **сам connect не выполняет**.
+
+### 38.8 Отложенное исполнение QueueConnect — per-frame poller
+
+`CUiComponent_Lobby` (vftable `0x10bbdf44` slot 0 = `sub_1057F760`; client.dll vtable data `0x10c25770` slot 0 = `sub_105C2330`) — **per-frame Update**. В конце: `sub_103DE9B0` (heartbeat-watchdog) и **`sub_103DEB90`** (client.dll `sub_103F7350`): при `dword_15278694 != 0` **и** `Plat_MSTime() − KV["helper_time"] > 2100` **и** `!IVEngineClient slot 28` (флаг «loading plaque active», `byte_10625F16` — тот же байт проверяет slot 29 `HideLoadingPlaque`) **и** `текущая сессия == KV["helper_pSession"]` → **`session->vtbl+12 (Command)(QueueConnect KV)`**; в любом случае KV затем освобождается (`dword_15278694=0`). Предусловия самого Update, пока mmqueue занят (`sub_103DE8E0`: mmqueue непуст ∨ `system/lock` непуст): `byte_10CFB1F8` (client-secure флаг; начальное значение **1**; сбрасывается событием `OnClientInsecureBlocked`) должен быть ≠0, иначе `sub_103D9190` (ошибка `X_InsecureBlocked`, CloseSession); и `dword_15280DBC vtbl+512 != 2` (pure-file state). Временная сводка «не-accept» пути: t0 = `0x25` status 4 → KV + `helper_time=t0+2000` + NQMM-попап; t0+1.9 c `deferred` → `QueueConnectToServer` (loading screen); **t0+≈4.1 c poller → Command(QueueConnect)** → connect.
+
+### 38.9 Session `Command("QueueConnect")` → matchmaking.dll (retail-бинарь + source)
+
+`CMatchSessionOfflineCustom::OnRunCommand` = matchmaking.dll **`sub_1001B290`** (vtable data `0x1006adf8`; source `mm_session_offline_custom.cpp:155`): для `QueueConnect` при `auto_close_session!=0`: `m_eState=2 (RUNNING)`; **`sub_1002CE60` = `MatchSession_PrepareClientForConnect(reservationid)`** (форматирует `"$%llx"` и передаёт в `dword_10085114 vtbl+56`; затем `(dword_100A336C vtbl+48)()->vtbl+40`; при `reservationid==0` берёт `xuidReserve` из настроек); **`CloseSession`** (`dword_100A336C vtbl+80`); **`INetSupport::UpdateClientReservation(reservationid, 0)`** (`dword_100842C8 vtbl+52`; engine `CNetSupportImpl` slot 13 `sub_1024BBF0` → пишет cookie в `cl+256/260`); **`IVEngineClient::StartLoadingScreenForCommand("connect %s", adronline)`** (`dword_100842D0 vtbl+848`, slot 212). Аналоги для сессий OnlineClient/OnlineHost: `sub_1001D990`, `sub_10023990` (`state=3/7`, тот же вызов). Если `auto_close_session==0` (мульти-машинная party) — команда уходит title-handler'у.
+
+### 38.10 Engine connect chain (насколько нужно, без полного RE)
+
+`CEngineClient` vtable `0x104657e8` slot 212 `sub_100B3FB0` → `EngineVGui (dword_138D0320) vtbl+136` = `CEngineVGui::StartLoadingScreenForCommand` (`sub_1029BCE0`, slot 34) → `staticGameUIFuncs (dword_13909C04) vtbl+48` = **`CGameUI::StartLoadingScreenForCommand`** (IGameUI slot 12; client_panorama `sub_10417E50`, vtable `0x10b79018`: `if (this[510]) IVEngineClient(vtbl+456 = slot 114 ClientCmd_Unrestricted)(cmd,0)`) → engine `sub_100B1C80` → **`Cbuf_AddText`** (`sub_101CE460`) → команда исполняется на следующем кадре → консольная команда **`connect`** (ConCommand `0x105888f8`, help «Connect to specified server.», callback **`sub_100D5220`**) → `CBaseClientState::Connect` (vtbl+180 `sub_1008CE50` → **`sub_1008CC80`**: собирает `public`/`private`/`direct` адреса, печатает `Connecting to public(ip:port)`) → сетевой connect с cookie из `UpdateClientReservation`; сервер проверяет cookie (`sub_101B8F60`: `"Rejecting connection request … client's reservation cookie %llx does not match servers's cookie"`) → `Connected to %s` (`sub_100EB620`) → загрузка уровня. (Строка `"Connecting to %s\n"` @ `0x10474060` в `sub_100DF2D0` — это Steam `GameServerChangeRequested_t`, **не** наш путь.)
+
+### 38.11 Итоговая цепочка (детально)
+
+**A. Не-accept режим (Casual `game_type=7`, live-проверено)**: клик Play (`sub_103DDCB0`: `registering`, 9101) → `ClientGC` шлёт 9107 без `reservation` → 9107-хендлер: `mmqueue=reserved`, `cb=(2,2)`, 0x21 stage 2 → `srcds` (`G`-cookie ⇒ `awaiting=0`) → 0x25 → `sub_1008A610` state 4 → `sub_103DF430`: QueueConnect-ветка (`v29=1`): `mmqueue=connect`, звук, `ServerReserved("@map")`, KV `QueueConnect`, `sub_103DEA80(KV,1)` (store) → NQMM-попап 1.9 c → `deferred` → `QueueConnectToServer(map,2.1)` → poller (≥ `helper_time+2100`) → `Command(QueueConnect)` → matchmaking.dll → `UpdateClientReservation` + `StartLoadingScreenForCommand("connect adr")` → `Cbuf_AddText` → `connect` → `CBaseClientState::Connect`.
+
+**B. Accept-режим (8/9/10/11/13)**:
+1. 9107 #1 с `reservation.game_type∈accept` → `mmqueue=reserved`, `cb=(1,0)`, 0x21 stage 1 (реальный + fake-0x21 stage 1).
+2. Сервер: все stage≥1 → `awaiting=0` → 0x25 (всем) → status 4, `T==1` → `mmqueue=reserved`, звук, `ServerReserved(map)` → JS открывает попап, `RaiseReadyUp(true,0,total)`.
+3. Игрок жмёт Accept → `SetLocalPlayerReady('accept')` → `sub_103DF3A0`: stage=2, **новый 0x21 stage 2**; 0x25 partial → `RaiseReadyUp(true, total−awaiting, total)` (счётчик).
+4. Все stage 2 → сервер `awaiting=0` → 0x25 → status 4, `T==2`, **`M==0` → return (пусто)**.
+5. **9107 #2** (не-accept `game_type`/без `reservation`; тот же `reservationid`+адрес) → 9107-хендлер: `mmqueue=reserved`, **destroy старый cb**, `cb=(2,2)`, новый 0x21 stage 2 → 0x25 status 4 → QueueConnect-ветка → далее как в A (п. с `v29=1`).
+
+### 38.12 Роли ключевых функций (по списку задания)
+
+- **`0x25 awaiting=0`**: engine `sub_1008A610` (`state=4`) → `CServerConfirmedReservationCheckCallback[0]` = `sub_103DF430` (RVA см. 38.14).
+- **9107**: единственный источник callback `(1,0)`/`(2,2)`; может приходить многократно; второй 9107 с не-accept `game_type` = триггер connect в accept-режимах; уничтожает предыдущий callback; пишет `mmqueue=reserved`.
+- **9104**: только маркеры (`searching`/`connect`/очистка), `RaiseReadyUp(false,0,0)` при `matchmaking==3`; connect не запускает; игнорируется при `cb.mode==2`.
+- **`sub_103F7C00` (client.dll)** ≡ `sub_103DF430`: единственный формирователь KV `QueueConnect` (единственный xref строки `"QueueConnect"`) и ready-up-ветки; **это и есть «reservation-check callback»**.
+- **`sub_103DF3A0`** ≡ client.dll `sub_103F7B60`: stage 1→2 и перерегистрация запроса (Accept); единственный вызов — `sub_10580C20` при `reason != "deferred"`.
+- **`sub_103D7750`**: builder `QueueConnectToServer(const char*, double 2.1)` (НЕ `ServerReserved`, C2); `ServerReserved` = `sub_103D76D0`/`sub_103E2DF0`.
+- **`sub_103DEA80`**: хранилище отложенного QueueConnect-KV + raiser `QueueConnectToServer`; **сам connect не выполняет**.
+- **`sub_103DEB90`** (per-frame): реальный «спусковой крючок» — исполняет `Command(QueueConnect)` в текущей сессии.
+- **`sub_103D8AF0`**: singleton-getter lobby-объекта (только адаптер к `RaiseReadyUp`).
+- **`sub_103F6240`/`sub_103DDCB0`**: Play/`MatchmakingStart` (registering/heartbeating), reconnect-ветка `(2,1)`.
+
+### 38.13 Что это значит для нашего `ClientGC` (НЕ реализуется в §38; только вывод)
+
+- Наш нынешний 9107 (без `reservation`) ⇒ `cb=(2,2)` ⇒ **всегда direct-connect** (для Casual правильно). Для 8/9/10/11/13 это **обойдёт Accept**: нужен 9107 #1 с `reservation.game_type` ∈ accept-set.
+- Retail-клиент **не сообщает GC о своём Accept** (project446: `"legacy client omits 9102 on Accept"`, инжектор `sub_100787F0`); «все приняли» знает игровой сервер (`m_arrReservationPlayers`, `ReportGCQueuedMatchStart` — в retail `server.dll` заглушка `return 0`, §37.8) и, по retail-архитектуре, сообщает GC, который шлёт 9107 #2. У нас `ServerGC` и `ClientGC` — разные процессы/машины и **канала между ними нет**: источник сигнала для 9107 #2 — открытая проблема (NEXT STEP).
+- `UpdateClientReservation(reservationid)` берёт cookie из 9107 #2 — он должен совпасть с cookie сервера (общий `GameServerCookieId`, как сейчас).
+
+### 38.14 Таблица RVA (живой `client.dll` ⇄ `client_panorama.dll`)
+
+| Роль | `client.dll` (живой) | `client_panorama.dll` |
+|---|---|---|
+| reservation-check callback (`vftable[0]`) | `sub_103F7C00` (`0x103F7C00`, 1966 б) | `sub_103DF430` |
+| callback ctor | `sub_103F7980` | `sub_103DF1C0` |
+| stage→2 (Accept) | `sub_103F7B60` | `sub_103DF3A0` |
+| 9107-хендлер | `sub_103F49F0` | `sub_103DC4B0` |
+| 9104-хендлер | `sub_103F1C00` | `sub_103D9900` |
+| Play/`vfn2` | `sub_103F6240` | `sub_103DDCB0` |
+| cancel/`vfn3` | `sub_103F6DD0` | `sub_103DE630` |
+| `SetLocalPlayerReady` classifier | `sub_105C3D90` (вызов `0x105C932C`) | `sub_10580C20` |
+| store KV + raise `QueueConnectToServer` | `sub_103F7240` | `sub_103DEA80` |
+| per-frame poller QueueConnect | `sub_103F7350` (из `sub_105C2330`) | `sub_103DEB90` (из `sub_1057F760`) |
+| `ServerReserved` raiser | `sub_103FB5C0` | `sub_103E2DF0` |
+| `ServerReserved`/`QueueConnectToServer`/`Cancel…`/`MatchAssistedAccept` регистрация | `0x103F9B60`/`0x103F8D70`/`0x103F8CB0`/`0x103F8E30` | `0x103E1390`/`0x103E05A0`/`0x103E04E0`/`0x103E0660` |
+| `ReadyUpForMatch` регистрация / raiser | `0x105C4900` / (`RaiseReadyUp`, slot 0 lobby-подобъекта) | `sub_10581640` / `sub_1057FF90` |
+| хранимый KV / активный callback (глобалы) | `dword_152EAD18` / `dword_152EAD0C` | `dword_15278694` / `dword_15278690` |
+| accept-required(gametype) | `sub_103EF770` | `sub_103D7640` |
+| звук `PlaySoundEffect` raiser | `sub_10432490` | `sub_10418AC0` |
+| `CGameUI::StartLoadingScreenForCommand` | (тот же класс в `client.dll`; `GameUI011` @ `0x10253A50`) | `sub_10417E50` (vtbl `0x10b79018`) |
+
+Engine (`engine.dll`): `0x25`-обработчик `sub_1008A610`; диспетчер `sub_1008E7C0`; создание запроса `sub_10098300`/`sub_1008A350`; `connect` ConCommand `sub_100D5220`; `CBaseClientState::Connect` `sub_1008CE50→sub_1008CC80`; `Cbuf_AddText` `sub_101CE460`; `CEngineClient` vtbl `0x104657e8` (slot 114 `ClientCmd_Unrestricted`, slot 212 `StartLoadingScreenForCommand`); `CEngineVGui` vtbl `0x104b94e4` (slot 34 `sub_1029BCE0`). matchmaking.dll: `sub_1001B290` (offline custom OnRunCommand), `sub_1001D990`/`sub_10023990` (online client/host QueueConnect), `sub_1002CE60` (PrepareClientForConnect).
+
+### 38.15 Что НЕ доказано (сжато)
+
+Точный мгновенный «формат» retail-9107 #2 (наблюдался только через project446: `game_type=0`); кто в retail-инфраструктуре шлёт его и на каком триггере (GC ← `ReportGCQueuedMatchStart`, HIGH по архитектуре); значение `serverid` (потребителя нет); источник глобального `dword_10DBD140` для списка аватаров попапа (`GetConfirmedMatchPlayer*`); клиентская сторона `PartyMenu` для `map` без `@` при `mode==0` подтверждена по JS+native, но визуально/live не проверялась; `sub_103DD8B0` (таймер `searching`-heartbeat); какой `IUiComponent` менеджер вызывает `Update` каждый кадр (по vtable slot 0 — очевидно, но вызывающий не трассировался).
+
+### §38 STATUS
+
+CONFIRMED:
+- `0x25` обрабатывает engine `sub_1008A610`: `awaiting`(u8), `total`(u8); `awaiting==0` ∧ `state==0` ⇒ `state=4`; callback = `CServerConfirmedReservationCheckCallback::vftable[0]` = `sub_103DF430` (client.dll `sub_103F7C00`).
+- `cb+132` (mode) и `cb+140` (stage) пишутся только ctor'ом (mode) и ctor/`sub_103DF3A0` (stage). Accept-режим ⇒ `(stage 1, mode 0)`; в `sub_103DF430` при `stage==2 ∧ mode==0` и status 4 — **немедленный `return`** без QueueConnect.
+- Единственный формирователь KV `QueueConnect` — `sub_103DF430`/`sub_103F7C00` (единственный xref строки); он требует `mode!=0`, `stage!=1`, `status==4`; сохраняет KV через `sub_103DEA80`; исполняет **per-frame poller `sub_103DEB90`** (`helper_time+2100`, не loading plaque, та же сессия) вызовом `session->Command`.
+- 9107-хендлер: многократный вызов, `mmqueue=reserved` на каждом, уничтожение прежнего callback, выбор `(1,0)`/`(2,2)` по `reservation.game_type&0xF ∈ {8,9,10,11,13}`; из msg используются `reservationid`, адрес, `map`, `game_type`; `account_ids`/`party_ids`/`rankings` не используются.
+- Отсутствует другой путь создания `mode!=0` callback в accept-потоке, кроме нового 9107 (и reconnect `mode=1`).
+- 9104: `matchmaking==4`→`mmqueue=connect`, ≠0,≠4→`searching`, `3`→`RaiseReadyUp(false,0,0)`; connect не запускает; игнорируется при `cb.mode==2`.
+- Accept-кнопка JS ⇒ `SetLocalPlayerReady('accept')` ⇒ `sub_10580C20` (≠`deferred`) ⇒ `sub_103DF3A0` (stage 2 + новый 0x21); `'deferred'` (NQMM авто) ⇒ `sub_103DEA80(0,2)`. `sub_108F51B0`/`sub_1094AD30` = `stricmp` (0 при равенстве).
+- События: `ServerReserved`=`word_10D501B0` (arity 1, raiser `sub_103E2DF0`, JS `PartyMenu.ShowMatchAcceptPopUp`); `QueueConnectToServer`=`word_10D501B4` (arity 2, builder `sub_103D7750`, double=2.1, JS `LoadingScreen.Init`); `PlaySoundEffect`=`word_10D5E09C` (`sub_10418AC0`); `MatchAssistedAccept`=`word_10D501AC`; `ReadyUpForMatch` JS `PopupAcceptMatch.ReadyForMatch`.
+- Цепочка после QueueConnect: matchmaking.dll `sub_1001B290` → `PrepareClientForConnect`+`CloseSession`+`UpdateClientReservation`+`StartLoadingScreenForCommand("connect %s")` → engine `Cbuf_AddText` → `connect` ConCommand `sub_100D5220` → `CBaseClientState::Connect` `sub_1008CE50/1008CC80`.
+- Живой клиент = `client.dll` (engine хардкодит `bin\client.dll`).
+- Heartbeat 9101: 45 с (`0xAFC8`), только при `mmqueue ∈ {registering,heartbeating}` без `system/lock`.
+
+HIGH CONFIDENCE:
+- Второй 9107 с не-accept `game_type` — реальный retail-триггер connect после полного Accept (статически необходим; cross-check: project446 `game_type==0` «Connect reserve»).
+- Дефолтный экземпляр protobuf (`dword_10D9A180`/`dword_10E0AEA0`) ⇒ отсутствие `reservation` ≡ `game_type 0`.
+- Адрес `cb+96` строится из `direct_udp_ip/port`/`server_address` через статический staging-объект (`sub_103DFBE0`→`sub_103DFED0`).
+- `sub_10418AC0` = звук (`PlaySoundEffect`).
+- Retail GC получает «все приняли» от игрового сервера (`ReportGCQueuedMatchStart`), клиент Accept на GC не шлёт.
+
+HYPOTHESIS:
+- Retail-9107 #2 содержит те же `reservationid`/адрес, что и #1 (нужно клиенту по data-flow, но байты retail-GC не наблюдались).
+- Reconnect-ветка `(2,1)` (`dword_1519C820`) теоретически пригодна как альтернативный триггер без 9107 #2 (для теста), не исследована на пригодность.
+
+UNRESOLVED:
+- Как у нас (два процесса) получить сигнал «все приняли» для отправки 9107 #2; способ канала ServerGC↔ClientGC.
+- Как сервер идентифицирует real player в `0x21` при нашей архитектуре (account реального игрока должен быть в Q-roster — источник account на стороне `srcds`).
+- Реализация fake-player stage=2 (порядок/тайминг 0x21 fake после реального Accept).
+- Danger Zone: строение Q-roster и team-split.
+- Источник `dword_10DBD140` (`GetConfirmedMatchPlayer*`), `serverid` consumer, `sub_103DD8B0`.
+- Cookie lifecycle / повторная reservation (§34) — отложено.
+
+### NEXT STEP AFTER §38
+
+1. **Не начинать fake players/реализацию** до решения по сигналу «все приняли»: клиентский протокол теперь известен полностью (две фазы 9107), неизвестно только, **откуда `ClientGC` узнаёт момент отправки 9107 #2** при отсутствии канала с `srcds`. Нужно явное решение пользователя между вариантами: (a) test-only канал `ServerGC`→`ClientGC` (например, простое сообщение по сети; `ServerGC` узнаёт «все stage≥2» через vtable-хук `ReportGCQueuedMatchStart` slot 47 как у project446 `sub_100BADE0`, либо через собственный учёт 0x21); (b) test-only локальная эвристика на клиенте (таймер после Accept) — не retail-эквивалент; (c) reconnect-ветка `(2,1)` как альтернативный test-триггер (требует отдельного RE `dword_1519C820`/`GC_Hello`).
+2. Затем (по отдельной команде) — дизайн harness: `ServerGC`: Q-roster `[real][fake…]` (account реального игрока нужно передать серверу), fake-0x21 stage 1 (для попапа) и stage 2 (после реального Accept); `ClientGC`: 9107 #1 `reservation{game_type∈accept, account_ids…}` и 9107 #2 (без `reservation`, тот же `reservationid`+адрес).
+3. Малые уточняющие RE-проверки перед кодом (по желанию): `ReportGCQueuedMatchStart` аргументы (`minStage`, `confirmedAccounts[]`) для сигнала; поведение попапа при `total` из Q-roster (проверка `RaiseReadyUp(true,…)`) — можно live-логами существующего прототипа без правок кода.
+4. Отложено: cookie lifecycle/повторная reservation (§34), Danger Zone Q-roster.
+
+---
+
+## 39. Source of Post-Accept GC Trigger — что запускает connect после полного Accept (read-only статический RE)
+
+**Режим**: только чтение. Код/`.cpp`/`.h`/CMake/config/backend/Panorama не менялись, сборка/деплой/Git не выполнялись, runtime не понадобился. Источники: IDA-базы `client.dll` (живой клиент, §38.0), `client_panorama.dll`, `engine.dll`, `server.dll`, `p446_csgo_gc.dll`; `protobufs/cstrike15_gcmessages.proto`. Скрипты/дампы: scratchpad `...\re\q39_a..ah.py`, `q39_*_out.txt`. RVA даны для `client.dll` (живой), эквиваленты `client_panorama.dll` — в таблице §38.14. Уровни: **CONFIRMED**, **HIGH**, **HYPOTHESIS**, **UNRESOLVED**.
+
+### 39.1 Короткий ответ
+
+**Да: единственный внутрисессионный GC-триггер connect после полного Accept, который допускает retail-клиент, — это `MatchmakingGC2ClientReserve` (9107) с `reservation.game_type & 0xF ∉ {8,9,10,11,13}` (или без `reservation` ⇒ default ⇒ `game_type=0`)** — «второй/следующий 9107». Это доказано **замыканием**: у retail `client.dll` ровно 5 GC→client matchmaking-job'ов (9103, 9104, 9107, 9110, 9112), и только 9107-хендлер способен в сессии создать reservation-callback с `mode!=0` (39.2-39.3). Клиент **ничего не отправляет** в GC при Accept (39.2). Кто и по какому событию шлёт этот 9107 **в retail-инфраструктуре** — **в доступных бинарниках отсутствует**: `server.dll` — публичная сборка «Not Valve DS» без GC-репортинга, engine лишь вызывает `ReportGCQueuedMatchStart` (39.6). Поэтому «источник» на стороне GC остаётся UNRESOLVED, а на стороне клиента — CONFIRMED.
+
+**Что доказано и что нет**: 9104 не является триггером (§38.6, повторно подтверждено замыканием); 9110 (Hello, `ongoingmatch`) не может дать connect в сессии без флага, записываемого только при старте (39.4); project446 **не** доказывает retail-поведение, но независимо согласуется (39.7).
+
+### 39.2 Замкнутый инвентарь matchmaking-сообщений клиента (`client.dll`)
+
+**GC → client** (реестр job'ов; запись `{name, msgid, flags=0x1f, factory}` в `.data`, найдена сканом):
+
+| msgid | job (vtable) | factory | тело-обработчик | влияние на reservation-state |
+|---|---|---|---|---|
+| **9107** `GC2ClientReserve` | `ClientJob_EMsgGCCStrike15_v2_MatchmakingGC2ClientReserve` (`0x10bcccb4`) | `sub_103F4D30` | **`sub_103F49F0`** | **создаёт callback `(1,0)`/`(2,2)`, `mmqueue=reserved`** (§38.5) |
+| 9104 `GC2ClientUpdate` | `…GC2ClientUpdate` (`0x10bccd84`) | `sub_103F4060` | `sub_103F1C00` | только `searching`/`connect`-маркеры, `RaiseReadyUp(false,0,0)`; connect не запускает; пропускается при `cb.mode==2` |
+| 9110 `GC2ClientHello` | `…GC2ClientHello` (`0x10bccda0`) | `sub_103F1A60` | `sub_103F19D0`→`sub_103F0D20` | пишет `cfg/qmmconnect.dt` при `ongoingmatch`, событие `ScaleformComponent_GC_Hello` (39.4) |
+| 9112 `GC2ClientAbandon` | `…GC2ClientAbandon` (`0x10bccc48`) | `sub_103F5100` | `sub_103F4D90` | только уведомление-попап (`"Matchmaking abandon notification"`) |
+| 9103 `Client2ServerPing` | `…Client2ServerPing` (`0x10bccd50`) | `sub_103F41C0` | `sub_103F40C0` | пинг-список; **не** трогает reservation-глобалы (проверено) |
+
+Других matchmaking-job'ов в `client.dll` нет (RTTI-перечень `q39_a`). Класс `CMsgGCCStrike15_v2_MatchmakingGC2ClientReserve` встречается в `ProtoBufMsg`-обёртке только в `sub_103F49F0` (+ dtor/ctor-хелпер `sub_103F9340`); во вложенном виде — в `GC2ClientHello.ongoingmatch`.
+
+**client → GC**: `Start` (9101) — только `sub_103F6240` (Play/heartbeat); `Stop` (9102, `abandon`) — `sub_103F6DD0` (cancel), `sub_103EFB20` (leave; вызывается из `sub_1054A540`), гейты 9104/9107 (`sub_103F1C00`/`sub_103F49F0`, когда `mmqueue` пуст); ответ на 9103. **Ни в `sub_103F7C00` (callback), ни в `sub_105C3D90` (JS `SetLocalPlayerReady`), ни в `sub_103F7B60` (stage→2) GC-сообщений нет** — **Accept уходит только UDP `0x21 stage=2` на game-сервер** (CONFIRMED). Соответствует комментарию p446 `"legacy client omits 9102 on Accept"`.
+
+**Замыкание по состоянию**: глобал активного callback `dword_152EAD0C` (client_panorama `dword_15278690`) трогают только: `sub_103F1C00` (9104), `sub_103F49F0` (9107), `sub_103F6240` (Play), `sub_103F6DD0` (cancel), `sub_103F7400` (reconnect-из-GC-Hello), `sub_103F7B60` (stage→2), `sub_103F7C00` (callback), `sub_105C3D90` (JS `SetLocalPlayerReady`). Глобал сохранённого QueueConnect-KV `dword_152EAD18` — только `sub_103F6DD0`, `sub_103F7240`, `sub_103F7350` (poller). **CONFIRMED (xref-скан)**.
+
+### 39.3 Кто создаёт callback с `mode != 0` (единственные пути к QueueConnect)
+
+Единственные вызовы ctor `sub_103F7980(kv, stage, mode)`: `sub_103F49F0` (9107: `(1,0)` accept-типы, `(2,2)` прочие), `sub_103F6240` (Play, ветка `"reconnect"` → `(2,1)`), `sub_103F7400` (`(2,1)` по флагам GC-Hello), хвост `sub_103F7C00` (`(2,1)` «will reconnect to ongoing match»). Из GC-сообщений в сессии — **только 9107** (два остальных — локальный клик «reconnect» и Hello-путь, см. 39.4). Следовательно после `0x25 awaiting=0` в accept-режиме (callback `(1,0)→stage 2`, `mode 0`, где `sub_103F7C00` возвращается без действия, §38.4) дальше возможен **только новый 9107 с не-accept `game_type`**: 9107-хендлер уничтожает старый callback (`sub_103F7AF0`), создаёт `(2,2)`, ctor немедленно регистрирует 0x21 stage 2, сервер отвечает 0x25 status 4, `sub_103F7C00` (mode≠0) строит KV `QueueConnect` → `sub_103F7240` (store) → per-frame poller `sub_103F7350` → `Command("QueueConnect")` (§38.8-38.10).
+
+### 39.4 Альтернативы «не 9107»: 9104 и 9110 (Hello)
+
+- **9104**: пишет только `game/mmqueue` (`searching`/`connect`) и закрывает ready-up при `matchmaking==3`; **не** создаёт/меняет callback (он лишь читает `cb.mode`); `mmqueue=connect` не является триггером (читатели строки «connect» — только сравнения в `sub_103F7C00`/9104-очистке/`sub_103DE960`-аналоге). **CONFIRMED** (xref-замыкание 39.2).
+- **9110 `GC2ClientHello` (`ongoingmatch` = вложенный `ClientReserve`)**: `sub_103F0D20` печатает `"Client hello received: … ongoingmatch/ok"`, при `has(ongoingmatch)` копирует поля (`sub_103F83B0`) и **пишет `cfg/qmmconnect.dt`** (`sub_103F8500`); при отсутствии — удаляет файл. Reconnect-callback `(2,1)` создаётся `sub_103F7400` (вызывается из обработчиков события `ScaleformComponent_GC_Hello`, `sub_105C2810`/`sub_105C2E20`) **только если `dword_1520ED8C & 2`**; этот бит выставляется **единственным** местом `sub_103F0AD0` (`or dword_1520ED8C,2` @ `0x103f0af8`), которое **читает `cfg/qmmconnect.dt` при старте компонента** (вызов из `sub_105C4230`). Значит, Hello внутри сессии connect **не** запускает; это путь «reconnect после перезапуска клиента» (файл, кстати, пишет и ctor callback `sub_103F7980` через `sub_103F8500` @ `0x103f7a32` — т.е. любая reservation персистится). **CONFIRMED (файл/флаг), HIGH (что во время Accept-сессии бит не выставлен)**.
+- **Локальный клик «reconnect»** (`game/mapgroupname=="reconnect"` в `sub_103F6240`) — пользовательское действие, не post-accept.
+
+### 39.5 Первый 9107 vs второй 9107 — что клиент требует (data-flow, `client.dll`)
+
+Общий обработчик `sub_103F49F0` (§38.5); отличие только в значении `reservation.game_type & 0xF` и в наличии полей:
+
+| Поле (`CMsgGCCStrike15_v2_MatchmakingGC2ClientReserve`) | FIRST 9107 (ready-up) | SECOND 9107 (connect) | Использование клиентом |
+|---|---|---|---|
+| `reservation` (5) / `reservation.game_type` | **обязателен**, `game_type&0xF ∈ {8,9,10,11,13}` | **отсутствует** ⇒ default instance ⇒ `game_type=0`, либо `&0xF ∉ accept-set` | единственный селектор ветки; `this+92` (`cb`) |
+| `reservationid` (4) | обязателен (cookie сервера) | **обязателен заново** (перечитывается из нового msg) | 0x21 (cb+40/44), KV `reservationid`, `UpdateClientReservation` → cookie connect-пакета |
+| `direct_udp_ip` (2) + `direct_udp_port` (3) / `server_address` (7) | обязательны | **обязательны заново** | статический staging-адрес (`sub_103F83B0`, аналог адресного построителя `sub_103DFED0`) ⇒ `cb+96` ⇒ цель 0x21; `adronline` = `sub_103EF6C0(cb+96)` (HIGH) |
+| `map` (6) | желательно | желательно | `Update/game/map`, `cb+68`, KV `map`, `ServerReserved("@map")` |
+| `serverid` (1) | не используется найденными потребителями | то же | (MEDIUM) |
+| `reservation.account_ids`/`party_ids`/`rankings` | не читаются | не читаются | — |
+
+**Нет fallback на ранее сохранённый адрес**: `sub_103F83B0` (≡`sub_103DFBE0`) безусловно копирует поля нового сообщения; отсутствующие поля = нули/пустые строки ⇒ 0x21 и `connect` ушли бы в никуда. **CONFIRMED (код)**.
+
+**Почему `game_type=0`**: 9107-хендлер проверяет `v10 = game_type & 0xF` по набору `{9,13,11,8,10}`; всё остальное (в т.ч. `0`, `7`) даёт `(stage 2, mode 2)`. Затем в QueueConnect-ветке `sub_103F7C00`: `sub_103EF770(game_type)` (accept-required?) ложь ⇒ `v29=1`, звук `popup_accept_match_found`, `ServerReserved("@"+map)` (NQMM-попап), `helper_time=now+2000`, `sub_103F7240(KV,1)` (store без события); KV `gametype/gamemode`=`unknown/unknown` при `game_type==0` (на connect не влияет; наш live-проверенный Casual идёт именно так — 9107 без `reservation`). Дальнейшая цепочка `sub_103D7750`→`QueueConnectToServer(map, 2.1)` (raiser `sub_103DEA80`≡`sub_103F7240`, при `a2==2` из JS `SetLocalPlayerReady('deferred')` после 1.9 c NQMM-попапа) и poller — §38.7-38.8. **CONFIRMED**.
+
+### 39.6 Server-side flow: что есть в доступных бинарниках
+
+**`server.dll` (retail 2021, build 1352) — публичная «Not Valve DS» сборка**:
+- `CServerGameDLL` vtable `0x1085cb10`: slot 41 `sub_1029C640` = `DevMsg("Not Valve ds: Direct-connect is allowed\n"); return 1;` (p446 патчит именно его, называя `IsValveDS`), slot 47 `sub_10145510` = `return 0` (`ReportGCQueuedMatchStart`, §37.8).
+- **Нет job'а для 9105 (`GC2ServerReserve`)**: в RTTI `server.dll` из GC-сообщений есть лишь `CProtoBufMsg<ServerReservationResponse>` (9106, отправка), `ClientJob…GC2ServerReservationUpdate` (9142, только счётчики зрителей), `Server2GCClientValidate` (9153), `ServerNotificationForUserPenalty`, `MatchEndRunRewardDrops`/`MatchEndRewardDropsNotification`, `GiftsLeaderboard*`, `ServerVarValueNotificationInfo`, `GiftedItems`/`ItemAcknowledged`, `IncrementKillCountAttribute` и служебные `ServerWelcome`/`ServerUpdateVersion` (`CGCClientJobServerWelcome`/`CGCClientJobServerUpdateVersion`). Классы `GC2ServerReserve`/`RoundStats` присутствуют лишь как сгенерированный protobuf-код; **`CProtoBufMsg<RoundStats>` нет ⇒ `server.dll` не шлёт `MatchmakingServerRoundStats`** (несмотря на поле `reservation_stage`).
+- **Единственный вызов `IVEngineServer::ReserveServerForQueuedGame` (slot 149) в `server.dll`** — `CGCClientJobServerWelcome` (`sub_1059BEB0`, vtable data `0x1092ee70`): при `ServerWelcome` с полем-reservationid вызывает с строкой **`"R%p"`** (`qword_10B77B90`). Строки `G…`/`Q…` server.dll не формирует ⇒ **retail-путь GC→server reservation `Q` отсутствует в этих бинарниках** (закрывает §37.13 п.10).
+- `MatchmakingServerReservationResponse` (9106) шлёт `sub_103E7AE0` (метод `CServerGameDLL`, vtable slot 46, data `0x1085cbc8`) — **периодический статус** (перепосылка каждые `RandomInt(480,720)` c либо при смене карты/флагов/версии/адреса): поля из `sub_103E7890` — `server_version` (`INETSUPPORT_003`+36), карта, `tv_info`/`tv_advertise_watchable`, публичный адрес (engine slot 150 `sub_101B5130`), списки аккаунтов клиентов по их состоянию (`reward`/`idle`). **Стадии Accept не содержит** ⇒ **не является уведомлением о завершении Accept** (HIGH; `sub_103E7890` декомпилирован целиком).
+
+**`engine.dll` — единственный «completion»-хук**: `CBaseServer::ReplyReservationCheckRequest` (`sub_101BC1D0`) для `Q`-резервации (`*sv_mmqueue_reservation=='Q'`) при **каждом** `0x21` от участника roster'а пересчитывает `minStage` (минимум по roster'у) и список аккаунтов со `stage>=2 ∨ stage>minStage`, печатает `"Match start status: %u/%u"` и вызывает **`serverGameDLL->ReportGCQueuedMatchStart(minStage, accounts[], count)`** (vtable+188, slot 47); при ненулевом результате и `stage==2` принудительно ставит всем stage 2 (встроенный spoof) и печатает `"Reservation time extended +%d sec"`. То есть **retail-архитектура «сервер → GC»: репорт `minStage`+подтверждённые аккаунты при каждом продвижении Accept**; реализация — в непубличном `server.dll` Valve DS (в нашем — заглушка). Дальнейшая реакция GC — **вне доступных бинарников (UNRESOLVED)**.
+
+Вывод: последовательность `client Accept → srcds 0x21 → 0x25 awaiting=0 → server→GC report → GC → client 9107(non-accept)` **согласована с клиентом на 100% на клиентской стороне (39.3) и с engine на серверной (репорт-хук), но GC-звено недоступно**. Другого server→GC механизма завершения в `server.dll`/`engine.dll` нет (проверены: все GC-обёртки `server.dll`, единственный call slot 149, единственный call slot 47).
+
+### 39.7 project446 — строгая проверка (не доказательство retail)
+
+- **`sub_100789A0` — НЕ отправитель 9107**: это обработчик **`case 9102` (client→GC `MatchmakingStop`)** в switch `ClientGC` (jumptable `0x100712A3`, вызов `0x10071358`; там же `case 9109`→`sub_10079660`, `9194`, `9171`). Парсит `CMsgGCCStrike15_v2_MatchmakingStop`, при состоянии `2` (ready-up) и `abandon==0`, accept-тип (`sub_100694A0`: `{8,10,13}`) логирует `"Matchmaking: Player ACCEPTED, waiting for all players"` и **пересылает `9102` на их backend** (`sub_100BFC20(9102,…)`); `abandon!=0` → штраф-путь. Прежняя рабочая формулировка «`sub_100789A0` и возможный второй 9107 с `game_type=0`» (§35/§37.9/задание §39) — **уточнена**: `game_type=0` в `sub_100789A0` не задаётся.
+- **`sub_100787F0`** (лямбда `_lambda_17_` в `ClientGC::ClientGC`, `sub_10081A80`): «Accept hook» — нативное Accept-событие → синтетический `MatchmakingStop(abandon=0)` (`"legacy client omits 9102 on Accept"`) → `sub_10073AD0` → далее как выше.
+- **`sub_1006EAD0`** (лямбда `_lambda_16_` `void(const MatchFoundInfo&)`, `sub_10081AC0`): приём «reserve» от backend. `game_type = *(a2+68)`: ≠0 (accept-тип) → `"[GC] Match found!"`, состояние 2, **9104 (`matchmaking=2`) + `sub_100774E0(game_type,0,0,1)` (9107 с `reservation.game_type=game_type`)** в игру; `==0` при состоянии 2 или флаге `+1736` → `"[GC] Connect reserve received (all players accepted)"`, состояние 3, `sub_100772B0()` (**9104, `matchmaking=4` (HIGH), `waiting=[local account]`**, msgid `0x80002390`) + `sub_100B9B80(4,…)` (host-событие типа 4; назначение не расшифровано); `==0` без ready-up → `"Live join: server sent game_type=0"`.
+- **`sub_100774E0(a3,a4,a5,a6)`** (`0x100774E0`) — строит и отправляет игре **9107** (`msgid 0x80002393`): `reservationid` (`this+1672`), адрес (`ip/port` либо SDR `serverid`+`server_address="=[A:…]:0"`), `map`, вложенный `reservation{account_ids=[local], game_type=a3 (has-bit), match_id=(accept-тип ∧ !a4 ? resId : 0)}`; при `a4&&a6` предварительно шлёт 9104(4). Connect-вариант `sub_100774E0(0,1,1,x)` ⇒ **`reservation.game_type=0` присутствует явно**.
+- **Нативный путь p446 (главный)**: `sub_100F5D00` (main-thread queue) `case 3` — 12-байтный «ReadyUp counter»-событие backend'а (`resId u64 + count u32`): отменяет активный **нативный `(mode 0)` check** (`"[ReadyUp] cancelled native reservation check %p (kind=%u stage=%u)"`, освобождает engine-запрос `cb+128`); затем **`sub_100EA7B0`** (`"native connect armed (check=%p kind=%u stage=%u)"`) находит в `client.dll` по сигнатуре (`sub_100EA580`, `GC_CLIENT_READYUP_ACTIVE_RVA`/`_COMP_RVA`; `activeCheck` = глобал по смещению `+36` в найденной функции) функцию, вызывает её и требует итог **`cb.mode==1 ∧ cb.stage==2`** — т.е. **p446 «перевооружает» accept-callback в reconnect-kind (2,1)** (MEDIUM: функция — по побочным эффектам, вероятно эквивалент `sub_103F7400`; сигнатура байтами не сверена); при неудаче — сообщение **`"falling back to the game_type=0 reserve"`** и отправка 9107 `game_type=0` (`sub_100774E0(0,1,1,0)`).
+- **Server-side p446**: `sub_100BADE0` патчит `server.dll` vtable (slot 47 `ReportGCQueuedMatchStart` → `sub_100BAD90`, slot 41 → `IsGCSendAvailable`, slot 4 `GameFrame`); хук вызывает оригинал и при `accounts!=null ∧ 1≤count≤64` вызывает `sub_100992A0` — упаковывает `[minStage u8][count u8][accounts u32…]` и шлёт на backend (`dword_1074AB84`). Строки: `"ready-up accepts now come from the engine"` vs `"…stay a guess from MatchmakingStop"`.
+- **Вывод (HIGH, не CONFIRMED-retail)**: независимая реализация p446 подтверждает три факта §38-§39 — (1) нативный `mode 0` check после Accept сам connect не запускает (их код его отменяет/перевооружает), (2) рабочий конечный сигнал — 9107 `game_type=0` (fallback), (3) «все приняли» приходит от `ReportGCQueuedMatchStart`. Retail-звено GC→клиент p446 **не** доказывает (backend их собственный).
+
+### 39.8 Цепочка data-flow до QueueConnect (максимально ранний подтверждённый триггер)
+
+```
+[SERVER→GC (retail, недоступно)] engine sub_101BC1D0 → serverGameDLL slot 47 ReportGCQueuedMatchStart(minStage=2, accounts)     — UNRESOLVED дальше
+[GC→client] MatchmakingGC2ClientReserve (9107): reservationid + адрес + map, БЕЗ reservation / game_type&0xF ∉ {8,9,10,11,13}    — CONFIRMED требования клиента
+   ↓ job factory sub_103F4D30 → handler sub_103F49F0 (client.dll)
+[STATE] mmqueue=reserved; старый cb (1,0) уничтожен (sub_103F7AF0); новый cb (2,2) = sub_103F7980; 0x21 stage 2 (INETSUPPORT_003 vtbl+60)
+   ↓ srcds 0x25 awaiting=0 → engine sub_1008A610 state=4 → cb.vftable[0] = sub_103F7C00
+[STATE] mmqueue=connect; KV QueueConnect{adronline, reservationid, helper_pSession, helper_time=+2000, …}; NQMM ServerReserved("@map")
+   ↓ sub_103F7240(KV,1) store (dword_152EAD18)          (client_panorama: sub_103DEA80; QueueConnectToServer builder sub_103D7750 — при a2==2, из JS 'deferred')
+   ↓ JS 1.9 c: SetLocalPlayerReady('deferred') → sub_105C3D90 → sub_103F7240(0,2) → QueueConnectToServer(map, 2.1) → LoadingScreen.Init
+   ↓ per-frame CUiComponent_Lobby::Update (client.dll sub_105C2330) → poller sub_103F7350 (helper_time+2100, нет loading plaque, та же сессия)
+   ↓ session->Command("QueueConnect") → matchmaking.dll sub_1001B290 → UpdateClientReservation + StartLoadingScreenForCommand("connect adr") → Cbuf_AddText → `connect`
+```
+
+### 39.9 Поправки к §37/§38 (старое не удалялось)
+
+| # | Было | Стало |
+|---|---|---|
+| C1 | §38.1/38.13: «второй 9107 — единственный клиентски-допустимый триггер» | Уточнено: **единственный внутрисессионный GC-триггер**; существуют локальные reconnect-пути `(2,1)` (Play-`reconnect`, GC-Hello при флаге `&2` из `cfg/qmmconnect.dt`), которые p446 использует как «native connect» (39.7). Post-accept GC-триггер = 9107; иного GC-сообщения нет (замыкание 39.2). |
+| C2 | §37.9/§35: `sub_100789A0` ассоциировался с вторым 9107 `game_type=0` | `sub_100789A0` = `case 9102` (Stop/Accept-приём); `game_type=0` 9107 формирует `sub_100774E0` из `sub_1006EAD0` (MatchFoundInfo с `game_type==0`); перед ним шлётся 9104 `matchmaking=4`. |
+| C3 | §37.13 п.10: «обработчик 9105 в retail server.dll не найден» | **Отсутствует по сути**: retail `server.dll` (Not-Valve-DS) не имеет job'а 9105 и не вызывает slot 149 со строками `Q/G` (только `"R%p"` из ServerWelcome). |
+| C4 | §37.8: `ReportGCQueuedMatchStart` — «заглушка, spoof неактивен» | Дополнено: вызывается engine'ом при каждом `0x21` `Q`-roster'а с `minStage` и списком `stage>=2 ∨ >min`; в Valve-DS server.dll это, очевидно, канал server→GC (в p446 — их backend). |
+| C5 | §38.4 `sub_103DF1C0` не упоминал персист | Ctor `sub_103F7980` (client.dll) вызывает `sub_103F8500` ⇒ каждая reservation пишется в `cfg/qmmconnect.dt` (reconnect-данные); читается при старте (`sub_103F0AD0`). |
+| C6 | `MatchmakingServerReservationResponse` (9106) рассматривался как возможный «completion»-канал | Это периодический status/advert сервера (без stage); не completion (39.6). |
+
+### 39.10 Не доказано (сжато)
+
+Как именно retail-GC решает отправить 9107 #2 и какие точно поля кладёт (нет GC/Valve-DS бинарников); тайминг между `ReportGCQueuedMatchStart(minStage=2)` и 9107 #2; наличие/отсутствие `reservation` во втором 9107 (клиенту безразлично, если `game_type&0xF` не accept); точное условие `*(this+4)` в `sub_103F7400` (для reconnect-пути) и способ, которым p446 выставляет `dword_1520ED8C&2`; когда retail-server шлёт `Server2GCClientValidate`(9153) (не Accept); `serverid` (потребитель не найден).
+
+### §39 STATUS
+
+CONFIRMED:
+- `client.dll` имеет ровно 5 GC→client matchmaking-job'ов: 9103, 9104, 9107, 9110, 9112 (msgid→factory→handler в 39.2); 9107 — единственный, создающий reservation-callback в сессии.
+- Клиент **не отправляет GC-сообщений при Accept и при `0x25`-обработке**; Accept = UDP `0x21 stage 2`.
+- Callback после Accept в accept-режиме `(stage 2, mode 0)` ничего не делает при status 4; connect возможен только через callback `mode!=0`, создаваемый (в сессии) лишь 9107 с не-accept `game_type` (либо локальными reconnect-путями `(2,1)`).
+- Второй 9107 должен нести **`reservationid` и адрес заново** (нет fallback на сохранённые); `reservation` необязателен (default ⇒ `game_type=0`); `account_ids/party_ids/rankings` клиентом не используются.
+- 9104 не запускает connect; 9110 не запускает connect внутри сессии (флаг `&2` из файла при старте).
+- `server.dll` (Not-Valve-DS): нет job'а 9105, нет `Q/G`-вызовов slot 149 (только `"R%p"` из `ServerWelcome`), нет `RoundStats`, `9106` — периодический status без stage, slot 41 = «Not Valve ds…», slot 47 = `return 0`.
+- engine `sub_101BC1D0` вызывает `ReportGCQueuedMatchStart(minStage, accounts[], count)` на каждый `0x21` `Q`-roster'а.
+- project446: `sub_100789A0` = обработчик `case 9102` (не отправитель 9107); 9107 со значением `reservation.game_type=a3` (для connect — 0) строит `sub_100774E0`; server-hook slot 47 (`sub_100BAD90`) → `sub_100992A0` → backend; строки p446 `"native connect armed…"` / `"falling back to the game_type=0 reserve"`.
+
+HIGH CONFIDENCE:
+- p446: перед connect-9107 шлётся 9104 `matchmaking=4`; native-путь p446 — отмена mode-0 check и перевооружение в `(2,1)` (`kind==1 ∧ stage==2`), при неудаче fallback на 9107 `game_type=0`.
+- Retail-GC отправляет клиентам 9107 (не-accept) после того, как сервер (Valve-DS `server.dll`) репортит `minStage>=2` через `ReportGCQueuedMatchStart` (замыкание на клиенте + engine-хук + независимая реализация p446). Доказательство GC-звена отсутствует.
+- Во время Accept-сессии бит `dword_1520ED8C&2` не выставлен (устанавливается только при старте из файла).
+- Ctor callback персистит reservation в `cfg/qmmconnect.dt`.
+
+HYPOTHESIS:
+- Во втором retail-9107 `reservation` отсутствует либо `game_type=0` (клиенту неважно).
+- Локальный reconnect `(2,1)` мог бы служить альтернативным test-триггером без 9107 #2 (условия `sub_103F7400` не сняты до конца).
+
+UNRESOLVED:
+- Точное retail-поведение GC (когда/какими полями шлёт 9107 #2); Valve-DS `server.dll` реализация `ReportGCQueuedMatchStart`.
+- Способ у нас: источник сигнала «все приняли» для `ClientGC` (нет канала `srcds`→клиент), account реального игрока на сервере, fake-stage 2, Danger Zone Q-roster, cookie lifecycle (§34).
+
+**Ответ на главный вопрос**: **Является ли post-Accept trigger вторым `MatchmakingGC2ClientReserve (9107)`? — ДА** (для внутрисессионного GC→client канала это единственный возможный вариант; CONFIRMED на клиентской стороне). Сообщение: `CMsgGCCStrike15_v2_MatchmakingGC2ClientReserve` (msgid 9107, protobuf-флаг) с полями `reservationid`, `direct_udp_ip`, `direct_udp_port` (или `server_address`), `map` и **без** `reservation` либо с `reservation.game_type & 0xF ∉ {8,9,10,11,13}`; приходит при активном `game/mmqueue` (иначе клиент шлёт `MatchmakingStop`). Что оно вызывает: уничтожение accept-callback `(1,0)`, создание `(2,2)`, 0x21 stage 2 → 0x25 status 4 → KV `QueueConnect` → `QueueConnectToServer(map,2.1)` → connect.
+
+### NEXT STEP AFTER §39
+
+1. **Решение пользователя по каналу сигнала «все приняли»** (единственный оставшийся блокер для harness): (a) test-only канал `ServerGC`→`ClientGC` (например, простое TCP/UDP-уведомление; `ServerGC` получает `minStage==2` через vtable-хук slot 47 `ReportGCQueuedMatchStart`, как p446 `sub_100BAD90`, либо через собственный учёт 0x21); (b) локальная test-эвристика на клиенте (таймер после Accept) — не retail-эквивалент; (c) reconnect-путь `(2,1)` (нужен отдельный RE условий `sub_103F7400`, `dword_1520ED8C&2`, `*(this+4)`).
+2. После решения — **дизайн** (не код) двухфазного 9107 для `ClientGC`: 9107 #1 `reservation{game_type∈accept,…}`, 9107 #2 `{reservationid, direct_udp_ip/port, map}` без `reservation`; и серверной части (`Q`-roster `[real][fake…]`, fake-0x21 stage 1/2, источник account реального игрока).
+3. Перед кодом — короткая **live-проверка только логами существующего прототипа**: отправить первый 9107 accept-типа с корректным `reservation` и убедиться (по `console.log` + `developer 2`), что клиент показывает ready-up (`Server reservation check … ready-up!`) и после ручного Accept зависает на `mode 0` (ожидаемое поведение §38.4) — валидирует модель без правок логики.
+4. Отложено: cookie lifecycle/повторная reservation (§34), Danger Zone Q-roster, полный retail-GC (недоступен).
+
+---
+
+## 40. ReportGCQueuedMatchStart / Server→GC Completion Path (read-only статический RE)
+
+**Режим**: только чтение. Код/`.cpp`/`.h`/CMake/config/protobuf/server.dll/engine/backend не менялись, сборка/деплой/Git не выполнялись, runtime не понадобился. Источники: оба source-дерева (`D:\cstrike15_src-master` = более ранний дамп с комментариями в `.proto`; `D:\ida_deobfuscated_grok\...\src` = более поздний), IDA-базы `server.dll`, `engine.dll`, `client.dll`, `p446_csgo_gc.dll`, а также Linux-сборки из `csgo\bin` (`server.so` 32-бит — новая; `server_i486.so` — старая). Скрипты/дампы: scratchpad `...\re\q40_a..q.py`. Уровни: **CONFIRMED / HIGH / HYPOTHESIS / UNRESOLVED**.
+
+### 40.1 Короткий ответ
+
+- **Контракт `ReportGCQueuedMatchStart` восстановлен полностью** — по source `engine/baseserver.cpp` (совпадает с бинарником `engine.dll sub_101BC1D0`): engine вызывает её **не «на каждый 0x21»**, а **только когда 0x21 повысил stage конкретного участника roster'а** (`bThisClientJustConfirmed`, т.е. 0→1 и 1→2), для резервации типа `Q`. Параметры: `minStage` = минимальный stage по всему roster'у; `accounts[]` = `uint32` AccountID участников с `stage>=2 ∨ stage>minStage` в порядке roster'а; `count` = их число. Возврат `bool` (`bReady`) включает встроенный spoof auto-accept.
+- **Тело функции в оригинальных исходниках УДАЛЕНО** («`Removed for partner depot`») — в обоих деревьях; в retail-бинарниках (Windows `server.dll` slot 47 `0x10145510` и Linux `server.so` `0xAF9BA0`) — заглушка `return 0`. То же удалено: GC-job на `9105`/хранилище `sm_QueuedServerReservation`, `ReportRoundEndStatsToGC`, `NetworkIDValidated`. **Оригинальная реализация server→GC для queued-match НЕ сохранилась ни в source, ни в binary.**
+- **Где формируется GC→client 9107** — ни в одном доступном дереве/бинарнике: это код внешнего GC (`k_EMsgGCCStrike15_v2_MatchmakingGC2ClientReserve`: «GC reports to clients matchmaking reservation»). Известно только назначение и то, что клиент делает с сообщением (§38-§39).
+- **Архитектурный вариант**: literal **A опровергнут**, **B подтверждён** для оригинального server→GC пути (реализация удалена, отправителя нет, у нас нет транспорта `ServerGC`↔`ClientGC`), но RE выявил **C′**: та же информация «все приняли» **уже доставляется каждому клиенту по UDP** (`0x25 awaiting=0`, broadcast всем участникам) и попадает в client-callback (`sub_103F7C00`, no-op при `mode 0`) — отдельный server→GC→client bridge не единственный способ (40.9).
+
+### 40.2 Где объявлена и реализована — таблица
+
+| Место | Что |
+|---|---|
+| `public/eiface.h` (grok `:688`; ранний `:679`) | `virtual bool ReportGCQueuedMatchStart( int32 iReservationStage, uint32 *puiConfirmedAccounts, int numConfirmedAccounts ) = 0;` (в раннем дереве `void`) — метод `IServerGameDLL` |
+| `game/server/gameinterface.h` (`:147`) | `CServerGameDLL::ReportGCQueuedMatchStart`, комментарий **«Marks the queue matchmaking game as starting»**, стоит сразу после `UpdateGCInformation()` |
+| `game/server/cstrike15/cs_gameinterface.cpp` (grok `:156-160`; ранний `:155-158`) | **тело пустое**: `/** Removed for partner depot **/` (grok-дерево `return true;`, ранний — `void`) |
+| `engine/baseserver.cpp` (grok `:2226`; ранний `:2183`) | **единственный вызывающий**: `CBaseServer::ReplyReservationCheckRequest` |
+| retail `server.dll` (1352) | `CServerGameDLL` vtable `0x1085cb10` slot 47 `sub_10145510` = `return 0` (5 байт) |
+| retail Linux `server.so` (32-бит, 24 МБ) | vtable `_ZTV14CServerGameDLL` `0x114A5C0`, slot 47 `sub_AF9BA0` = `return 0` — **идентично Windows**; slot 44 `IsValveDS` `sub_6BFAA0` = `return 0`; slot 46 `sub_AFAFD0` (реальный код, ~935 байт) |
+| Linux `server_i486.so` (12 МБ) | **старая** сборка: vtable `CServerGameDLL` 29 слотов (до `GetStandardSendProxies`), QMM-интерфейса нет — не релевантна |
+| `engine.dll` | вызов `(*(dword_139097E8 vtbl+188))` (`sub_101BC1D0`, `0x101bc69e-0x101bc6b8`), `dword_139097E8` = `serverGameDLL` |
+| других переопределений/подклассов/function pointers/registration | **не найдено** ни в одном дереве (grep по `ReportGCQueuedMatchStart|QueuedMatchStart`) |
+
+**Раскладка слотов `CServerGameDLL` (по порядку объявления в `gameinterface.h`, подтверждена содержимым слотов в retail `server.dll` и `server.so`)**: 41 `ShouldAllowDirectConnect` (тело печатает `"Not Valve ds: Direct-connect is allowed\n"`, `return 1` — это **штатный код source**, `gameinterface.cpp:2083`), 42 `FriendsReqdForDirectConnect`, 43 `IsLoadTestServer` (`-sv_load_test`), **44 `IsValveDS`** (`return IsValveDedicated()`; в public-дереве `public/const.h:472` **`#define IsValveDedicated() false`** ⇒ retail `return 0`), 45 `GetExtendedServerInfoForNewClient`, **46 `UpdateGCInformation`** (retail: реальный код `sub_103E7AE0`), **47 `ReportGCQueuedMatchStart`**. **Поправка к §39.6**: строка «Not Valve ds…» — это slot 41 и обычный source-код, а не признак «урезанной сборки»; признак — slot 44 `IsValveDS ≡ false` (макрос `IsValveDedicated()=false` в public-сборке).
+
+### 40.3 Точная семантика вызова (source ≡ binary)
+
+Код (`engine/baseserver.cpp:2165-2308`, `CBaseServer::ReplyReservationCheckRequest`), условия входа: `uiReservationStage!=0 ∧ reservationMatch(cookie) ∧ uiClientSteamID!=0 ∧ sv_mmqueue_reservation[0]=='Q'`; для `'G'` вызова **нет** (там `awaiting=0`).
+
+1. Игрок ищется в `m_arrReservationPlayers` по `CSteamID(uiClientSteamID).GetAccountID()` (`bThisClientShouldJoin`); сохраняются `adr`, `token`; **`bThisClientJustConfirmed = (qmp.m_uiReservationStage < uiReservationStage)`** — только если stage игрока **строго вырос**; затем `qmp.stage = uiReservationStage`. Считается `uiActualAwaitingClients` = число игроков со stage `< uiReservationStage`.
+2. **Только при `bThisClientJustConfirmed ∧ serverGameDLL`**: `uiMinReservationLevel` = `min(stage)` по roster'у (стартует с `0xFFFF`); `arrConfirmedAccounts` = `m_uiAccountID` (в порядке roster'а) тех, у кого **`stage>=2 ∨ stage>min`**; `DevMsg("Match start status: %u/%u\n", min, count)`; **`bReady = serverGameDLL->ReportGCQueuedMatchStart(min, arrConfirmedAccounts.Base(), count)`**. Комментарий в source: *«Report to the GC the new level of confirmations»*.
+3. **`bSpoofForcefulConnect = uiActualAwaitingClients ∧ bReady ∧ (uiReservationStage==2)`**: при `true` всем игрокам roster'а (с ненулевым account) ставится `stage=2` («We are spoofing auto-accept»), `uiActualAwaitingClients=0`.
+4. **`if (!uiActualAwaitingClients ∨ bSpoof)`**: `m_flReservationExpiryTime = net_time + sv_mmqueue_reservation_extended_timeout` (21 c по умолчанию), `DevMsg("Reservation time extended +%d sec (%d, %d)")` — «match is now confirmed to be starting».
+5. Ответ `0x25` отправителю; **если `!uiAwaitingClients` — broadcast `0x25` всем участникам roster'а** на сохранённые `adr/token` (source: «force them to connect … as soon as everybody confirmed»).
+
+**Binary-сверка**: `engine.dll sub_101BC1D0` строки `0x101bc533 "Reservation from client %u: %u"` / `0x101bc69e "Match start status: %u/%u"`; переменная `v69` (=`bThisClientJustConfirmed`) ставится только при росте stage игрока (`*(v36+40) < v66`), вызов идёт под `if (v65 ∧ v69 ∧ dword_139097E8)`; аргументы `(v42=minStage, v79=accounts ptr, HIDWORD(v79)=count)`; отбор `v46>=2 ∨ v46>v42`; spoof/extend — как в source. **CONFIRMED (source и decompile совпадают)**.
+
+**Ответы по параметрам**:
+- `minStage` — минимум `m_uiReservationStage` по roster'у (`0` пока кто-то ещё не прислал stage 1; `1` когда все «пробили» соединение; `2` когда все нажали Accept). Stage-значения из proto-комментария `RoundStats.reservation_stage`: **«1 = connection probing, 2 = ready-up»**.
+- `accounts[]` — `uint32` AccountID (не SteamID64) **в порядке токенов `[%x]` Q-payload** (нулевые пропущены, `SetReservationCookie`, `baseserver.cpp:4217-4296`); содержит игроков, продвинувшихся выше текущего минимума либо достигших stage 2. `Base()` пустого вектора может быть `NULL` (p446 проверяет `a3!=null`).
+- `count` — размер `accounts[]`; **не** размер roster'а.
+- Вызывается **и на stage 1, и на stage 2, и отдельно для каждого игрока** (каждое повышение), **не только при полной готовности**. Последний вызов при полном Accept: `minStage=2`, `count==размер roster'а`.
+- Не вызывается: при повторных 0x21 того же stage (retry engine-запроса ~1 c), при неизвестном account (`awaiting=127`), для `G`, при `serverGameDLL==NULL`.
+
+**Пример** (roster `[R,F1,F2]`, все stage 0): `R:1` → `Report(0,[R],1)`; `F1:1` → `Report(0,[R,F1],2)`; `F2:1` → `Report(1,[],0)` + `awaiting=0`⇒broadcast⇒попап; `R:2` → `Report(1,[R],1)`; `F1:2` → `Report(1,[R,F1],2)`; `F2:2` → **`Report(2,[R,F1,F2],3)`** + `awaiting=0`⇒broadcast + `Reservation time extended`.
+
+**Поправка к §39.6/C4**: «на каждый 0x21» неточно — только на **повышение stage** участника.
+
+### 40.4 Что именно удалено и что осталось (server-side GC-инфраструктура)
+
+Помечено **`Removed for partner depot`** (grok-дерево): `CServerGameDLL::UpdateGCInformation` (`cs_gameinterface.cpp:150`), **`ReportGCQueuedMatchStart`** (`:156`), `CServerGameClients::NetworkIDValidated` (`:163`), `CCSGameRules::ReportRoundEndStatsToGC` (`cs_gamerules.cpp:15085`, параметр `CMsgGCCStrike15_v2_MatchmakingServerRoundStats**`), клиентские куски `cdll_client_int.cpp`/`clientmode_shared.cpp`, `cstrike15_matchmaking_utils.cpp:32`, `cs_gamerules_survival.cpp:2564`, инвентарь и др.
+
+**Сохранились остатки, доказывающие удалённый код**: (1) `static CMsgGCCStrike15_v2_MatchmakingGC2ServerReserve CCSGameRules::sm_QueuedServerReservation` (`cs_gamerules.h:1223`, `.cpp:1673`) — **читается** (tournament event/stage name, `pre_match_data`, best-of-N; `cs_gamerules.cpp:4659-5020`), но **ни одной записи** в дереве (только `#if 0`-тестовые `mutable_*`); (2) `CCSGameRules::m_pQueuedMatchmakingReportedRoundStats` (`CMsgGCCStrike15_v2_MatchmakingServerRoundStats*`) — инициализация/`delete`; (3) `m_pQueuedMatchmakingReservationString` — копия `sv_mmqueue_reservation`; (4) в `cs_gameinterface.cpp` сохранён ТОЛЬКО job `ClientJob_EMsgGCCStrike15_v2_GC2ServerReservationUpdate` (9142, `engine->UpdateHltvExternalViewers`) и `Helper_FillServerReservationStateAndPlayers`. **Единственный вызывающий `IVEngineServer::ReserveServerForQueuedGame` в обоих деревьях отсутствует** (только объявление в `eiface.h:525`, реализация `vengineserver_impl.cpp:1609`) — вызывавший GC-job удалён. `gcsdk` в деревьях — только proto-includes (`steammessages.proto`), клиента/сервера GCSDK нет; `base_gcmessages.proto`: `//k_EMsgGCServerWelcome = 4005; // GC => server`, `//k_EMsgGCServerHello = 4007; // server => GC`.
+
+**Retail `server.dll` (Windows) — что реально есть**:
+- `sm_QueuedServerReservation` = `unk_10AE6AC8`: **0 записей, 47 чтений, 2 address-of (ctor/dtor)** ⇒ **код, сохраняющий GC-резервацию, отсутствует** (CONFIRMED xref-скан). Job для 9105 отсутствует (RTTI-перечень §39.6).
+- Реализован **`UpdateGCInformation`** (slot 46, `sub_103E7AE0`; в source удалён): шлёт `MatchmakingServerReservationResponse` (9106) — **status/advert**, а не completion: перепосылка раз в `RandomInt(480,720)` c или при смене карты/флагов/версии/адреса; поля (`Helper_Fill…`, `sub_103E7890`): `server_version`, `map`, `tv_info`, `reward_player_accounts` (игроки на CT/T) / `idle_player_accounts`; **`reservation`/stage не заполняются**. Engine вызывает `UpdateGCInformation` из: `SvMmQueueReservationChanged` (смена `sv_mmqueue_reservation`, `baseserver.cpp:239`), `baseserver.cpp:3267`, `sv_main.cpp:2896` (SV_ActivateServer), `sv_steamauth.cpp:1169`, `hltvclientstate.cpp:599`.
+- `CGCClientJobServerWelcome` (`sub_1059BEB0`) — единственный вызов slot 149 `ReserveServerForQueuedGame` со строкой **`"R%p"`** (от `gscookieid`, поле 18 `CMsgCStrike15Welcome`), затем `serverGameDLL->UpdateGCInformation()`.
+- `Server2GCClientValidate` (9153): отправитель `sub_103E7CE0` — vtable-метод (data `0x1085c73c`), к Accept отношения не имеет.
+- `CProtoBufMsg<MatchmakingServerRoundStats>` / `<MatchEnd>` / `<Server2GCKick>` в `server.dll` **нет** ⇒ эти server→GC сообщения **не отправляются** (классы protobuf присутствуют только как сгенерированный код).
+
+### 40.5 Server→GC / GC→server сообщения по proto-комментариям (ранний source-дамп `cstrike15_gcmessages.proto`)
+
+| ID | Сообщение | Направление / назначение (комментарий Valve) | Есть отправитель в retail |
+|---|---|---|---|
+| 9105 | `GC2ServerReserve` | **«GC reports to server matchmaking reservation»** (GC→server). Поля после `pre_match_data`-блока: *«next section … doesn't have to be filled out by the server.dll when communicating with GC»* ⇒ **то же сообщение сервер вкладывает как «Current matchmaking reservation of the server»** в 9106/9108/9113 (только `account_ids`, `game_type`, `match_id`, `server_version`) | приёма нет |
+| 9106 | `ServerReservationResponse` | **«Server reports its state to GC»** (`reservationid`, вложенная `reservation`, `map`, `gc_reservation_sent`, …) | **да** (`UpdateGCInformation`, без reservation) |
+| 9107 | `GC2ClientReserve` | **«GC reports to clients matchmaking reservation»**; тем же сообщением GC может просить другой сервер стать GOTV-relay (сервер отвечает 9106) | клиентский job есть (§39.2) |
+| 9108 | `ServerRoundStats` | **«Server reports its round stats to GC»**; поля **`confirm`** (`GC2ServerConfirm`: «Confirmation to deliver») и **`reservation_stage`** (**«1 = connection probing, 2 = ready-up»**) | нет (`ReportRoundEndStatsToGC` удалён) |
+| 9111 | `ServerMatchEnd` | «Server reports its match end stats to GC» (`stats`, `confirm`, `rematch`, `aborted_match`, …) | нет |
+| 9113 | `Server2GCKick` | «Server notifies the GC that a client has been kicked» (+ `reservation`) | нет |
+| 9114 | `GC2ServerConfirm` | подтверждение доставки для 9108/9111 (`token, stamp, exchange, retry`) | нет |
+| 9116 | `GC2ServerRankUpdate` | «GC reports players rank updates to the game server» | нет |
+| 9118 | `ServerNotificationForUserPenalty` | GC→server | job есть (только приём) |
+| 9142 | `GC2ServerReservationUpdate` | GC→server, зрители (Twitch) | job есть |
+
+**Вывод по `GC2ServerReserve` (п.4 задания)**: (а) **создаёт его GC** (9105 GC→server) как начальную резервацию — *initial reservation*, до Accept; (б) **принимал** его удалённый server-job (в retail отсутствует); (в) это **не completion-signal**: как вложенное в 9106/9108/9113/9107 сообщение он лишь описывает «текущую резервацию» (accounts/game_type/match_id); (г) в клиентском 9107 вложенное `reservation` используется клиентом только ради `game_type&0xF` (§38.5); (д) с `ReportGCQueuedMatchStart` напрямую не связан, кроме того, что **его `account_ids` — тот же набор аккаунтов, чьи токены `[%x]` формируют roster**, на который ссылается `accounts[]`. **Сообщением, в которое server.dll должен был упаковывать `iReservationStage`, по proto-схеме является `MatchmakingServerRoundStats` (`reservation_stage`, `reservation{account_ids…}`, `confirm`)** — **HYPOTHESIS**: единственное поле во всей схеме с точной семантикой «stage резервации (1=probing, 2=ready-up)», ни одного C++-потребителя в source/binary нет (grep `reservation_stage` только в `.proto`/`.pb.h`).
+
+### 40.6 Server GC lifecycle (п.5)
+
+**Подтверждено retail-бинарником + source**: `srcds` (`server.dll` как GC-клиент через GCSDK) → `CMsgServerHello` (4007) → GC `ServerWelcome` (4005; `CMsgClientWelcome`+`CMsgCStrike15Welcome{gscookieid,…}`) → `CGCClientJobServerWelcome`: проверка версии (`"Version out of date (GC wants %d, we are %d)!"`), лог `"GC Connection established for server version %d, instance idx %d"`, при наличии `gscookieid`: `ReserveServerForQueuedGame("R…")`, затем `UpdateGCInformation` (9106). Далее периодически/по изменениям — 9106.
+**Оригинальная (удалённая) часть**: GC → `9105 GC2ServerReserve` (server-job: сохранить в `sm_QueuedServerReservation`, собрать payload `Q<cookie>,<matchid>,<n>:[acct]…{caster}` → `engine->ReserveServerForQueuedGame`) → игроки: 9107 (GC→clients, «ready-up» reserve) → клиенты шлют UDP `0x21` stage 1/2 → engine на каждое повышение вызывает `ReportGCQueuedMatchStart(minStage,accounts,count)` → удалённый код формирует server→GC сообщение (**HYPOTHESIS**: `9108` с `reservation_stage`; **UNRESOLVED**) → GC-state → GC→clients **9107** (второй, не-accept `game_type`; §39). Звенья после `9105` в доступных бинарниках/исходниках **отсутствуют**; реконструирован только контракт по интерфейсам и proto.
+
+### 40.7 project446 — сопоставление (п.6)
+
+- **Аналог есть и он именно тот же вызов**: `sub_100BADE0` (вызывается из `sub_10094C50` на srcds) ставит vtable-хук `server.dll` `IServerGameDLL` (`ServerGameDLL005/001`): slot **47 → `sub_100BAD90`** (env `GC_VTBL_REPORT_MATCH_START` меняет номер слота), slot 4 `GameFrame` → `sub_100BAD70`, slot **41 → `IsGCSendAvailable`** (p446 в логах называет slot 41 «IsValveDS», но по раскладке 40.2 это **`ShouldAllowDirectConnect`** — их именование неточно). Строки p446: `"ReportGCQueuedMatchStart hooked at VTable[%d]… (ready-up accepts now come from the engine)"` vs `"…hook disabled by env — ready-up accepts stay a guess from MatchmakingStop"` — то есть **p446 сначала «угадывал» Accept по 9102, затем перешёл на engine-репорт**.
+- **Caller/параметры/downstream**: хук `sub_100BAD90(this, minStage, accounts*, count)` (thiscall): вызывает оригинал (retail = 0) и при `accounts!=null ∧ 1≤count≤64` вызывает **`sub_100992A0`** — пакует `[minStage u8][count u8][account u32 × count]` и отправляет **своим транспортом** `sub_10115780(10024, payload)` через WS-сессию srcds→«C# backend» (`dword_1074AB84+264`, флаг подключения `+424`). Возвращаемое значение оригинала не подменяется (spoof не включается).
+- **Собственный транспорт p446**: srcds-сторона использует нумерацию **10000-10025** поверх WS (10000/10001 match-report/disconnect, **10010 RoundStats bridge** (`"[GC] RoundStats bridge WS10010: match_id round players mvp"`), **10024 report queued-match-start**, 10008 `CanJoin`, 10025 quest…) — то есть p446 **не восстанавливал GC-job, а построил отдельный bridge srcds→backend**; клиентская сторона — ID 9101/9102/9103/9109/… (GC-протокол) + 1000-/2500-/4006-/9700-серии. Для Accept на стороне client-DLL — 12-байтные «ReadyUp counter»-события `(resId u64, count u32)` от backend (`sub_100F5D00 case 3`, §39.7).
+- **Откуда p446 знает «все приняли»**: (1) engine-репорт `10024` → backend; (2) `9102` Accept-hook (`sub_100787F0`, запасной «guess»); backend формирует counter-события и «Connect reserve» (`MatchFoundInfo.game_type==0`, §39.7). Аналога `sm_QueuedServerReservation`/9105-job у p446 нет — reservation строит их GC-DLL (§28.5).
+
+### 40.8 Что ещё показал engine: «completion» уже доходит до клиента без GC
+
+`0x25` при `awaiting==0` (source `:2288-2307`) **рассылается всем участникам roster'а**, и на каждом клиенте engine `sub_1008A610` ставит `state=4` и вызывает `CServerConfirmedReservationCheckCallback::vftable[0]` (§38.3). В accept-режиме (`stage 2, mode 0`) `sub_103F7C00` затем возвращается без действий, потому что retail **ожидает 9107 от GC**. То есть информация, которую GC получал бы от сервера через `ReportGCQueuedMatchStart`, **параллельно и независимо** приходит клиенту UDP-путём; p446 использует ровно этот клиентский сигнал (`sub_100EA7B0`: перевооружение callback в `(mode 1, stage 2)` + fallback на 9107 `game_type=0`, §39.7).
+
+### 40.9 Архитектурный вывод (п.7): A / B / C
+
+- **A (existing GC connection, достаточно восстановить server job) — опровергнут в буквальной форме.** (i) «Server job», который надо восстановить, — не GC-job, а **тело метода `ReportGCQueuedMatchStart`** в `server.dll` (stub в Windows и Linux binary); GC-job'ов на стороне сервера для этого механизма нет ни в source, ни в binary. (ii) У нас `ServerGC`/`ClientGC` — **два изолированных in-process объекта** (`SharedGC`, `InstallGC(dedicated)`), в проекте нет никакого сетевого кода (только неиспользуемый `TestMM` UDP-responder) — даже работающий srcds→`ServerGC` сигнал не доходит до `ClientGC` (разные процессы/машины).
+- **B (в retail server→GC completion path реально отсутствует из-за удалённого partner-depot кода → нужен отдельный bridge для собственного GC) — ПОДТВЕРЖДЁН** для оригинального пути: реализация удалена из source и заглушена в обоих retail-бинарниках; p446 пошёл по этому же пути (собственный WS-bridge srcds→backend, ID 10024).
+- **C (другой существующий механизм) — частично найден**: не server→GC, а **client-local**: тот же факт «все приняли» существует на клиенте как `state=4` engine-запроса (`0x25` broadcast) и доходит до `vftable[0]` callback'а; retail-клиент его игнорирует только на `mode 0`. Возможность для нашего `ClientGC` (в процессе клиента) использовать этот локальный сигнал без srcds→ClientGC bridge следует из RE, но **не проверена**, требует hook/polling (сигнатура/vtable-hook `sub_103F7C00` или чтение `cb+128→state`) — **HIGH как возможность, HYPOTHESIS как реализация**.
+
+Итог: выбор между «bridge (B)» и «client-local trigger (C′)» — **решение следующего этапа**, оба варианта следуют из RE; RE не даёт основания считать существующий GC-канал (A) достаточным.
+
+### 40.10 Поправки к §37-§39 (старое не удалялось)
+
+| # | Было | Стало |
+|---|---|---|
+| C1 | §39.6/C4: «engine вызывает `ReportGCQueuedMatchStart` при каждом `0x21`» | Только при **повышении stage** участника (`bThisClientJustConfirmed`), для `Q`; список `accounts[]` = `stage>=2 ∨ stage>min`. |
+| C2 | §39.6: «`server.dll` — публичная сборка „Not Valve DS“ (строка `Not Valve ds…`)» | Строка — штатный код `ShouldAllowDirectConnect` (slot 41, есть в source). Признак public-сборки — slot 44 `IsValveDS ≡ 0` (`#define IsValveDedicated() false`, `public/const.h:472`); Linux `server.so` идентичен. |
+| C3 | §37.8/§39: `ReportGCQueuedMatchStart` — «заглушка»; неясно, удалена ли | Тело **удалено в source** («Removed for partner depot») и **stub в обоих binary**; вместе с ним удалены GC-job 9105 и хранилище `sm_QueuedServerReservation` (0 записей в `server.dll`). |
+| C4 | §39.6: slot 46 — «`CServerGameDLL` метод, шлёт 9106» | Это **`UpdateGCInformation`** (по порядку объявления); в source удалён, в retail реализован; вызывается engine из 5 мест (смена `sv_mmqueue_reservation`, activate, heartbeat-функции). |
+| C5 | §39.7: p446 патчит slot 41 = «`IsValveDS`» | По раскладке — `ShouldAllowDirectConnect`; настоящий `IsValveDS` — slot 44. |
+| C6 | §38.13/§39.10: канал «srcds→клиент» — единственный блокер | Есть второй источник того же сигнала на клиенте (40.8); блокер — выбор между bridge и client-local trigger. |
+
+### 40.11 Не удалось установить
+
+Что именно удалённый код отправлял в GC (сообщение/поля) при вызове; реакция GC; формат 9107 #2 в retail (§39); точное назначение `gc_reservation_sent`/`confirm` в этом контексте; содержимое p446-сообщения 10024 на стороне backend; нет ли у Valve-DS `server.so` (не публичного) иного тела.
+
+### §40 STATUS
+
+CONFIRMED:
+- Источник контракта (source): `eiface.h`/`gameinterface.h`/`baseserver.cpp` — параметры `iReservationStage, puiConfirmedAccounts, numConfirmedAccounts`; единственный вызывающий — `CBaseServer::ReplyReservationCheckRequest`; условия вызова (только `'Q'`, только повышение stage участника, `serverGameDLL!=NULL`), состав `accounts[]` (`stage>=2 ∨ stage>min`, порядок roster'а, `uint32` AccountID), `minStage` = min по roster'у; `bReady`→spoof при `stage==2` и `awaiting>0`; «Reservation time extended»; broadcast `0x25` при `awaiting==0`. Совпадает с `engine.dll sub_101BC1D0`.
+- Тело `ReportGCQueuedMatchStart` удалено в обоих source-деревьях («Removed for partner depot»); в retail Windows `server.dll` (slot 47 `0x10145510`) и Linux `server.so` (32-бит, `0xAF9BA0`) — `return 0`; `IsValveDS`(slot 44) ≡ 0.
+- В retail `server.dll` нет GC-job'а 9105, нет отправителей `RoundStats`/`MatchEnd`/`Server2GCKick`; `sm_QueuedServerReservation` (`0x10AE6AC8`) — 0 записей; единственный `ReserveServerForQueuedGame` — `"R%p"` из `ServerWelcome`; `UpdateGCInformation` (slot 46) реализован и шлёт 9106 без reservation/stage.
+- В обоих деревьях отсутствуют вызывающий `ReserveServerForQueuedGame`, клиент/сервер GCSDK и любая реализация server→GC для queued match; сохранился только `GC2ServerReservationUpdate`-job и `Helper_FillServerReservationStateAndPlayers`.
+- Proto-комментарии: `9105` GC→server reservation, `9106` server→GC state, `9107` GC→clients reservation, `9108 RoundStats` с `reservation_stage` («1 = connection probing, 2 = ready-up») и `confirm`, `9114 GC2ServerConfirm`.
+- project446: хук slot 47 `sub_100BAD90` → `sub_100992A0` → собственный WS-транспорт msg `10024` `[minStage][count][accounts]`; оригинал возвращает 0; p446 не восстанавливал GC-job.
+- В проекте нет сетевого кода между `ServerGC` и `ClientGC`.
+- `0x25 awaiting=0` рассылается всем участникам и доходит до client-callback (state 4).
+
+HIGH CONFIDENCE:
+- Удалённая реализация `ReportGCQueuedMatchStart`/9105-job/`ReportRoundEndStatsToGC` существовала во внутреннем дереве Valve (сохранившиеся остатки: `sm_QueuedServerReservation`, `m_pQueuedMatchmakingReportedRoundStats`, `m_pQueuedMatchmakingReservationString`, `reservation_stage`).
+- Оригинальный GC получал стадию/список подтверждённых аккаунтов от сервера, а GC→clients 9107 (второй) формировался на стороне GC (внешний код).
+- Вариант A в буквальной форме невозможен в нашем стеке; вариант B верен для retail-пути; client-local trigger (C′) возможен по данным RE.
+
+HYPOTHESIS:
+- Удалённый код отправлял `MatchmakingServerRoundStats` с `reservation_stage=iReservationStage`, `reservation.account_ids` и `confirm` (по proto-схеме единственное подходящее поле).
+- `9114 GC2ServerConfirm` — подтверждение доставки для 9108/9111 (exchange/retry).
+- Client-local trigger (hook/polling `sub_103F7C00`) реализуем без bridge.
+
+UNRESOLVED:
+- Точный формат/момент retail server→GC сообщения и реакция GC; точное содержимое второго 9107.
+- Полное содержимое сообщения `10024` у p446 на backend; поведение Valve-DS-сборки (нет бинарника).
+- Выбор архитектуры для нас (bridge vs client-local), account реального игрока на сервере, fake-stage 2, Danger Zone Q-roster, cookie lifecycle (§34).
+
+### NEXT STEP AFTER §40
+
+1. **Решение пользователя по архитектуре сигнала «все приняли»** — теперь на основании RE: (B) test-only bridge `ServerGC`(srcds, через vtable-хук slot 47 как p446 `sub_100BADE0/BAD90`)→`ClientGC` с payload `[minStage][count][accounts]` (контракт из 40.3), либо (C′) client-local trigger внутри клиента (наблюдение `state==4` при `stage 2, mode 0` на `CServerConfirmedReservationCheckCallback`, RVA §38.14). Вариант A отпадает.
+2. Перед выбором (read-only): для C′ — определить надёжную точку наблюдения в `client.dll` (сигнатура `sub_103F7C00`/чтение `dword_152EAD0C→+128→state` и `+132/+140`), что p446 уже делает через `sub_100EA580` (сигнатура 0x33 байт), и поведение при повторных 0x25; для B — какой транспорт допустим (файл/UDP/loopback) и как передать account реального игрока.
+3. После выбора — дизайн (не код) двухфазного 9107 и fake-0x21 (stage 1/2) по контракту 40.3; сначала лог-проверка существующего прототипа (без изменения логики).
+4. Отложено: cookie lifecycle (§34), Danger Zone Q-roster, восстановление формата 9108/9114 (не требуется для нашего GC).
+
+---
+
+## 41. Compact Matchmaking Checkpoint — основной контекст для продолжения работы
+
+**Это консолидация §34–§40; новых исследований нет.** При расхождении с более ранними разделами приоритет у этого раздела, а в нём — у выводов §38–§40 (они исправили часть гипотез §35–§37). Детали, RVA-таблицы и доказательства — в §38 (цепочка Accept→QueueConnect, RVA `client.dll`), §39 (второй 9107), §40 (`ReportGCQueuedMatchStart`). Обозначения: **[C]** подтверждено, **[H]** высокая уверенность, **[?]** не доказано.
+
+### 41.1 Рабочая цепочка (retail-модель; `client.dll` — живой клиент, `engine.dll` жёстко грузит `bin\client.dll`)
+
+```
+1  Play → CLobbyMenuSingleton::vfn2 (client.dll sub_103F6240): game/mmqueue=registering; шлёт 9101 MatchmakingStart
+2  GC → client: 9107 #1 (reservationid, адрес, map, [reservation{game_type}])  → handler sub_103F49F0: mmqueue=reserved,
+       callback (stage 1, mode 0) если game_type&0xF ∈ {8,9,10,11,13}, иначе (stage 2, mode 2)
+3  GC → server: reservation Q (или G) → IVEngineServer::ReserveServerForQueuedGame → roster на сервере (m_arrReservationPlayers)
+4  client → server: UDP 0x21 stage=1 (engine-запрос, повтор ~1 c) → server ReplyReservationCheckRequest → 0x25 (awaiting,total);
+       awaiting==0 ⇒ 0x25 рассылается ВСЕМ участникам → client state=4 (stage 1) → mmqueue=reserved, JS-попап, RaiseReadyUp(true,0,total)
+5  Accept: JS LobbyAPI.SetLocalPlayerReady('accept') → (stage→2) → новый UDP 0x21 stage=2
+6  server: 0x25 (awaiting,total); частичный → RaiseReadyUp(true,total−awaiting,total) (счётчик попапа)
+7  0x25 awaiting=0 (все приняли) → client state=4 при (stage 2, mode 0) → callback НИЧЕГО НЕ ДЕЛАЕТ   ← точка остановки accept-режимов
+8  GC → client: второй 9107 (не-accept game_type / без reservation) → destroy старого callback, новый (2,2) → 0x21 stage 2 → 0x25 state 4
+9  callback (mode≠0): mmqueue=connect, KV "QueueConnect" сохраняется → per-frame poller (helper_time+2100 мс, нет loading plaque, та же сессия)
+       → session->Command("QueueConnect") → matchmaking.dll → UpdateClientReservation + StartLoadingScreenForCommand("connect <adr>")
+10 Cbuf_AddText → консольная `connect` → CBaseClientState::Connect (сервер сверяет reservation cookie) → загрузка карты
+```
+Для **не-accept режимов (Casual)** шаги 4-7 не нужны: 9107 #1 без `reservation` (⇒ `game_type=0` ⇒ callback (2,2)) сразу идёт по пути 8→10 — так работает наш прототип.
+
+### 41.2 Что уже реально работает (live-проверено на Casual, клиент + отдельный `srcds` 192.168.1.150:27016) [C]
+
+- `csgo_gc.dll` инжектирован в `csgo.exe` (`InstallGC(false)`) и `srcds.exe` (`InstallGC(true)`); общий compile-time cookie **`GameServerCookieId = 0x293A206F6C6C6548`** (клиент и сервер собраны из одной сборки).
+- Клиент: `ClientGC::OnMatchmakingStart` (только eGame 7/Casual) шлёт 9107 (`reservationid`=cookie, адрес `matchmaking.test_server_address/port` из runtime `config.txt`, `map`, **без `reservation`**) → штатный client-side 9107 → QueueConnect → `connect`.
+- Сервер: `ServerGC` после `k_EMsgGCServerHello` ставит reservation `G<cookie>,<cookie>,1:` — постановка через `PostToHost(HostEvent::ReserveServerForQueuedGame)` → выполнение на **главном потоке** из `Hk_SteamGameServer_RunCallbacks` (`steam_hook.cpp`), вызов `IVEngineServer` (`VEngineServer023`, **vtable slot 149**, offset 0x254, `bool(const char*)`).
+- Fallback интерфейса `SteamGameServer014→013→012→011→010` (для v010 — свой `BLoggedOn` slot 2, в 011–014 slot 8).
+- Reservation-check 0x21/0x25 против retail-engine srcds работает (при `G` сервер отвечает `awaiting=0`); первый матч Casual доходил до сервера и подключал клиента.
+- **Известная проблема (не чинится в этом цикле)**: `ReserveServerForOurCookie()` вызывается один раз за жизнь `srcds` ⇒ второй матч даёт «Failed to connect to the match» (§34).
+- **Не проверено live**: любой accept-режим (8/9/10/11/13), `Q`-reservation, попап Accept, второй 9107.
+
+### 41.3 Ключевые подтверждённые функции
+
+| Роль | RVA / имя |
+|---|---|
+| `IServerGameDLL::ReportGCQueuedMatchStart` (`CServerGameDLL` slot 47) | retail `server.dll` `0x10145510` = `return 0`; Linux `server.so` `0xAF9BA0` = `return 0`; vtable `server.dll` `0x1085cb10`; тело удалено и в source («Removed for partner depot») |
+| `CBaseServer::ReplyReservationCheckRequest` | `engine.dll sub_101BC1D0` (source `engine/baseserver.cpp:2165-2308`); `SetReservationCookie` — `baseserver.cpp:4217-4296` |
+| `ReserveServerForQueuedGame` | `IVEngineServer` slot 149 → `engine.dll sub_101B50F0` → `sub_101BFAA0` |
+| Приём `0x25` / callback | engine `sub_1008A610` (`state=4` при `awaiting==0`); `CServerConfirmedReservationCheckCallback::vftable[0]`: **`client.dll sub_103F7C00`** (`client_panorama sub_103DF430`) |
+| Callback ctor `(stage, mode)` | `client.dll sub_103F7980` (`client_panorama sub_103DF1C0`); поля `cb+128` handle, `cb+132` mode, `cb+140` stage; глобал активного cb `dword_152EAD0C` |
+| **Accept handler (stage→2 + новый 0x21)** | `client.dll sub_103F7B60` (`client_panorama sub_103DF3A0`); вызывается из classifier `client.dll sub_105C3D90` (`client_panorama sub_10580C20`) при `reason != "deferred"` (`stricmp`-семантика: `0`=равно) |
+| `LobbyAPI.SetLocalPlayerReady(reason)` | JS-мост `sub_10583500`→`sub_10584F70`→`sub_10585B00`→classifier (только локальный игрок); JS: кнопка Accept ⇒ `'accept'`, NQMM-автоприём ⇒ `'deferred'` |
+| **9107 handler** | job `ClientJob_…MatchmakingGC2ClientReserve` (msgid 9107, factory `sub_103F4D30`) → **`client.dll sub_103F49F0`** (`client_panorama sub_103DC4B0`) |
+| **QueueConnect builder** | внутри callback `sub_103F7C00` (единственный xref строки `"QueueConnect"`); сохранение KV `sub_103F7240` (`client_panorama sub_103DEA80`), глобал KV `dword_152EAD18` |
+| Исполнение QueueConnect | per-frame poller `sub_103F7350` (из `CUiComponent_Lobby::Update` `sub_105C2330`) → `session->Command`; matchmaking.dll `sub_1001B290` |
+| `RaiseReadyUp(bool,int,int)` | `client_panorama sub_1057FF90` (slot 0 lobby-подобъекта; событие `PanoramaComponent_Lobby_ReadyUpForMatch`, регистрация `client.dll 0x105C4900`); JS `PopupAcceptMatch.ReadyForMatch` |
+| События попапа | `ServerReserved(map)` (`word_10D501B0`, raiser `sub_103E2DF0`/`client.dll sub_103FB5C0`) → `PartyMenu.ShowMatchAcceptPopUp`; `QueueConnectToServer(map,2.1)` (`sub_103DEA80`) → `LoadingScreen.Init` |
+| 9104 handler | `client.dll sub_103F1C00` (`client_panorama sub_103D9900`): `matchmaking==4`→`connect`, `≠0,4`→`searching`, `3`→`RaiseReadyUp(false,0,0)`; connect не запускает |
+
+### 41.4 Accept semantics [C]
+
+- `game_type` в 9101/9107 = `(eGame & 0xF) | (eMapGroup << 8)`; клиент использует `& 0xF`.
+- **Требуют Accept** (`{8,9,10,11,13}`): 8 Competitive, 9 Cooperative, 10 Wingman (`scrimcomp2v2`), 11 ScrimComp5v5, 13 Danger Zone (`survival`).
+- **Не требуют**: 4 ArmsRace, 5 Demolition, 6 Deathmatch, **7 Casual**, 12 Skirmish. (project446 использует более узкий набор `{8,10,13}` — их выбор.)
+- **stage 1** = «connection probing» (клиент достучался до сервера; при `awaiting==0` показывается Accept-попап); **stage 2** = «ready-up» (игрок нажал Accept). Stage хранится per-player на сервере; меняют его только входящие `0x21`.
+- **`0x25 awaiting=0`** ⇒ **все** игроки roster'а прислали stage ≥ запрошенного (для stage 2 — полный Accept); сервер в этом случае рассылает `0x25` всем участникам (по сохранённым `adr/token`). `awaiting=127` = аккаунта нет в roster'е (status 4 не придёт). Клиентских `required_count/accepted_count` не существует; счётчик попапа = `total − awaiting` из ответов `0x25` (`awaiting`=byte0, `total`=byte1).
+- **Критично**: callback для accept-режимов создаётся как `(stage 1, mode 0)`, и при `stage 2 ∧ mode 0` `sub_103F7C00` на `state==4` **ничего не делает**. `mode` пишет только ctor; connect возможен только после нового 9107 (или локальных reconnect-путей `(2,1)`).
+- Наш текущий 9107 #1 **без `reservation`** ⇒ `game_type=0` ⇒ callback `(2,2)` ⇒ **Accept обходится** (для Casual это правильно). Для accept-режимов 9107 #1 **обязан** нести `reservation.game_type ∈ {8,9,10,11,13}`.
+
+### 41.5 Server reservation [C]
+
+- Payload (`ReserveServerForQueuedGame`): **`G<cookie_hex>,<matchid_hex>,<bReserve>:`** (без roster, `awaiting=0` всегда — Casual/in-progress) и **`Q<cookie_hex>,<matchid_hex>,<n>:[acct_hex][acct_hex]…`** (+ `{caster}` токены). Токены `[%x]` = `uint32` AccountID; нулевые токены пропускаются, но занимают позицию (draft index / team padding); порядок токенов = порядок roster'а.
+- Roster `m_arrReservationPlayers` = `QueueMatchPlayer_t{m_uiAccountID, m_adr, m_uiToken, m_uiReservationStage}` строится в `SetReservationCookie` **только при смене cookie** (при том же cookie повторный вызов ничего не пересобирает).
+- `0x21` (33 байта): `0xFFFFFFFF`, `0x21`, protocol const (13805), поля запроса, cookie, **SteamID клиента**; `0x25` (19 байт): `0xFFFFFFFF`, `0x25`, `hostVersion`, `token`, `stage`, `awaiting` u8, `total` u8. Условия обработки Q: cookie совпал, `stage≠0`, `steamid≠0`, `sv_mmqueue_reservation[0]=='Q'`; игрок ищется по `CSteamID(steamid).GetAccountID()` (нет в roster ⇒ `awaiting=127,total=0`).
+- **`ReportGCQueuedMatchStart(minStage, accounts[], count)`**: engine вызывает **только при повышении stage участника** (0→1, 1→2) для `Q`; **`minStage`** = минимум stage по roster'у (0 — кто-то ещё не прислал stage 1; 1 — все «пробили»; 2 — все приняли); **`accounts[]`** = `uint32` AccountID игроков со `stage>=2 ∨ stage>minStage` в порядке roster'а; **`count`** = размер `accounts[]` (не roster'а). Финальный вызов при полном Accept: `minStage=2`, `count==размер roster'а`. Возврат `true` при `stage==2 ∧ awaiting>0` включает встроенный spoof (всем `stage=2`) — в retail он `false`. После завершения сервер продлевает резервацию (`sv_mmqueue_reservation_extended_timeout`=21 c).
+- Retail-реализация отсутствует (source удалён, binary — stub); GC-job 9105 и хранилище GC-резервации в `server.dll` отсутствуют; сервер шлёт GC только status `9106` (без stage).
+- С **одним реальным игроком** в `Q`-roster (`[real]`) логика сервера даёт `awaiting=0,total=1` на stage 1 и на stage 2 — то есть одиночный Accept возможен без fake players (выведено из source-логики; **[H]**, live не проверялось). Требуется account реального игрока в Q-payload на стороне `srcds` (источник — **[?]**).
+
+### 41.6 Второй 9107 — только подтверждённое
+
+- **Необходим** для перехода после полного Accept: клиентский код не имеет другого внутрисессионного пути (замыкание по job'ам: у `client.dll` ровно 5 GC→client matchmaking-job'ов — 9103, 9104, **9107**, 9110, 9112; 9104/9110 connect не запускают). Клиент **ничего не шлёт в GC при Accept** (только UDP `0x21 stage 2`).
+- **Именно его handler `sub_103F49F0`** запускает reservation callback → QueueConnect: уничтожает accept-callback `(1,0)`, создаёт `(2,2)`, ctor сразу регистрирует 0x21 stage 2 → `0x25` state 4 → KV `QueueConnect`.
+- Требования клиента к содержимому: `reservationid` (== cookie сервера, идёт в 0x21, KV и `UpdateClientReservation`) и **адрес** (`direct_udp_ip`+`direct_udp_port` или `server_address`) — **перечитываются из нового сообщения, fallback на сохранённые нет**; `reservation` отсутствует либо `game_type & 0xF ∉ {8,9,10,11,13}` (0 подходит); `map` желательно; `account_ids/party_ids/rankings` клиентом не используются; `game/mmqueue` в этот момент должен быть непустым (иначе клиент отвечает `MatchmakingStop`).
+- **Точное содержимое и источник retail-9107 #2 неизвестны [?]**: GC-код (`ReportGCQueuedMatchStart`-реализация → GC → clients) отсутствует и в source, и в binary. project446 шлёт connect-вариант как 9107 с `reservation.game_type=0` (перед ним 9104 `matchmaking=4`), а также имеет native-путь «перевооружения» accept-callback в `(mode 1, stage 2)`; это **не** доказательство retail-поведения.
+- Доступная точка client-local наблюдения сигнала «все приняли» (возможность, не проверено): `state==4` на активном callback при `stage 2 ∧ mode 0` (`client.dll sub_103F7C00`, `dword_152EAD0C`, handle `cb+128`).
+
+### 41.7 Что НЕ исследовать сейчас
+
+- Повторные reservation / cookie lifecycle (§34) — позже.
+- Fake players (roster `[real][fake…]`, fake-`0x21`) — после рабочего single-player Accept.
+- Danger Zone Q-roster / team-split — позже.
+- Backend (Java/C#, admin panel) — позже.
+- Inventory/skins — к текущей задаче не относится.
+- Не менять: retail Accept matrix, `required_count`, bypass Accept, `QueueConnect`-логику; Git не трогать.
+
+### 41.8 Unresolved (для справки)
+
+Retail-формат и триггер 9107 #2 на стороне GC; источник сигнала «все приняли» у нас (bridge `ServerGC`→`ClientGC` vs client-local наблюдение `state==4`); источник account реального игрока на `srcds` для Q-payload; fake-stage 2; Danger Zone Q-roster; cookie lifecycle/повторная reservation; источник глобального списка аватаров попапа (`dword_10DBD140`); назначение `serverid` в 9107.
+
+### 41.9 Текущая задача после checkpoint
+
+**Реализовать минимальный trigger второго `MatchmakingGC2ClientReserve (9107)` после `0x25 awaiting=0`, используя уже существующий client-side 9107 → QueueConnect путь** (9107 #2: те же `reservationid`+адрес+`map`, без `reservation`/с не-accept `game_type`). Предусловия для проверки одним игроком: 9107 #1 с `reservation.game_type ∈ accept-set` (иначе Accept обходится), `Q`-reservation на `srcds` с account реального игрока. Выбор источника сигнала (`0x25 awaiting=0` на клиенте vs сигнал от сервера) — решение при постановке реализации; код/сборка/деплой в рамках этого checkpoint'а не выполнялись.
+
+
+---
+
+## 42. Accept flow MVP (TEST ONLY): fake roster + client-side trigger второго 9107 — реализация
+
+**Статус: код написан и собран (`build_local.bat`, 0 warnings/errors), НЕ развёрнут в игру, live не проверялся.** Это первая реализация по §41.9; она не отменяет §34–§41. Обозначения: **[C]** подтверждено (source/binary), **[H]** высокая уверенность (вывод из source/RE, не live), **[?]** не проверено.
+
+### 42.1 Новые подтверждённые факты (из source `engine/baseserver.cpp` и PE-анализа, без нового широкого RE)
+
+- **[C] Третье поле payload `ReserveServerForQueuedGame` — `bReserve`, а не число игроков.** `sscanf(payload+1, "%llx,%llx,%d:", &cookie, &matchId, &bReserve)` (`baseserver.cpp:4187`). Поправка к §41.5 (там `<n>`): `Q<cookie>,<matchid>,1:[acct]…` — «1» = reserve; `…,0:` = `Unreserve()` (только если cookie совпал). Число игроков определяется числом `[%x]`-токенов.
+- **[C] Резервация без клиентов сама не живёт долго (21 с) — и только так и сбрасывается.** `IsReserved()` = `m_nReservationCookie != 0` (`baseserver.h:265`); `sv_mmqueue_reservation_timeout` = 21 (`baseserver.cpp:242`, диапазон 5..180) задаёт только `m_flReservationExpiryTime = net_time + timeout` при каждом успешном `bReserve=1` (повторный вызов с тем же cookie разрешён: `!IsReserved() || cookie == GetReservationCookie()`, `baseserver.cpp:4195`). Cookie (и roster) сбрасывает `CGameServer::UpdateHibernationState` (`sv_main.cpp:~1975-2030`): `SetReservationCookie(0)`, когда сервер зарезервирован ∧ клиентов нет ∧ прошло `sv_hibernate_postgame_delay` с момента последнего ухода клиента ∧ `m_flReservationExpiryTime` истёк (или 0); также при `SetHibernating(true)` (`sv_main.cpp:1915`). Следствие **[H]**: известная проблема §34 («второй матч не подключается») согласуется с этим сбросом; для Accept-теста одноразовой резервации при старте srcds недостаточно — игрок должен успеть нажать Play и Accept.
+- **[C] `CBaseServer::Unreserve()` (source `baseserver.cpp:4298`) только обнуляет `m_flReservationExpiryTime` и вызывает `UpdateHibernationState`; cookie/roster он НЕ очищает немедленно** (они уйдут через механизм выше). Поэтому «свежий roster» = `bReserve=0` + ожидание сброса cookie движком + новый `Q…`; немедленный повторный `Q` с тем же cookie roster (и stage'и участников) не пересоберёт.
+- **[C] `m_arrReservationPlayers` пересобирается только при смене cookie** (`SetReservationCookie`): повторный `Q…` с тем же cookie roster/stage не трогает; сброс roster'а происходит только при `SetReservationCookie(0)` (см. выше).
+- **[C] Семантика popup'а (поправка к формулировке flow из задачи):** `awaiting` в `0x25` = число игроков roster'а со `stage < stage запроса`. Поэтому **popup (state 4 при stage 1) появляется, когда ВСЕ участники прислали stage 1** (awaiting=0 на stage 1), а **ненулевой awaiting виден на stage 2** (пока кто-то не принял) и как счётчик `RaiseReadyUp(true, total−awaiting, total)`. Fake-участники поэтому должны «пробить» stage 1 раньше/вместе с реальным игроком, иначе popup не покажется.
+- **[C] `bSpoofForcefulConnect` в `ReplyReservationCheckRequest` вступает в силу только со следующего `0x21`**: `uiAwaitingClients` присваивается ДО вызова `ReportGCQueuedMatchStart`, а spoof обнуляет только локальный `uiActualAwaitingClients`. Поэтому для fake-accept выбран путь «fake шлёт настоящие `0x21 stage 2`», а не hook `ReportGCQueuedMatchStart` (slot 47) с `return true`.
+- **[C] `engine.dll` принимает UDP через `wsock32!recvfrom` (импорт по ordinal 17), а `wsock32!recvfrom` — не forwarder, а обёртка, вызывающая `ws2_32!WSARecvFrom` синхронно (без overlapped, 1 буфер)** (проверено разбором PE-импортов `engine.dll` и машинного кода `SysWOW64\wsock32.dll` RVA `0x15d0`). Хук `ws2_32!recvfrom` НЕ увидел бы клиентские `0x25`; надо хукать `WSARecvFrom` (`sendto` wsock32 — forwarder на `ws2_32!sendto`, `recv`/`recvfrom` — обёртки).
+- **[C] Формат `0x21`** (проверено по `baseclientstate.cpp:370` и `ReplyReservationCheckRequest`): `FFFFFFFF | 0x21 | hostVersion u32 | token u32 | stage u32 | cookie u64 | steamid u64` (33 байта); `0x25`: `FFFFFFFF | 0x25 | hostVersion | token | stage | awaiting u8 | total u8` (19 байт).
+
+### 42.2 Что реализовано (файлы: `csgo_gc/test_accept.h/.cpp` (новые), `gc_client.h/.cpp`, `gc_server.h/.cpp`, `gc_shared.h`, `config.h/.cpp`, `main.cpp`, `CMakeLists.txt`, `examples/config.txt`)
+
+1. **Client, `ClientGC::OnMatchmakingStart`**: Casual (eGame 7) — без изменений (прямой 9107 без `reservation` + локальный `PostToHost` резервации). Accept-режимы **8 Competitive / 10 Wingman / 13 Danger Zone** (`AcceptTest::FindModeByGame`): первый 9107 = `reservationid`(cookie) + `direct_udp_ip/port` + `server_address` + `map` (`de_dust2` / `de_lake` / `dz_blacksite`) + **`reservation.game_type = request.game_type()`** (⇒ клиентский handler создаёт accept-callback `(stage 1, mode 0)` = штатный Accept-popup); локальная резервация с клиента НЕ шлётся (srcds резервирует себя сам). Режимы 9 и 11 пока игнорируются (лог).
+2. **Client, детект «все приняли»**: `AcceptTest::InstallClientRecvHook()` (из `InstallGC(false)`, funchook на `ws2_32!WSARecvFrom`). Пока «armed» (после accept-9107 #1, таймаут 180 с, снимается на новый 9101/`MatchmakingStop`/после срабатывания), хук разбирает только дейтаграммы длиной 19 с `FFFFFFFF 25` от адреса резервации; условие **`stage == 2 ∧ awaiting == 0`** ⇒ `ClientGC::PostToGC(GCEvent::ReservationFullyAccepted)`. Это единственное место, где определяется `awaiting=0` на нашей стороне (само вычисление — движок srcds).
+3. **Client, второй 9107** (`ClientGC::OnReservationFullyAccepted`): `serverid=1`, `direct_udp_ip/port`, `reservationid=GameServerCookieId`, `map`, `server_address` — те же значения, что в первом; **`reservation` не задаётся** (`game_type` читается как 0 ⇒ вне accept-набора) ⇒ существующий путь: новый callback `(2,2)` → `0x21 stage 2` → `0x25` → QueueConnect → `connect ip:port` (§38/§39).
+4. **Server (srcds), `ServerGC::StartAcceptTestRoster`** при `matchmaking.test_accept_mode` ∈ {`competitive`,`wingman`,`dangerzone`} (иначе — прежняя `G`-резервация Casual, ничего не меняется): `Q<cookie>,<cookie>,1:[real][fake1]…` с roster 10 / 4 / 16 (1 реальный + 9 / 3 / 15 fake). Реальный AccountID — из `matchmaking.test_real_account_id` (srcds сам его узнать не может; клиент печатает его в `[MM-ACCEPT]` при 9101). Fake AccountID детерминированы: **`0xFA4E0000 + i`** (i=1..N−1; выше любого реального Steam account id).
+5. **Fake players** (`AcceptTest::FakeRoster`, поток внутри srcds): один UDP-сокет, шлёт байт-точные `0x21` на `test_server_address:test_server_port` с fake SteamID (universe 1, type 1, instance 1). Фазы: **Probe** — каждую секунду stage 1 для всех fake (после первой задержки 1.5 с); при получении `0x25 stage 1 awaiting 0` (popup у клиента) → **Accept** — через `test_fake_accept_delay_ms` (2500) fake по очереди (шаг 150 мс) шлют stage 2. Итоговый `awaiting=0` наступает, когда stage 2 выставлен и у реального игрока (его `0x21 stage 2` после нажатия Accept) — при любом порядке; сервер сам шлёт `0x25` всем участникам (клиенту в том числе). Никаких GC-клиентов/игровых процессов у fake нет — только записи roster'а + UDP-пакеты.
+6. **Keep-alive/повторный матч (только для Accept-roster)**: поток раз в 8 с повторяет `Q…` (обновляет 21-секундный таймаут; roster не пересобирается); при первом NetMessage от подключившегося клиента keep-alive и fake замолкают; когда отключается последний клиент (`ClientSOCacheUnsubscribe`) — `Unreserve`, пауза 12 с (пока движок сбросит cookie/roster) и новый `Q` (свежий roster, stage 0); та же перезарядка через 90 с, если после fake-accept никто не подключился.
+
+### 42.3 Что НЕ доказано [?] / известные допущения
+
+- **[?] Весь flow live не запускался** (сборка ≠ проверка). Особенно: (a) хук `WSARecvFrom` реально видит `0x25` в `csgo.exe` (обоснование — импорт по ordinal 17 + машинный код `wsock32!recvfrom`); (b) `hostVersion=13805` в fake-`0x21` совпадает с `GetHostVersion()` srcds (косвенно: реальный клиент с тем же значением получал `0x25` от srcds); (c) сервер принимает `0x21` с произвольным SteamID из loopback/LAN-адреса; (d) `total` в popup = размер roster'а.
+- **[?] Retail-условия, при которых Valve-GC посылает 9107 #2, остаются неизвестными** (§41.6); реализованный trigger — TEST ONLY замена (вариант C′ §40.9, но через сетевой слой, а не через `client.dll sub_103F7C00`).
+- **[H] Соответствие адреса `0x25`**: фильтр по `IP:port` источника = `test_server_address:test_server_port`; при multi-homed srcds ответ может прийти с другого IP.
+- Один реальный игрок на srcds; несколько реальных игроков (party) — не поддерживается. Режимы Cooperative (9) и ScrimComp5v5 (11) не подключены. Cookie по-прежнему compile-time константа; fake/keep-alive не решают §34 для Casual `G`.
+
+### 42.4 Что проверить вручную (live)
+
+1. srcds `csgo_gc/config.txt`: `"test_accept_mode" "competitive"`, `"test_real_account_id" "<steamid64 & 0xffffffff>"`; клиент и srcds — одна и та же сборка DLL, тот же `test_server_address/port`.
+2. Логи srcds: `[MM-ACCEPT] FakeRoster started`, `arming Q reservation`, `ReserveServerForQueuedGame result: 1`, `-> Reservation cookie …`; при Play — `Reservation from client …`, `server reports stage 1 awaiting=0 total=10`.
+3. Клиент: Match Found/Accept popup (Competitive), счётчик принявших растёт после нажатия; логи `[MM-ACCEPT] 0x25 from reservation server: stage=2 awaiting=0`, `sending the second MatchmakingGC2ClientReserve`, затем QueueConnect → `connect` → загрузка карты.
+4. Casual регрессия: без `test_accept_mode` Casual идёт по старому пути (9107 без `reservation`, `G`).
+
+### §42 STATUS
+Реализованы (собраны, не проверены live): Q-reservation с fake-roster, fake stage 1/2 через реальные `0x21`, client-side детект `0x25 stage 2 awaiting 0` (хук `WSARecvFrom`), второй 9107 → существующий QueueConnect-путь; keep-alive резервации на srcds для Accept-режимов. Новые CONFIRMED: `bReserve` (не число игроков), 21-секундный таймаут резервации, `wsock32!recvfrom → WSARecvFrom`, семантика `awaiting` (popup на stage 1 awaiting=0).
+
+### NEXT STEP AFTER §42
+Live-тест Competitive (1 real + 9 fake) по 42.4; по логам определить, на каком шаге цепочка обрывается (хук / fake `0x21` / popup / второй 9107 / connect). Затем Wingman/Danger Zone. Замена TEST ONLY триггера на backend-driven (сигнал сервер→GC) и cookie lifecycle (§34) — только после подтверждения.

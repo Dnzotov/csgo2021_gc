@@ -67,6 +67,9 @@ GCConfig::GCConfig()
     {
         m_testServerAddress = std::string(matchmaking->GetString("test_server_address", m_testServerAddress));
         m_testServerPort = matchmaking->GetNumber("test_server_port", m_testServerPort);
+        m_testAcceptMode = std::string(matchmaking->GetString("test_accept_mode", m_testAcceptMode));
+        m_testRealAccountId = matchmaking->GetNumber("test_real_account_id", m_testRealAccountId);
+        m_testFakeAcceptDelayMs = matchmaking->GetNumber("test_fake_accept_delay_ms", m_testFakeAcceptDelayMs);
     }
 }
 
