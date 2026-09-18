@@ -146,6 +146,12 @@ static GCWrapper<ServerGC, NetworkingServer> *s_serverGC;
 // fetched when s_serverGC is initalized, nulled when it's destroyed
 static ISteamGameServer *s_steamGameServer;
 
+// true if s_steamGameServer actually points at an ISteamGameServer010 instance (see
+// GetSteamGameServer below) -- its vtable layout differs from 011-014 (BLoggedOn is slot 2
+// there vs slot 8 in 011-014), so callers must not call through s_steamGameServer directly
+// without checking this first
+static bool s_steamGameServerIsV010;
+
 static uint64_t GetUserSteamId(HSteamPipe pipe, HSteamUser user)
 {
     ISteamUser *interface = s_actualSteamClient->GetISteamUser(user, pipe, STEAMUSER_INTERFACE_VERSION);
@@ -172,13 +178,41 @@ static ISteamNetworkingMessages *GetSteamNetworkingMessages(HSteamPipe pipe, HSt
 
 static ISteamGameServer *GetSteamGameServer(HSteamPipe pipe, HSteamUser user)
 {
-    ISteamGameServer *interface = s_actualSteamClient->GetISteamGameServer(user, pipe, STEAMGAMESERVER_INTERFACE_VERSION);
-    if (!interface)
+    // STEAMGAMESERVER_INTERFACE_VERSION (currently "SteamGameServer014") isn't guaranteed to be
+    // available on every steamclient.dll a dedicated server host might have installed -- fall
+    // back through the same versions the SteamGameServerProxy0XX classes above already know how
+    // to represent (010-014), same idea as the SteamClient0XX fallback chain in Hk_CreateInterface.
+    struct VersionAttempt
     {
-        Platform::Error("Could not get %s", STEAMGAMESERVER_INTERFACE_VERSION);
+        const char *version;
+        bool isV010;
+    };
+
+    static constexpr VersionAttempt attempts[] = {
+        { "SteamGameServer014", false },
+        { "SteamGameServer013", false },
+        { "SteamGameServer012", false },
+        { "SteamGameServer011", false },
+        { "SteamGameServer010", true },
+    };
+
+    for (size_t i = 0; i < std::size(attempts); i++)
+    {
+        ISteamGameServer *interface = s_actualSteamClient->GetISteamGameServer(user, pipe, attempts[i].version);
+        if (interface)
+        {
+            Platform::Print("Using %s\n", attempts[i].version);
+            s_steamGameServerIsV010 = attempts[i].isV010;
+            return interface;
+        }
+
+        if (i + 1 < std::size(attempts))
+        {
+            Platform::Print("%s not available, trying %s\n", attempts[i].version, attempts[i + 1].version);
+        }
     }
 
-    return interface;
+    Platform::Error("Could not get a supported SteamGameServer interface (tried 014 down to 010)");
 }
 
 // this class sucks but we need to do it this way because
@@ -1049,6 +1083,71 @@ static void Hk_SteamAPI_UnregisterCallback(class CCallbackBase *pCallback)
     Og_SteamAPI_UnregisterCallback(pCallback);
 }
 
+// EXPERIMENTAL server-side reservation bridge (RESEARCH_FINDINGS.md #26/#28/#29/#30).
+// Must run on the main thread: CBaseServer::ReserveServerForQueuedGame has no internal locking
+// (#29.5), and this is called from the HostEvent drain below, which #30.2 confirmed (via direct
+// retail engine.dll disassembly) shares a common per-frame caller with the engine's own
+// SteamAPI_RunCallbacks/SteamGameServer_RunCallbacks call sites -- i.e. the same thread every
+// frame, not the GC's own WorkerThread. Interface version and vtable slot are both confirmed
+// against our retail engine.dll (not just project446's) in #29.1/#29.2 -- VEngineServer023 is the
+// only version this build registers, so no fallback to other versions is attempted.
+static void *ResolveVEngineServer()
+{
+    static void *s_engineServer;
+    static bool s_attempted;
+
+    if (s_attempted)
+    {
+        return s_engineServer;
+    }
+
+    s_attempted = true;
+
+    // module lookup + CreateInterface() live in platform_windows.cpp/platform_unix.cpp so this
+    // file doesn't need <windows.h> -- SendMessage() below is also a member function name here
+    // and elsewhere in this file, and windows.h's SendMessage macro would break every one of them
+    s_engineServer = Platform::ResolveModuleInterface("engine.dll", "VEngineServer023");
+    if (!s_engineServer)
+    {
+        Platform::Print("[MM] VEngineServer023 not found\n");
+    }
+
+    return s_engineServer;
+}
+
+static void DispatchReserveServerForQueuedGame(const std::vector<uint8_t> &payload)
+{
+    Platform::Print("[MM] Calling IVEngineServer::ReserveServerForQueuedGame\n");
+
+    void *engineServer = ResolveVEngineServer();
+    if (!engineServer)
+    {
+        return;
+    }
+
+#ifdef _WIN32
+    std::string payloadString{ reinterpret_cast<const char *>(payload.data()), payload.size() };
+
+    // vtable slot 149 (offset 0x254 / 596 bytes), confirmed to be
+    // CVEngineServer::ReserveServerForQueuedGame via direct retail engine.dll disassembly and
+    // cross-checked against project446's independent implementation (RESEARCH_FINDINGS.md #29.2/#29.3)
+    using ReserveServerForQueuedGame_t = bool(__thiscall *)(void *, const char *);
+    void **vtable = *reinterpret_cast<void ***>(engineServer);
+    auto reserveFn = reinterpret_cast<ReserveServerForQueuedGame_t>(vtable[149]);
+
+    bool result = reserveFn(engineServer, payloadString.c_str());
+    Platform::Print("[MM] ReserveServerForQueuedGame result: %d\n", result ? 1 : 0);
+
+    if (!result)
+    {
+        Platform::Print("[MM] ReserveServerForQueuedGame failed\n");
+    }
+#else
+    (void)payload;
+    Platform::Print("[MM] ReserveServerForQueuedGame bridge is Windows-only, ignoring\n");
+#endif
+}
+
 static void Hk_SteamAPI_RunCallbacks()
 {
     Og_SteamAPI_RunCallbacks();
@@ -1075,6 +1174,10 @@ static void Hk_SteamAPI_RunCallbacks()
 
             case HostEvent::MicroTransactionResponse:
                 runMicroTransactionResponse = true;
+                break;
+
+            case HostEvent::ReserveServerForQueuedGame:
+                DispatchReserveServerForQueuedGame(event.buffer);
                 break;
 
             default:
@@ -1124,7 +1227,12 @@ static void Hk_SteamGameServer_RunCallbacks()
         // only run server gc when logged on as an attempt to more accurately mimic real gc behaviour
         // FIXME: does csgo handle CMsgConnectionStatus?
         assert(s_steamGameServer);
-        if (!s_steamGameServer->BLoggedOn())
+        // s_steamGameServerIsV010: see GetSteamGameServer -- ISteamGameServer010's BLoggedOn is at
+        // a different vtable slot than 011-014, so it needs its own correctly-typed call
+        bool loggedOn = s_steamGameServerIsV010
+            ? reinterpret_cast<ISteamGameServer010 *>(s_steamGameServer)->BLoggedOn()
+            : s_steamGameServer->BLoggedOn();
+        if (!loggedOn)
         {
             return;
         }
@@ -1143,6 +1251,10 @@ static void Hk_SteamGameServer_RunCallbacks()
 
             case HostEvent::NetMessage:
                 s_serverGC->m_networking.SendMessage(event.id, event.buffer.data(), static_cast<uint32_t>(event.buffer.size()));
+                break;
+
+            case HostEvent::ReserveServerForQueuedGame:
+                DispatchReserveServerForQueuedGame(event.buffer);
                 break;
 
             default:

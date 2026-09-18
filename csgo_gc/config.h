@@ -45,6 +45,12 @@ public:
     int Level() const { return m_level; }
     int Xp() const { return m_xp; }
 
+    // EXPERIMENTAL, see test_mm.h/RESEARCH_FINDINGS.md #26/#27 -- address/port of the
+    // dedicated server used for the manual Casual reservation-check test. NOT the future
+    // matchmaking backend (that'll be matchmaking.backend_address/backend_port).
+    std::string_view TestServerAddress() const { return m_testServerAddress; }
+    uint16_t TestServerPort() const { return m_testServerPort; }
+
     float GetRarityWeight(uint32_t rarity) const;
 
 private:
@@ -70,6 +76,9 @@ private:
     int m_commendedLeader{ 0 };
     int m_level{ 0 };
     int m_xp{ 0 };
+
+    std::string m_testServerAddress{ "127.0.0.1" };
+    uint16_t m_testServerPort{ 27015 };
 
     // default to valve weights
     std::vector<RarityWeight> m_rarityWeights{

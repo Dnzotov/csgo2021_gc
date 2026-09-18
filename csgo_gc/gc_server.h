@@ -17,6 +17,7 @@ private:
     void HandleClientSOCacheUnsubscribe(uint64_t steamId);
 
     void SendServerWelcome();
+    void ReserveServerForOurCookie();
     void IncrementKillCountAttribute(GCMessageRead &messageRead);
 
     bool m_sentWelcome{};

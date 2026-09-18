@@ -23,6 +23,7 @@ private:
         const google::protobuf::MessageLite &message, uint64_t jobId = JobIdInvalid);
 
     void OnClientHello(GCMessageRead &messageRead);
+    void OnMatchmakingStart(GCMessageRead &messageRead);
     void AdjustItemEquippedState(GCMessageRead &messageRead);
     void ClientPlayerDecalSign(GCMessageRead &messageRead);
     void UseItemRequest(GCMessageRead &messageRead);

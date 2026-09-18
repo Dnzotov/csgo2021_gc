@@ -256,4 +256,22 @@ bool PatchServerBrowserAppId(uint32_t appId)
     return false;
 }
 
+void *ResolveModuleInterface(const char *moduleName, const char *interfaceVersion)
+{
+    HMODULE module = GetModuleHandleA(moduleName);
+    if (!module)
+    {
+        return nullptr;
+    }
+
+    using CreateInterfaceFn = void *(*)(const char *, int *);
+    auto createInterface = reinterpret_cast<CreateInterfaceFn>(GetProcAddress(module, "CreateInterface"));
+    if (!createInterface)
+    {
+        return nullptr;
+    }
+
+    return createInterface(interfaceVersion, nullptr);
+}
+
 } // namespace Platform

@@ -24,6 +24,11 @@ void *LoadDynamicLibrary(const void *pathBuffer);
 // GetProcAddress/dlsym
 void *GetSymbol(void *handle, const char *symbol);
 
+// resolve an interface from an ALREADY-LOADED module's own CreateInterface export, without
+// loading/incrementing the module's refcount. returns nullptr if the module isn't loaded, doesn't
+// export CreateInterface, or doesn't have the requested interface version.
+void *ResolveModuleInterface(const char *moduleName, const char *interfaceVersion);
+
 // set an envar to the specified value even if it's already set
 void SetEnvVar(const char *name, const char *value);
 

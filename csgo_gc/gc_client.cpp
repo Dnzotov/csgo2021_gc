@@ -76,6 +76,10 @@ void ClientGC::HandleMessage(uint32_t type, const void *data, uint32_t size)
             ClientRequestJoinServerData(messageRead);
             break;
 
+        case k_EMsgGCCStrike15_v2_MatchmakingStart:
+            OnMatchmakingStart(messageRead);
+            break;
+
         case k_EMsgGCSetItemPositions:
             SetItemPositions(messageRead);
             break;
@@ -375,6 +379,21 @@ void ClientGC::UseItemRequest(GCMessageRead &messageRead)
     }
 }
 
+// EXPERIMENTAL, see test_mm.h -- parses "a.b.c.d" from config.txt's matchmaking.test_server_address
+static uint32_t ParseIpAddress(std::string_view ip)
+{
+    std::string ipStr{ ip };
+    unsigned a, b, c, d;
+    if (sscanf(ipStr.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) != 4)
+    {
+        Platform::Print("[MM-TEST] Failed to parse matchmaking.test_server_address '%s', falling back to 127.0.0.1\n",
+            ipStr.c_str());
+        return MakeAddress(127, 0, 0, 1);
+    }
+
+    return MakeAddress(a, b, c, d);
+}
+
 static void AddressString(uint32_t ip, uint32_t port, char *buffer, size_t bufferSize)
 {
     snprintf(buffer, bufferSize,
@@ -384,6 +403,24 @@ static void AddressString(uint32_t ip, uint32_t port, char *buffer, size_t buffe
         (ip >> 8) & 0xff,
         ip & 0xff,
         port);
+}
+
+// Builds the payload for IVEngineServer::ReserveServerForQueuedGame, format confirmed byte-exact
+// against both project446's builder and a direct disassembly of CBaseServer::ReserveServerForQueuedGame
+// in our retail engine.dll (RESEARCH_FINDINGS.md #28.4/#29.3): "G<cookie_hex>,<matchid_hex>,<accountCount>:[<account_hex>]...".
+// cookie == GameServerCookieId (the same value already sent to the client in MatchmakingGC2ClientReserve/
+// ClientRequestJoinServerData, so the client's A2S_RESERVE_CHECK will match m_nReservationCookie).
+// match_id has no real backing value (no server-side 9105 relay yet) so it falls back to the cookie
+// itself -- the same fallback project446 uses when it has no real match id (RESEARCH_FINDINGS.md #28.2).
+static std::string BuildReservationPayload(uint32_t localAccountId)
+{
+    char buffer[128];
+    snprintf(buffer, sizeof(buffer), "G%llx,%llx,%u:[%x]",
+        static_cast<unsigned long long>(GameServerCookieId),
+        static_cast<unsigned long long>(GameServerCookieId),
+        1u,
+        localAccountId);
+    return buffer;
 }
 
 void ClientGC::ClientRequestJoinServerData(GCMessageRead &messageRead)
@@ -406,6 +443,81 @@ void ClientGC::ClientRequestJoinServerData(GCMessageRead &messageRead)
     response.mutable_res()->set_server_address(addressString);
 
     SendMessageToGame(false, k_EMsgGCCStrike15_v2_ClientRequestJoinServerData, response);
+}
+
+// EXPERIMENTAL: manual native-pipeline test. Reads the real MatchmakingStart (9101) the
+// client already sends, and answers with a MatchmakingGC2ClientReserve (9107) pointed at
+// config.txt's matchmaking.test_server_address/test_server_port -- this must now be a REAL
+// CS:GO 2021 dedicated server, not TestMM (see RESEARCH_FINDINGS.md #27): the reservation
+// protobuf only carries one address, used both for A2S_RESERVE_CHECK and the final
+// QueueConnect target, so a separate fake responder can never lead to a real connect.
+// TestMM (test_mm.h) is deliberately NOT started from here anymore -- it's kept in the
+// project for future protocol-only tests, just not wired into this runtime path. Getting
+// the real dedicated server to actually answer 0x21 requires
+// IVEngineServer::ReserveServerForQueuedGame() to be called server-side -- this now happens
+// via BuildReservationPayload()/PostToHost(HostEvent::ReserveServerForQueuedGame, ...) below,
+// which DispatchReserveServerForQueuedGame() (steam_hook.cpp) picks up on the main thread
+// and turns into the real engine call (RESEARCH_FINDINGS.md #28-#30).
+// Casual (eGame=7) only for this first vertical test -- other game types are logged and
+// ignored, not because they can't work, but because the Accept flow (game_type in
+// {8,9,10,11,13}, see RESEARCH_FINDINGS.md #5/#9) isn't implemented here yet.
+void ClientGC::OnMatchmakingStart(GCMessageRead &messageRead)
+{
+    CMsgGCCStrike15_v2_MatchmakingStart request;
+    if (!messageRead.ReadProtobuf(request))
+    {
+        Platform::Print("[MM-TEST] Parsing CMsgGCCStrike15_v2_MatchmakingStart failed, ignoring\n");
+        return;
+    }
+
+    // game_type is composed as (eGame & 0xF) | (eMapGroup << 8), confirmed via live test
+    // against the real client (RESEARCH_FINDINGS.md #20) -- not a bare 0-13 value.
+    uint32_t eGame = request.game_type() & 0xF;
+
+    Platform::Print(
+        "[MM-TEST] MatchmakingStart received: game_type=%u (eGame=%u) accounts=%d prime_only=%d client_version=%u\n",
+        request.game_type(), eGame, request.account_ids_size(), request.prime_only(), request.client_version());
+
+    if (eGame != 7)
+    {
+        Platform::Print("[MM-TEST] eGame=%u is not Casual -- only Casual is handled for now, ignoring\n", eGame);
+        return;
+    }
+
+    uint32_t testServerIp = ParseIpAddress(GetConfig().TestServerAddress());
+    uint16_t testServerPort = GetConfig().TestServerPort();
+    const char *testMap = "de_dust2";
+
+    Platform::Print("[MM-TEST] Test server (REAL dedicated server expected): %.*s:%u\n",
+        static_cast<int>(GetConfig().TestServerAddress().size()), GetConfig().TestServerAddress().data(), testServerPort);
+
+    Platform::Print("[MM-TEST] Sending MatchmakingGC2ClientReserve: map=%s reservationid=%llx\n",
+        testMap, static_cast<unsigned long long>(GameServerCookieId));
+
+    CMsgGCCStrike15_v2_MatchmakingGC2ClientReserve reserve;
+    reserve.set_serverid(1);
+    reserve.set_direct_udp_ip(testServerIp);
+    reserve.set_direct_udp_port(testServerPort);
+    reserve.set_reservationid(GameServerCookieId);
+    reserve.set_map(testMap);
+
+    char addressString[32];
+    AddressString(testServerIp, testServerPort, addressString, sizeof(addressString));
+    reserve.set_server_address(addressString);
+
+    SendMessageToGame(false, k_EMsgGCCStrike15_v2_MatchmakingGC2ClientReserve, reserve);
+
+    Platform::Print("[MM-TEST] MatchmakingGC2ClientReserve dispatched\n");
+
+    // Bridge the server-side half of the reservation: IVEngineServer::ReserveServerForQueuedGame
+    // must be called on the engine's main thread (RESEARCH_FINDINGS.md #29.5), not this GC worker
+    // thread, so hand the payload off through the existing SharedGC::PostToHost queue -- it's
+    // drained every frame in Hk_SteamAPI_RunCallbacks (steam_hook.cpp), which RESEARCH_FINDINGS.md
+    // #30.2 confirms runs on the same thread as the engine's per-frame ticks.
+    std::string reservationPayload = BuildReservationPayload(AccountId());
+    Platform::Print("[MM] Queueing server reservation on host thread\n");
+    PostToHost(HostEvent::ReserveServerForQueuedGame, 0,
+        reservationPayload.data(), static_cast<uint32_t>(reservationPayload.size()));
 }
 
 void ClientGC::SetItemPositions(GCMessageRead &messageRead)

@@ -473,4 +473,13 @@ bool PatchServerBrowserAppId(uint32_t appId)
     return false;
 }
 
+void *ResolveModuleInterface(const char *moduleName, const char *interfaceVersion)
+{
+    // EXPERIMENTAL reservation bridge (RESEARCH_FINDINGS.md #26/#28-#30) targets the Windows
+    // retail engine.dll specifically -- not implemented/tested on this platform yet
+    (void)moduleName;
+    (void)interfaceVersion;
+    return nullptr;
+}
+
 } // namespace Platform

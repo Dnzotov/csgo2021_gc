@@ -60,6 +60,7 @@ void ServerGC::HandleMessage(uint32_t type, const void *data, uint32_t size)
         {
         case k_EMsgGCServerHello:
             SendServerWelcome();
+            ReserveServerForOurCookie();
             break;
 
         case k_EMsgGCCStrike15_v2_Server2GCClientValidate:
@@ -268,6 +269,35 @@ void ServerGC::SendServerWelcome()
     PostToHost(HostEvent::Message, write.TypeMasked(), write.Data(), write.Size());
 
     m_sentWelcome = true;
+}
+
+// EXPERIMENTAL: makes this dedicated/listen server accept A2S_RESERVE_CHECK for the same fixed
+// GameServerCookieId our own ClientGC hands out in MatchmakingGC2ClientReserve (gc_client.cpp)
+// and ClientRequestJoinServerData -- see RESEARCH_FINDINGS.md #26-#32. There's no real backend/9105
+// telling us when to reserve, so we just arm the reservation unconditionally as soon as the local
+// server.dll says hello to us -- any client presenting the same hardcoded cookie can then pass the
+// reservation check. GameServerCookieId is a compile-time constant shared by construction: both
+// ClientGC and ServerGC are built into the same csgo_gc.dll, so as long as the identical DLL build
+// is deployed to both the client and this server, the cookie is guaranteed identical -- no separate
+// config parameter needed.
+//
+// Payload format is the confirmed-minimal 'G' form from RESEARCH_FINDINGS.md #27/#29.3
+// ("G<cookie_hex>,<matchid_hex>,1:", no player-list brackets -- the source explicitly documents
+// this form as not carrying a player list, and we have no real account/match data on the server
+// side to put there anyway). match_id has no real backing value here either, so it falls back to
+// the cookie itself, same as the client side and the same fallback project446 uses (#28.2).
+// The actual IVEngineServer::ReserveServerForQueuedGame(...) call happens on the main thread via
+// the existing HostEvent::ReserveServerForQueuedGame bridge (steam_hook.cpp), reusing
+// ResolveVEngineServer()/DispatchReserveServerForQueuedGame() as-is -- see RESEARCH_FINDINGS.md #32.
+void ServerGC::ReserveServerForOurCookie()
+{
+    char buffer[64];
+    snprintf(buffer, sizeof(buffer), "G%llx,%llx,1:",
+        static_cast<unsigned long long>(GameServerCookieId),
+        static_cast<unsigned long long>(GameServerCookieId));
+
+    Platform::Print("[MM] Queueing server reservation on host thread\n");
+    PostToHost(HostEvent::ReserveServerForQueuedGame, 0, buffer, static_cast<uint32_t>(strlen(buffer)));
 }
 
 void ServerGC::IncrementKillCountAttribute(GCMessageRead &messageRead)

@@ -35,7 +35,8 @@ add_library(csgo_gc SHARED
     main.cpp
     networking_client.cpp
     networking_server.cpp
-    steam_hook.cpp)
+    steam_hook.cpp
+    test_mm.cpp)
 
 if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_sources(csgo_gc PRIVATE platform_windows.cpp)
@@ -76,6 +77,11 @@ target_link_libraries(csgo_gc PRIVATE
     protobuf::libprotobuf-lite
     funchook-static
     steam_api)
+
+# test_mm.cpp's raw UDP responder (EXPERIMENTAL, see test_mm.h)
+if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    target_link_libraries(csgo_gc PRIVATE ws2_32)
+endif()
 
 # apple message box
 if (APPLE)

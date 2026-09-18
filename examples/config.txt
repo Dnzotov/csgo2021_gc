@@ -31,6 +31,16 @@
 // remove keys, cases, stickers, etc. after they've been used
 "destroy_used_items"	"1"
 
+// EXPERIMENTAL -- address/port of the dedicated server TestMM's minimal reservation-check
+// responder targets/binds to for the manual Casual matchmaking test (RESEARCH_FINDINGS.md
+// #26/#27). This is the actual game server, NOT a matchmaking backend -- that'll be a
+// separate matchmaking.backend_address/backend_port once it exists.
+"matchmaking"
+{
+	"test_server_address"	"127.0.0.1"
+	"test_server_port"	"27015"
+}
+
 // steam related options
 
 // specifies what app id to use for the game. csgo/steam.inf is automatically modified if necessary, and the SteamAppId
