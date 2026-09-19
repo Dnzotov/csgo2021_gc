@@ -29,6 +29,9 @@ void *GetSymbol(void *handle, const char *symbol);
 // export CreateInterface, or doesn't have the requested interface version.
 void *ResolveModuleInterface(const char *moduleName, const char *interfaceVersion);
 
+// the process command line as one string (arguments separated by spaces)
+std::string CommandLine();
+
 // set an envar to the specified value even if it's already set
 void SetEnvVar(const char *name, const char *value);
 

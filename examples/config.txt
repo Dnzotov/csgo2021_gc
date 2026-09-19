@@ -40,11 +40,24 @@
 	"test_server_address"	"127.0.0.1"
 	"test_server_port"	"27015"
 
-	// TEST ONLY, dedicated server (srcds) config: queued reservation with fake participants for the
-	// retail Accept flow (RESEARCH_FINDINGS.md #42). Leave test_accept_mode empty for the plain Casual path.
-	// "competitive" = 1 real + 9 fake, "wingman" = 1 real + 3 fake, "dangerzone" = 1 real + 15 fake
+	// TEST ONLY, client: the game port of the test srcds that serves each mode (one srcds per mode, so reservation
+	// state never mixes). Modes: casual deathmatch armsrace demolition skirmish competitive wingman scrimcomp5v5 dangerzone.
+	// Modes that are not listed use test_server_port. This all goes away with the Java matchmaking backend.
+	"test_server_ports"
+	{
+		"competitive"	"27016"
+		"wingman"	"27017"
+		"dangerzone"	"27018"
+	}
+
+	// TEST ONLY, dedicated server (srcds): queued reservation with fake participants for the retail Accept flow
+	// (RESEARCH_FINDINGS.md #42/#45). Start each srcds for ONE mode, best with -gc_mode on its command line
+	// (wins over this key, lets several servers share one install), e.g.
+	//   srcds.exe -game csgo -console -port 27018 -gc_mode dangerzone +game_type 6 +game_mode 0 +map dz_blacksite
+	// The mode decides the roster: competitive 10, wingman 4, dangerzone 16 (1 real + N-1 fake), scrimcomp5v5 10.
+	// Leave empty for a plain (non accept) server. The real player's AccountID is detected automatically from
+	// its first reservation check, test_real_account_id is only an optional override.
 	"test_accept_mode"	""
-	// AccountID of the real player (steamid64 & 0xffffffff), the client logs it as [MM-ACCEPT] on MatchmakingStart
 	"test_real_account_id"	"0"
 	// milliseconds between the Accept popup showing up and the first fake participant accepting
 	"test_fake_accept_delay_ms"	"2500"

@@ -2,6 +2,7 @@
 #include "gc_client.h"
 #include "graffiti.h"
 #include "keyvalue.h"
+#include "mm_modes.h"
 #include "test_accept.h"
 #include "test_diag.h"
 
@@ -506,22 +507,34 @@ void ClientGC::OnMatchmakingStart(GCMessageRead &messageRead)
         "[MM-TEST] MatchmakingStart received: game_type=%u (eGame=%u) accounts=%d prime_only=%d client_version=%u\n",
         request.game_type(), eGame, request.account_ids_size(), request.prime_only(), request.client_version());
 
-    // Accept modes (game_type 8/10/13, RESEARCH_FINDINGS.md #41.4) take the reservation + Accept path
-    // below; Casual keeps the original direct path untouched.
-    const AcceptTest::Mode *acceptMode = AcceptTest::FindModeByGame(eGame);
-    if (eGame != 7 && !acceptMode)
+    // Everything mode specific comes from the central table (mm_modes.h): accept modes take the reservation +
+    // Accept path below, all the others the direct (Casual style) path.
+    const MM::GameMode *mode = MM::FindGameMode(eGame);
+    if (!mode || !mode->supported)
     {
-        Platform::Print("[MM-TEST] eGame=%u is neither Casual nor a supported Accept mode (8/10/13) -- ignoring\n", eGame);
+        Platform::Print("[MM-TEST] eGame=%u (%s) is not supported by the test flow -- ignoring\n",
+            eGame, mode ? mode->name : "unknown");
         return;
     }
+
+    // the map selection the client packed into game_type (mapMask << 8), see #44.5
+    const MM::MapSelection selection = MM::DecodeMapSelection(*mode, request.game_type());
+    const std::string testMapString = MM::PickMap(*mode, selection);
+    const char *testMap = testMapString.c_str();
+
+    // identity: ISteamUser::GetSteamID() (m_steamId), the 9101 account_ids are only cross-checked
+    Platform::Print("[MM] mode=%s accept_required=%d required_players=%u server=%s/%s | maps: mask=0x%x flags=0x%x %s -> "
+        "advertised map=%s | account=%u (9101 account_ids[0]=%u)\n",
+        mode->name, mode->acceptRequired ? 1 : 0, mode->requiredPlayers, mode->serverGameType, mode->serverGameMode,
+        selection.mask, selection.flags, selection.decoded ? MM::FormatMaps(selection).c_str() : "(not decodable for this mode)",
+        testMap, AccountId(), request.account_ids_size() > 0 ? request.account_ids(0) : 0);
 
     // a new search supersedes whatever accept we were still waiting for
     m_pendingAccept = {};
     AcceptTest::DisarmClient();
 
     uint32_t testServerIp = ParseIpAddress(GetConfig().TestServerAddress());
-    uint16_t testServerPort = GetConfig().TestServerPort();
-    const char *testMap = acceptMode ? acceptMode->map : "de_dust2";
+    uint16_t testServerPort = GetConfig().TestServerPortForMode(mode->name);
 
     Platform::Print("[MM-TEST] Test server (REAL dedicated server expected): %.*s:%u\n",
         static_cast<int>(GetConfig().TestServerAddress().size()), GetConfig().TestServerAddress().data(), testServerPort);
@@ -540,7 +553,7 @@ void ClientGC::OnMatchmakingStart(GCMessageRead &messageRead)
     AddressString(testServerIp, testServerPort, addressString, sizeof(addressString));
     reserve.set_server_address(addressString);
 
-    if (acceptMode)
+    if (mode->acceptRequired)
     {
         // First 9107 of the Accept flow: a `reservation` whose game_type & 0xF is in {8,9,10,11,13} makes the
         // client's 9107 handler (client.dll sub_103F49F0) create the reservation callback as (stage 1, mode 0),
@@ -552,7 +565,7 @@ void ClientGC::OnMatchmakingStart(GCMessageRead &messageRead)
 
     Platform::Print("[MM-TEST] MatchmakingGC2ClientReserve dispatched\n");
 
-    if (acceptMode)
+    if (mode->acceptRequired)
     {
         // The dedicated server is reserved by its own ServerGC (srcds process, roster of the real player + fake
         // participants), there is no GC<->GC transport, so nothing to bridge from here. What is left for us is
@@ -563,11 +576,11 @@ void ClientGC::OnMatchmakingStart(GCMessageRead &messageRead)
         m_pendingAccept.serverPort = testServerPort;
         m_pendingAccept.eGame = eGame;
         m_pendingAccept.map = testMap;
-        AcceptTest::ArmClient(testServerIp, testServerPort);
+        AcceptTest::ArmClient(testServerIp, testServerPort, mode->requiredPlayers);
 
-        Platform::Print("[MM-ACCEPT] %s: waiting for the Accept popup / full accept. srcds needs "
-            "matchmaking.test_accept_mode=%s and matchmaking.test_real_account_id=%u in its csgo_gc/config.txt\n",
-            acceptMode->name, acceptMode->name, AccountId());
+        Platform::Print("[MM-ACCEPT] %s: waiting for the Accept popup / full accept. The srcds on port %u must run "
+            "-gc_mode %s (roster of %u); its 0x25 total is checked against that in the srcds log ([FAKE-MM])\n",
+            mode->name, testServerPort, mode->name, mode->requiredPlayers);
         return;
     }
 

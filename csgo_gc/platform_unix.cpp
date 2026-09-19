@@ -473,6 +473,34 @@ bool PatchServerBrowserAppId(uint32_t appId)
     return false;
 }
 
+std::string CommandLine()
+{
+    // /proc/self/cmdline is NUL separated
+    std::string result;
+    FILE *file = fopen("/proc/self/cmdline", "rb");
+    if (file)
+    {
+        char buffer[512];
+        size_t read;
+        while ((read = fread(buffer, 1, sizeof(buffer), file)) > 0)
+        {
+            result.append(buffer, read);
+        }
+
+        fclose(file);
+    }
+
+    for (char &c : result)
+    {
+        if (c == ' ')
+        {
+            c = ' ';
+        }
+    }
+
+    return result;
+}
+
 void *ResolveModuleInterface(const char *moduleName, const char *interfaceVersion)
 {
     // EXPERIMENTAL reservation bridge (RESEARCH_FINDINGS.md #26/#28-#30) targets the Windows

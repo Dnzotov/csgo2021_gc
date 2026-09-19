@@ -16,6 +16,7 @@ enum class GCEvent
     NetMessage, // id contains the recipient steam id, buffer contains the payload
     SOCacheRequest, // sent to client gc when connected to a gameserver
     ClientSOCacheUnsubscribe, // sent to server gc when a client disconnects, id contains the steam id
+    TestRealPlayerSeen, // TEST ONLY: sent to server gc when srcds saw the first 0x21 of a real player, id contains the AccountID
     ReservationFullyAccepted, // TEST ONLY: sent to client gc when the reserved server reports 0x25 stage 2 / awaiting 0 (test_accept.h)
 };
 

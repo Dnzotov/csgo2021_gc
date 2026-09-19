@@ -1,5 +1,7 @@
 #pragma once
 
+#include <vector>
+
 #include "gc_const_csgo.h"
 #include "item_schema.h" // rarity constants
 
@@ -54,9 +56,17 @@ public:
     // TEST ONLY, srcds side, see test_accept.h/RESEARCH_FINDINGS.md #42 -- "competitive", "wingman" or
     // "dangerzone" makes the server reserve a queued ('Q') roster of the real player plus fake
     // participants instead of the plain 'G' reservation. Empty = old Casual behavior.
+    // (srcds: also settable with -gc_mode <mode> on the command line, so several servers can share one install)
     std::string_view TestAcceptMode() const { return m_testAcceptMode; }
-    // AccountID (steamid64 & 0xffffffff) of the real player, srcds has no way to learn it by itself
+    // OPTIONAL TEST override for the real player's AccountID on srcds. Normally unset: srcds learns it from the
+    // first A2S_RESERVE_CHECK (0x21) the real client sends (its SteamID comes from ISteamUser::GetSteamID()).
     uint32_t TestRealAccountId() const { return m_testRealAccountId; }
+
+    // TEST ONLY, client: the UDP port of the test srcds that serves a mode (matchmaking.test_server_ports
+    // { "competitive" "27016" ... }), falling back to test_server_port. Goes away with the Java backend.
+    uint16_t TestServerPortForMode(std::string_view modeName) const;
+    // TEST ONLY, srcds: its own game port (-port on the command line, else test_server_port)
+    uint16_t DedicatedServerPort() const;
     // how long after the Accept popup is up before the first fake participant accepts
     uint32_t TestFakeAcceptDelayMs() const { return m_testFakeAcceptDelayMs; }
     // TEST ONLY: runtime diagnostics of the matchmaking UI flow (test_diag.h), client only, default on
@@ -91,6 +101,7 @@ private:
     std::string m_testServerAddress{ "127.0.0.1" };
     uint16_t m_testServerPort{ 27015 };
     std::string m_testAcceptMode;
+    std::vector<std::pair<std::string, uint16_t>> m_testServerPorts;
     uint32_t m_testRealAccountId{ 0 };
     uint32_t m_testFakeAcceptDelayMs{ 2500 };
     bool m_testDiag{ true };

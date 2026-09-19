@@ -256,6 +256,12 @@ bool PatchServerBrowserAppId(uint32_t appId)
     return false;
 }
 
+std::string CommandLine()
+{
+    const char *commandLine = GetCommandLineA();
+    return commandLine ? commandLine : "";
+}
+
 void *ResolveModuleInterface(const char *moduleName, const char *interfaceVersion)
 {
     HMODULE module = GetModuleHandleA(moduleName);

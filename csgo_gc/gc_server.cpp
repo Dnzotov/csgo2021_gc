@@ -20,6 +20,7 @@ ServerGC::ServerGC()
 
 ServerGC::~ServerGC()
 {
+    AcceptTest::SetServerSniff(nullptr, nullptr, 0);
     m_testRoster.reset();
     StopThread();
     Platform::Print("ServerGC destroyed\n");
@@ -39,6 +40,10 @@ void ServerGC::HandleEvent(GCEvent type, uint64_t id, const std::vector<uint8_t>
 
     case GCEvent::ClientSOCacheUnsubscribe:
         HandleClientSOCacheUnsubscribe(id);
+        break;
+
+    case GCEvent::TestRealPlayerSeen:
+        OnTestRealPlayerSeen(static_cast<uint32_t>(id));
         break;
 
     default:
@@ -306,7 +311,7 @@ void ServerGC::SendServerWelcome()
 void ServerGC::ReserveServerForOurCookie()
 {
     // TEST ONLY: once the Accept test roster runs it owns the reservation (refresh included)
-    if (m_testRoster || StartAcceptTestRoster())
+    if (m_testRoster || m_testWaitingForPlayer || StartAcceptTestRoster())
     {
         return;
     }
@@ -320,10 +325,13 @@ void ServerGC::ReserveServerForOurCookie()
     PostToHost(HostEvent::ReserveServerForQueuedGame, 0, buffer, static_cast<uint32_t>(strlen(buffer)));
 }
 
-// TEST ONLY: matchmaking.test_accept_mode in this server's config.txt switches the reservation from the plain
-// 'G' (awaiting always 0, no Accept) to a queued 'Q' roster: the real player (matchmaking.test_real_account_id) plus
-// deterministic fake participants that exist only as roster entries and answer through real 0x21 datagrams
-// (AcceptTest::FakeRoster). Returns false (=> old 'G' behavior) when the mode is unset or misconfigured.
+// TEST ONLY: matchmaking.test_accept_mode (or -gc_mode <mode> on the srcds command line) switches the reservation
+// from the plain 'G' (awaiting always 0, no Accept) to a queued 'Q' roster of the mode's required players (mm_modes.h):
+// the real player plus deterministic fake participants that exist only as roster entries and answer through real
+// 0x21 datagrams (AcceptTest::FakeRoster). One srcds serves ONE mode (the roster is built once per cookie); run one
+// srcds per mode. The real player's AccountID is learned automatically from the first 0x21 it sends (its SteamID
+// comes from ISteamUser::GetSteamID() on the client); matchmaking.test_real_account_id is only an optional override.
+// Returns false (=> old 'G' behavior) when the mode is unset or not an accept mode.
 bool ServerGC::StartAcceptTestRoster()
 {
     const GCConfig &config = GetConfig();
@@ -332,27 +340,54 @@ bool ServerGC::StartAcceptTestRoster()
         return false;
     }
 
-    const AcceptTest::Mode *mode = AcceptTest::FindModeByName(config.TestAcceptMode());
-    if (!mode)
+    const MM::GameMode *mode = MM::FindGameModeByName(config.TestAcceptMode());
+    if (!mode || !mode->acceptRequired || !mode->supported || mode->requiredPlayers == 0)
     {
-        Platform::Print("[MM-ACCEPT] unknown matchmaking.test_accept_mode '%.*s' (competitive/wingman/dangerzone), using the plain reservation\n",
+        Platform::Print("[MM-ACCEPT] test_accept_mode '%.*s' is not a supported accept mode "
+            "(competitive/wingman/dangerzone/scrimcomp5v5), using the plain reservation\n",
             static_cast<int>(config.TestAcceptMode().size()), config.TestAcceptMode().data());
         return false;
     }
 
-    if (config.TestRealAccountId() == 0)
+    m_testMode = mode;
+
+    Platform::Print("[MM-ACCEPT] srcds mode=%s: required players (roster) = %u, srcds should run game_type %s game_mode %s "
+        "(gamemodes.txt maxplayers %u), port %u\n",
+        mode->name, mode->requiredPlayers, mode->serverGameType, mode->serverGameMode, mode->serverMaxPlayers,
+        config.DedicatedServerPort());
+
+    if (config.TestRealAccountId() != 0)
     {
-        Platform::Print("[MM-ACCEPT] matchmaking.test_accept_mode is set but matchmaking.test_real_account_id is missing "
-            "(the client logs it on MatchmakingStart), using the plain reservation\n");
-        return false;
+        Platform::Print("[MM-ACCEPT] real player AccountID %u from the test_real_account_id override\n", config.TestRealAccountId());
+        CreateTestRoster(config.TestRealAccountId());
+        return true;
     }
+
+    // learn it from the first 0x21 of the real client; its retries (every ~1 s for the reservation timeout) succeed
+    // as soon as the roster is armed
+    m_testWaitingForPlayer = true;
+    AcceptTest::SetServerSniff(
+        [](void *context, uint32_t accountId)
+        {
+            static_cast<ServerGC *>(context)->PostToGC(GCEvent::TestRealPlayerSeen, accountId, nullptr, 0);
+        },
+        this, GameServerCookieId);
+
+    Platform::Print("[MM-ACCEPT] waiting for the real player's first 0x21 to learn its AccountID (no test_real_account_id needed)\n");
+    return true;
+}
+
+void ServerGC::CreateTestRoster(uint32_t realAccountId)
+{
+    const GCConfig &config = GetConfig();
 
     AcceptTest::FakeRoster::Params params;
     params.cookie = GameServerCookieId;
-    params.realAccountId = config.TestRealAccountId();
-    params.rosterSize = mode->rosterSize;
+    params.realAccountId = realAccountId;
+    params.rosterSize = m_testMode->requiredPlayers;
+    params.modeName = m_testMode->name;
     params.serverAddress = std::string(config.TestServerAddress());
-    params.serverPort = config.TestServerPort();
+    params.serverPort = config.DedicatedServerPort();
     params.acceptDelayMs = config.TestFakeAcceptDelayMs();
 
     // ReserveServerForQueuedGame has to run on the main thread, so it goes through the usual host event queue
@@ -361,8 +396,30 @@ bool ServerGC::StartAcceptTestRoster()
         {
             PostToHost(HostEvent::ReserveServerForQueuedGame, 0, payload.data(), static_cast<uint32_t>(payload.size()));
         });
+}
 
-    return true;
+void ServerGC::OnTestRealPlayerSeen(uint32_t accountId)
+{
+    if (m_testRoster)
+    {
+        if (accountId != m_testRealAccountId)
+        {
+            Platform::Print("[MM-ACCEPT] another real player (AccountID %u) sent 0x21, the roster is armed for %u -- ignored\n",
+                accountId, m_testRealAccountId);
+        }
+
+        return;
+    }
+
+    if (!m_testWaitingForPlayer || !m_testMode)
+    {
+        return;
+    }
+
+    Platform::Print("[MM-ACCEPT] real player detected from its 0x21: AccountID %u, arming the roster\n", accountId);
+    m_testWaitingForPlayer = false;
+    m_testRealAccountId = accountId;
+    CreateTestRoster(accountId);
 }
 
 void ServerGC::IncrementKillCountAttribute(GCMessageRead &messageRead)

@@ -2,7 +2,9 @@
 #include "test_accept.h"
 #include "test_diag.h"
 
+#include <algorithm>
 #include <chrono>
+#include <cstdarg>
 #include <cstring>
 #include <mutex>
 
@@ -36,19 +38,23 @@ constexpr uint8_t OpcodeReserveCheckResponse = 0x25;
 constexpr size_t ReserveCheckSize = 33;         // 4 + 1 + 4 + 4 + 4 + 8 + 8
 constexpr size_t ReserveCheckResponseSize = 19; // 4 + 1 + 4 + 4 + 4 + 1 + 1
 
+// awaiting value the engine answers when the account is not part of the reservation (or the cookie does not match)
+constexpr uint8_t AwaitingUnknownAccount = 0x7F;
+
 // CBaseServer::GetHostVersion() == the client's protocol constant == ClientVersion of steam.inf
 // (1.38.0.5 -> 13805). RESEARCH_FINDINGS.md #24. The engine silently drops 0x21 with any other value.
 constexpr uint32_t HostVersion = 13805;
 
-const Mode s_modes[] = {
-    { "competitive", 8, 10, "de_dust2" },
-    { "wingman", 10, 4, "de_lake" },
-    { "dangerzone", 13, 16, "dz_blacksite" },
-};
-
 uint32_t ReadU32(const uint8_t *data)
 {
     uint32_t value;
+    memcpy(&value, data, sizeof(value));
+    return value;
+}
+
+uint64_t ReadU64(const uint8_t *data)
+{
+    uint64_t value;
     memcpy(&value, data, sizeof(value));
     return value;
 }
@@ -72,32 +78,6 @@ uint64_t SteamIdFromAccountId(uint32_t accountId)
 }
 
 } // namespace
-
-const Mode *FindModeByName(std::string_view name)
-{
-    for (const Mode &mode : s_modes)
-    {
-        if (name == mode.name)
-        {
-            return &mode;
-        }
-    }
-
-    return nullptr;
-}
-
-const Mode *FindModeByGame(uint32_t eGame)
-{
-    for (const Mode &mode : s_modes)
-    {
-        if (eGame == mode.eGame)
-        {
-            return &mode;
-        }
-    }
-
-    return nullptr;
-}
 
 std::string BuildQueuedReservationPayload(uint64_t cookie, uint32_t realAccountId, uint32_t rosterSize)
 {
@@ -156,11 +136,38 @@ enum Command : int
 enum class Phase
 {
     Paused,
-    Cooldown, // unreserved, waiting for the engine to actually clear the cookie (and with it the roster)
-    Probe,  // fakes send stage 1 until the popup is up (server answers stage 1 with awaiting == 0)
-    Accept, // fakes send stage 2 one by one
+    Cooldown,  // unreserved, waiting for the engine to actually clear the cookie (and with it the roster)
+    Probe,     // every fake sends ONE stage 1 request (paced), retried only after a timeout
+    WaitPopup, // all fakes are at stage 1, waiting for the server to report stage 1 / awaiting 0 (popup is up)
+    Accept,    // every fake sends ONE stage 2 request (paced), retried only after a timeout
     Done,
 };
+
+const char *PhaseName(Phase phase)
+{
+    switch (phase)
+    {
+    case Phase::Paused: return "paused";
+    case Phase::Cooldown: return "cooldown";
+    case Phase::Probe: return "probe";
+    case Phase::WaitPopup: return "wait-popup";
+    case Phase::Accept: return "accept";
+    case Phase::Done: return "done";
+    }
+
+    return "?";
+}
+
+void FakeLog(const char *format, ...)
+{
+    char text[384];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(text, sizeof(text), format, args);
+    va_end(args);
+
+    Platform::Print("[FAKE-MM] %s\n", text);
+}
 
 } // namespace
 
@@ -183,8 +190,9 @@ FakeRoster::FakeRoster(const Params &params, PostReserveFn postReserve)
     m_impl->postReserve = std::move(postReserve);
     m_impl->thread = std::thread{ &Impl::Run, m_impl };
 
-    Platform::Print("[MM-ACCEPT] FakeRoster started: roster=%u (1 real + %u fake), server=%s:%u, accept delay=%ums\n",
-        params.rosterSize, params.rosterSize - 1, params.serverAddress.c_str(), params.serverPort, params.acceptDelayMs);
+    FakeLog("started: mode=%s roster=%u (1 real acct=%08x + %u fake), server=%s:%u, accept delay=%ums",
+        params.modeName.c_str(), params.rosterSize, params.realAccountId, params.rosterSize - 1,
+        params.serverAddress.c_str(), params.serverPort, params.acceptDelayMs);
 }
 
 FakeRoster::~FakeRoster()
@@ -210,14 +218,17 @@ void FakeRoster::Impl::Run()
     using std::chrono::milliseconds;
     using std::chrono::seconds;
 
-    // reservation expires 21 s after the last ReserveServerForQueuedGame (sv_mmqueue_reservation_timeout,
-    // baseserver.cpp) and nobody tells srcds when a player pressed Play, so keep refreshing it. Refreshing
-    // with the same cookie doesn't touch the roster (SetReservationCookie only rebuilds it on a cookie change).
-    constexpr auto KeepAliveInterval = seconds(8);
-    constexpr auto FirstProbeDelay = milliseconds(1500);  // give the main thread time to run the reservation
-    constexpr auto ProbeInterval = milliseconds(1000);    // same cadence as the client's own 0x21 retries
-    constexpr auto AcceptStagger = milliseconds(150);     // one fake every 150 ms so the popup counter visibly moves
-    constexpr auto DoneRearmDelay = seconds(90);          // nobody connected: start over with a clean roster
+    // Rate: the engine drops ALL connectionless packets of an IP once it sends more than sv_max_queries_sec (10)
+    // per second on average over sv_max_queries_window (30 s), i.e. > 300 packets / 30 s (retail engine.dll
+    // defaults, RESEARCH_FINDINGS.md #44.4). The real client and the fakes share one IP, so the fakes send each
+    // request ONCE (2 x roster packets per match), paced, and only retry what the server did not answer.
+    constexpr auto PacketGap = milliseconds(150);       // <= 6.7 pps while a burst is running
+    constexpr auto RetryTimeout = milliseconds(1500);   // per fake, only if no matching 0x25 came back
+    constexpr int MaxAttempts = 5;                      // per fake and stage, then it is reported as TIMEOUT
+    constexpr auto FirstProbeDelay = milliseconds(1500);// give the main thread time to run the reservation
+    constexpr auto KeepAliveInterval = seconds(8);      // sv_mmqueue_reservation_timeout is 21 s
+    constexpr auto DoneRearmDelay = seconds(90);        // nobody connected: start over with a clean roster
+    constexpr auto GaveUpRearmDelay = seconds(30);      // a fake never got confirmed: start over
     // Unreserve() only zeroes the expiry time; the cookie (and the roster with its stale stages) is dropped later by
     // CGameServer::UpdateHibernationState once nobody is connected for sv_hibernate_postgame_delay (5 s by default).
     // Reserving the same cookie before that would keep the old roster, so wait it out.
@@ -227,6 +238,15 @@ void FakeRoster::Impl::Run()
 
     const std::string reservePayload = BuildQueuedReservationPayload(params.cookie, params.realAccountId, params.rosterSize);
     const std::string unreservePayload = BuildUnreservePayload(params.cookie);
+
+    uint32_t payloadEntries = 0;
+    for (char c : reservePayload)
+    {
+        if (c == '[')
+        {
+            payloadEntries++;
+        }
+    }
 
 #ifdef _WIN32
     WSADATA wsaData;
@@ -244,7 +264,7 @@ void FakeRoster::Impl::Run()
         serverAddr.sin_port = htons(params.serverPort);
         if (inet_pton(AF_INET, params.serverAddress.c_str(), &serverAddr.sin_addr) != 1)
         {
-            Platform::Print("[MM-ACCEPT] FakeRoster: bad server address '%s', fake players disabled\n", params.serverAddress.c_str());
+            FakeLog("bad server address '%s', fake players disabled", params.serverAddress.c_str());
         }
         else
         {
@@ -266,7 +286,7 @@ void FakeRoster::Impl::Run()
 
             if (sock == InvalidSocketHandle)
             {
-                Platform::Print("[MM-ACCEPT] FakeRoster: could not create a UDP socket, fake players disabled\n");
+                FakeLog("could not create a UDP socket, fake players disabled");
             }
         }
     }
@@ -284,7 +304,7 @@ void FakeRoster::Impl::Run()
         WriteU32(packet, offset, ConnectionlessHeader);
         packet[offset++] = OpcodeReserveCheck;
         WriteU32(packet, offset, HostVersion);
-        WriteU32(packet, offset, FakeAccountId(fakeIndex)); // token, echoed back by the server, any value
+        WriteU32(packet, offset, FakeAccountId(fakeIndex)); // token, echoed back by the server: identifies the fake
         WriteU32(packet, offset, stage);
         WriteU64(packet, offset, params.cookie);
         WriteU64(packet, offset, SteamIdFromAccountId(FakeAccountId(fakeIndex)));
@@ -293,19 +313,57 @@ void FakeRoster::Impl::Run()
             reinterpret_cast<const sockaddr *>(&serverAddr), sizeof(serverAddr));
     };
 
+    struct Fake
+    {
+        uint32_t confirmed{};   // highest stage the server answered for
+        int attempts{};         // requests sent for the stage that is currently being driven
+        Clock::time_point lastSent{};
+        bool gaveUp{};
+    };
+
+    std::vector<Fake> fakes(fakeCount + 1); // 1-based, like the account ids
+
     Phase phase = Phase::Paused;
-    Clock::time_point lastReserve{}, nextProbe{}, nextAccept{}, doneAt{}, cooldownUntil{};
-    uint32_t acceptedFakes = 0;
+    Clock::time_point lastReserve{}, probeStart{}, acceptAt{}, doneAt{}, cooldownUntil{}, nextSend{}, gaveUpAt{};
+    bool popupSeen = false;
+    bool totalChecked = false;
+    bool finalLogged = false;
+    uint32_t cursor = 1;
+
+    auto fakeName = [&](uint32_t index, char *out, size_t size)
+    {
+        snprintf(out, size, "fake-%02u(acct=%08x)", index, FakeAccountId(index));
+    };
+
+    auto resetFakeAttempts = [&]()
+    {
+        for (Fake &fake : fakes)
+        {
+            fake.attempts = 0;
+            fake.gaveUp = false;
+        }
+    };
 
     auto armReservation = [&](Clock::time_point now)
     {
         Platform::Print("[MM-ACCEPT] arming Q reservation: %s\n", reservePayload.c_str());
+        FakeLog("roster expected=%u actual=%u%s", params.rosterSize, payloadEntries,
+            payloadEntries == params.rosterSize ? "" : "   <== MISMATCH (payload does not match the mode's required players)");
+
         postReserve(reservePayload);
 
         phase = Phase::Probe;
         lastReserve = now;
-        nextProbe = now + FirstProbeDelay;
-        acceptedFakes = 0;
+        probeStart = now + FirstProbeDelay;
+        for (Fake &fake : fakes)
+        {
+            fake = Fake{};
+        }
+
+        popupSeen = false;
+        totalChecked = false;
+        finalLogged = false;
+        cursor = 1;
     };
 
     while (!stopping)
@@ -315,14 +373,22 @@ void FakeRoster::Impl::Run()
         int cmd = command.exchange(CommandNone);
         if (phase == Phase::Done && now - doneAt >= DoneRearmDelay)
         {
-            Platform::Print("[MM-ACCEPT] nobody connected for %lld s after the fake accept, re-arming a fresh roster\n",
+            FakeLog("nobody connected for %lld s after the fake accept, re-arming a fresh roster",
                 static_cast<long long>(DoneRearmDelay.count()));
+            cmd = CommandRearm;
+        }
+
+        if ((phase == Phase::Probe || phase == Phase::Accept) && gaveUpAt != Clock::time_point{}
+            && now - gaveUpAt >= GaveUpRearmDelay)
+        {
+            FakeLog("a fake player was never confirmed by the server (see TIMEOUT above), re-arming a fresh roster");
+            gaveUpAt = {};
             cmd = CommandRearm;
         }
 
         if (cmd == CommandPause)
         {
-            Platform::Print("[MM-ACCEPT] a client connected, roster left alone until it disconnects\n");
+            FakeLog("a client connected, roster left alone until it disconnects");
             phase = Phase::Paused;
         }
         else if (cmd == CommandArm)
@@ -331,11 +397,12 @@ void FakeRoster::Impl::Run()
         }
         else if (cmd == CommandRearm)
         {
-            Platform::Print("[MM-ACCEPT] unreserving, fresh roster in %lld s\n", static_cast<long long>(UnreserveCooldown.count()));
+            FakeLog("unreserving, fresh roster in %lld s", static_cast<long long>(UnreserveCooldown.count()));
             postReserve(unreservePayload);
 
             phase = Phase::Cooldown;
             cooldownUntil = now + UnreserveCooldown;
+            gaveUpAt = {};
         }
         else if (phase == Phase::Cooldown)
         {
@@ -350,26 +417,95 @@ void FakeRoster::Impl::Run()
             lastReserve = now;
         }
 
-        if (phase == Phase::Probe && now >= nextProbe)
+        // ---- phase transitions -----------------------------------------------------------------------------
+        auto allConfirmed = [&](uint32_t stage)
         {
             for (uint32_t i = 1; i <= fakeCount; i++)
             {
-                sendReserveCheck(i, 1);
+                if (fakes[i].confirmed < stage)
+                {
+                    return false;
+                }
             }
 
-            nextProbe = now + ProbeInterval;
+            return true;
+        };
+
+        if (popupSeen && (phase == Phase::Probe || phase == Phase::WaitPopup))
+        {
+            // stage 1 / awaiting 0 means every roster entry (fakes included) is at stage >= 1 on the server
+            for (uint32_t i = 1; i <= fakeCount; i++)
+            {
+                if (fakes[i].confirmed < 1)
+                {
+                    fakes[i].confirmed = 1;
+                }
+            }
+
+            phase = Phase::Accept;
+            acceptAt = now + milliseconds(params.acceptDelayMs);
+            resetFakeAttempts();
+            FakeLog("server reports stage 1 awaiting=0 (accept popup is up), fakes accept in %ums", params.acceptDelayMs);
+        }
+        else if (phase == Phase::Probe && now >= probeStart && allConfirmed(1))
+        {
+            phase = Phase::WaitPopup;
+            FakeLog("all %u fake players confirmed at stage 1, waiting for the real player to reach stage 1", fakeCount);
+        }
+        else if (phase == Phase::Accept && now >= acceptAt && allConfirmed(2))
+        {
+            phase = Phase::Done;
+            doneAt = now;
+            FakeLog("all %u fake players confirmed at stage 2, waiting for the real player's accept", fakeCount);
         }
 
-        if (phase == Phase::Accept && now >= nextAccept)
+        // ---- paced sending (one packet per PacketGap) --------------------------------------------------------
+        uint32_t desiredStage = 0;
+        if (phase == Phase::Probe && now >= probeStart)
         {
-            sendReserveCheck(++acceptedFakes, 2);
-            nextAccept = now + AcceptStagger;
+            desiredStage = 1;
+        }
+        else if (phase == Phase::Accept && now >= acceptAt)
+        {
+            desiredStage = 2;
+        }
 
-            if (acceptedFakes >= fakeCount)
+        if (desiredStage && now >= nextSend)
+        {
+            for (uint32_t k = 0; k < fakeCount; k++)
             {
-                Platform::Print("[MM-ACCEPT] all %u fake players sent stage 2\n", fakeCount);
-                phase = Phase::Done;
-                doneAt = now;
+                uint32_t i = ((cursor - 1 + k) % fakeCount) + 1;
+                Fake &fake = fakes[i];
+
+                if (fake.confirmed >= desiredStage || fake.gaveUp)
+                {
+                    continue;
+                }
+
+                if (fake.attempts > 0 && now - fake.lastSent < RetryTimeout)
+                {
+                    continue;
+                }
+
+                char name[40];
+                fakeName(i, name, sizeof(name));
+
+                if (fake.attempts >= MaxAttempts)
+                {
+                    fake.gaveUp = true;
+                    gaveUpAt = now;
+                    FakeLog("player=%s stage=%u TIMEOUT after %d attempts, the server never confirmed it", name, desiredStage, MaxAttempts);
+                    continue;
+                }
+
+                sendReserveCheck(i, desiredStage);
+                fake.attempts++;
+                fake.lastSent = now;
+                FakeLog("player=%s stage=%u sent%s", name, desiredStage, fake.attempts > 1 ? " (retry)" : "");
+
+                cursor = (i % fakeCount) + 1;
+                nextSend = now + PacketGap;
+                break;
             }
         }
 
@@ -379,7 +515,7 @@ void FakeRoster::Impl::Run()
             continue;
         }
 
-        // wait a little for the server's answers/broadcasts, then drain everything that is queued
+        // ---- server answers / broadcasts -----------------------------------------------------------------------
         int timeoutMs = 20;
         while (true)
         {
@@ -411,19 +547,58 @@ void FakeRoster::Impl::Run()
                 continue;
             }
 
+            uint32_t token = ReadU32(buffer + 9);
             uint32_t stage = ReadU32(buffer + 13);
             uint8_t awaiting = buffer[17];
             uint8_t total = buffer[18];
 
-            // stage 1 with awaiting == 0: every roster member has probed, the client shows the Accept popup.
-            // Only now do the fakes get around to accepting.
-            if (phase == Phase::Probe && stage == 1 && awaiting == 0)
+            uint32_t index = token - FakeAccountBase;
+            if (index < 1 || index > fakeCount)
             {
-                Platform::Print("[MM-ACCEPT] server reports stage 1 awaiting=0 total=%u -- fakes will accept in %ums\n",
-                    total, params.acceptDelayMs);
-                phase = Phase::Accept;
-                nextAccept = Clock::now() + milliseconds(params.acceptDelayMs);
-                acceptedFakes = 0;
+                continue;
+            }
+
+            char name[40];
+            fakeName(index, name, sizeof(name));
+            Fake &fake = fakes[index];
+
+            if (awaiting == AwaitingUnknownAccount)
+            {
+                // reservation not (yet) active, or this account is not in it -- not a confirmation
+                FakeLog("player=%s stage=%u answered awaiting=127 (server does not know this account / reservation)", name, stage);
+                continue;
+            }
+
+            if (!totalChecked)
+            {
+                totalChecked = true;
+                if (total == params.rosterSize)
+                {
+                    FakeLog("server roster total=%u expected=%u OK", total, params.rosterSize);
+                }
+                else
+                {
+                    FakeLog("server roster total=%u expected=%u   <== MISMATCH: the srcds roster does not match the mode "
+                        "(is this srcds started with the right mode / was it restarted after a config change?)",
+                        total, params.rosterSize);
+                }
+            }
+
+            if ((stage == 1 || stage == 2) && fake.confirmed < stage)
+            {
+                fake.confirmed = stage;
+                FakeLog("player=%s stage=%u confirmed (awaiting=%u total=%u)", name, stage, awaiting, total);
+            }
+
+            if (stage == 1 && awaiting == 0 && (phase == Phase::Probe || phase == Phase::WaitPopup))
+            {
+                popupSeen = true;
+            }
+
+            if (stage == 2 && awaiting == 0 && !finalLogged)
+            {
+                finalLogged = true;
+                FakeLog("awaiting=0 total=%u (everybody accepted, phase=%s)", total, PhaseName(phase));
             }
         }
     }
@@ -441,7 +616,7 @@ void FakeRoster::Impl::Run()
 #endif
 }
 
-// ---- client side ------------------------------------------------------------------------------
+// ---- shared hook state ----------------------------------------------------------------------------
 
 namespace
 {
@@ -453,7 +628,16 @@ void *s_notifyContext;
 std::atomic<bool> s_armed{ false };
 std::atomic<uint32_t> s_armedIp{ 0 };
 std::atomic<uint16_t> s_armedPort{ 0 };
+std::atomic<uint32_t> s_armedExpectedPlayers{ 0 };
+std::atomic<bool> s_armedTotalChecked{ false };
 std::atomic<int64_t> s_armedDeadline{ 0 }; // steady clock, ms
+
+std::mutex s_sniffMutex;
+ServerSniffFn s_sniffFn;
+void *s_sniffContext;
+std::atomic<uint64_t> s_sniffCookie{ 0 };
+std::atomic<bool> s_sniffActive{ false };
+std::atomic<uint32_t> s_sniffLastAccount{ 0 };
 
 int64_t NowMs()
 {
@@ -501,6 +685,21 @@ void InspectReserveCheckResponse(const uint8_t *packet, const sockaddr *from, in
 
     Platform::Print("[MM-ACCEPT] 0x25 from reservation server: stage=%u awaiting=%u total=%u\n", stage, awaiting, total);
 
+    // the roster size the server reports has to match what the mode requires -- never hide a mismatch
+    if (awaiting != AwaitingUnknownAccount && !s_armedTotalChecked.exchange(true))
+    {
+        uint32_t expected = s_armedExpectedPlayers.load();
+        if (expected && total != expected)
+        {
+            Platform::Print("[MM-ACCEPT] server roster total=%u but the mode requires %u players   <== MISMATCH "
+                "(that srcds was started for another mode / before a config change)\n", total, expected);
+        }
+        else if (expected)
+        {
+            Platform::Print("[MM-ACCEPT] server roster total=%u matches the mode's required players\n", total);
+        }
+    }
+
     if (stage != 2 || awaiting != 0)
     {
         return;
@@ -521,23 +720,60 @@ void InspectReserveCheckResponse(const uint8_t *packet, const sockaddr *from, in
     }
 }
 
+// srcds: an incoming 0x21. The first one from a non-fake account with our cookie tells us who the real player is
+// (its SteamID is what the client engine got from ISteamUser::GetSteamID()).
+void InspectReserveCheckRequest(const uint8_t *packet)
+{
+    if (ReadU32(packet) != ConnectionlessHeader || packet[4] != OpcodeReserveCheck)
+    {
+        return;
+    }
+
+    uint32_t stage = ReadU32(packet + 13);
+    uint64_t cookie = ReadU64(packet + 17);
+    uint64_t steamId = ReadU64(packet + 25);
+    uint32_t accountId = static_cast<uint32_t>(steamId & 0xffffffffu);
+
+    if (!stage || !accountId || IsFakeAccountId(accountId) || cookie != s_sniffCookie.load())
+    {
+        return;
+    }
+
+    if (s_sniffLastAccount.exchange(accountId) == accountId)
+    {
+        return;
+    }
+
+    std::lock_guard lock{ s_sniffMutex };
+    if (s_sniffFn)
+    {
+        s_sniffFn(s_sniffContext, accountId);
+    }
+}
+
 int WSAAPI Hk_WSARecvFrom(SOCKET s, LPWSABUF buffers, DWORD bufferCount, LPDWORD bytesReceived, LPDWORD flags,
     sockaddr *from, LPINT fromlen, LPWSAOVERLAPPED overlapped, LPWSAOVERLAPPED_COMPLETION_ROUTINE completion)
 {
     int result = Og_WSARecvFrom(s, buffers, bufferCount, bytesReceived, flags, from, fromlen, overlapped, completion);
 
     // cheap filter first: this hook sits on every datagram the engine (and steam) receives
-    if (result == 0 && !overlapped && bufferCount == 1 && buffers && bytesReceived
-        && *bytesReceived == ReserveCheckResponseSize)
+    if (result == 0 && !overlapped && bufferCount == 1 && buffers && bytesReceived)
     {
-        if (DiagEnabled())
+        if (*bytesReceived == ReserveCheckResponseSize)
         {
-            DiagOnDatagram19(buffers[0].buf, from, fromlen ? *fromlen : 0);
-        }
+            if (DiagEnabled())
+            {
+                DiagOnDatagram19(buffers[0].buf, from, fromlen ? *fromlen : 0);
+            }
 
-        if (s_armed.load(std::memory_order_relaxed))
+            if (s_armed.load(std::memory_order_relaxed))
+            {
+                InspectReserveCheckResponse(reinterpret_cast<const uint8_t *>(buffers[0].buf), from, fromlen ? *fromlen : 0);
+            }
+        }
+        else if (*bytesReceived == ReserveCheckSize && s_sniffActive.load(std::memory_order_relaxed))
         {
-            InspectReserveCheckResponse(reinterpret_cast<const uint8_t *>(buffers[0].buf), from, fromlen ? *fromlen : 0);
+            InspectReserveCheckRequest(reinterpret_cast<const uint8_t *>(buffers[0].buf));
         }
     }
 
@@ -548,7 +784,7 @@ int WSAAPI Hk_WSARecvFrom(SOCKET s, LPWSABUF buffers, DWORD bufferCount, LPDWORD
 
 } // namespace
 
-void InstallClientRecvHook()
+void InstallRecvHook()
 {
 #ifdef _WIN32
     static bool s_installed;
@@ -569,7 +805,7 @@ void InstallClientRecvHook()
     void *target = ws2 ? reinterpret_cast<void *>(GetProcAddress(ws2, "WSARecvFrom")) : nullptr;
     if (!target)
     {
-        Platform::Print("[MM-ACCEPT] could not find ws2_32!WSARecvFrom, Accept completion trigger disabled\n");
+        Platform::Print("[MM-ACCEPT] could not find ws2_32!WSARecvFrom, Accept test hooks disabled\n");
         return;
     }
 
@@ -579,15 +815,25 @@ void InstallClientRecvHook()
         || funchook_prepare(funchook, &bridge, reinterpret_cast<void *>(Hk_WSARecvFrom)) != 0
         || funchook_install(funchook, 0) != 0)
     {
-        Platform::Print("[MM-ACCEPT] hooking ws2_32!WSARecvFrom failed, Accept completion trigger disabled\n");
+        Platform::Print("[MM-ACCEPT] hooking ws2_32!WSARecvFrom failed, Accept test hooks disabled\n");
         return;
     }
 
     Og_WSARecvFrom = reinterpret_cast<decltype(Og_WSARecvFrom)>(bridge);
-    Platform::Print("[MM-ACCEPT] ws2_32!WSARecvFrom hooked (watching for reservation 0x25 responses)\n");
+    Platform::Print("[MM-ACCEPT] ws2_32!WSARecvFrom hooked (0x25 watcher on the client, 0x21 sniffer on srcds)\n");
 #else
-    Platform::Print("[MM-ACCEPT] client recv hook is Windows-only, Accept completion trigger disabled\n");
+    Platform::Print("[MM-ACCEPT] recv hook is Windows-only, Accept test hooks disabled\n");
 #endif
+}
+
+void SetServerSniff(ServerSniffFn fn, void *context, uint64_t cookie)
+{
+    std::lock_guard lock{ s_sniffMutex };
+    s_sniffFn = fn;
+    s_sniffContext = context;
+    s_sniffCookie = cookie;
+    s_sniffLastAccount = 0;
+    s_sniffActive = fn != nullptr;
 }
 
 void SetClientNotify(ClientNotifyFn fn, void *context)
@@ -597,10 +843,12 @@ void SetClientNotify(ClientNotifyFn fn, void *context)
     s_notifyContext = context;
 }
 
-void ArmClient(uint32_t serverIp, uint16_t serverPort)
+void ArmClient(uint32_t serverIp, uint16_t serverPort, uint32_t expectedPlayers)
 {
     s_armedIp = serverIp;
     s_armedPort = serverPort;
+    s_armedExpectedPlayers = expectedPlayers;
+    s_armedTotalChecked = false;
     s_armedDeadline = NowMs() + ArmTimeoutMs;
     s_armed = true;
 }

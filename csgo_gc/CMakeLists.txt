@@ -33,6 +33,7 @@ add_library(csgo_gc SHARED
     item_schema.cpp
     keyvalue.cpp
     main.cpp
+    mm_modes.cpp
     networking_client.cpp
     networking_server.cpp
     steam_hook.cpp
@@ -51,7 +52,8 @@ target_precompile_headers(csgo_gc PRIVATE stdafx.h)
 set_target_properties(csgo_gc PROPERTIES PREFIX "")
 
 if (MSVC)
-    target_compile_options(csgo_gc PRIVATE /W4 /wd4244)
+    # C4702 (unreachable code) is raised by the generated *.pb.cc against vcpkg's protobuf headers, not by our code
+    target_compile_options(csgo_gc PRIVATE /W4 /wd4244 /wd4702)
     target_compile_definitions(csgo_gc PRIVATE _CRT_SECURE_NO_WARNINGS)
 else()
     target_compile_options(csgo_gc PRIVATE -Wall -Wextra)

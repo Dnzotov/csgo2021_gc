@@ -3,6 +3,39 @@
 #include "keyvalue.h"
 #include "random.h"
 
+// "-name value" from the process command line
+static std::string CommandLineValue(std::string_view name)
+{
+    std::string commandLine = Platform::CommandLine();
+
+    size_t position = 0;
+    std::string previous;
+    while (position < commandLine.size())
+    {
+        while (position < commandLine.size() && commandLine[position] == ' ')
+        {
+            position++;
+        }
+
+        size_t end = commandLine.find(' ', position);
+        if (end == std::string::npos)
+        {
+            end = commandLine.size();
+        }
+
+        std::string token = commandLine.substr(position, end - position);
+        if (previous == name)
+        {
+            return token;
+        }
+
+        previous = token;
+        position = end;
+    }
+
+    return {};
+}
+
 constexpr const char *ConfigFilePath = "csgo_gc/config.txt";
 
 const GCConfig &GetConfig()
@@ -15,8 +48,19 @@ GCConfig::GCConfig()
 {
     KeyValue config{ "config" };
 
+    // TEST ONLY: -gc_mode <mode> on the (srcds) command line wins over matchmaking.test_accept_mode
+    auto applyCommandLine = [this]
+    {
+        std::string mode = CommandLineValue("-gc_mode");
+        if (!mode.empty())
+        {
+            m_testAcceptMode = mode;
+        }
+    };
+
     if (!config.ParseFromFile(ConfigFilePath))
     {
+        applyCommandLine();
         return;
     }
 
@@ -71,7 +115,42 @@ GCConfig::GCConfig()
         m_testRealAccountId = matchmaking->GetNumber("test_real_account_id", m_testRealAccountId);
         m_testFakeAcceptDelayMs = matchmaking->GetNumber("test_fake_accept_delay_ms", m_testFakeAcceptDelayMs);
         m_testDiag = matchmaking->GetNumber("test_diag", m_testDiag);
+
+        const KeyValue *ports = matchmaking->GetSubkey("test_server_ports");
+        if (ports)
+        {
+            for (const KeyValue &subkey : *ports)
+            {
+                m_testServerPorts.emplace_back(std::string(subkey.Name()), FromString<uint16_t>(subkey.String()));
+            }
+        }
     }
+
+    applyCommandLine();
+}
+
+uint16_t GCConfig::TestServerPortForMode(std::string_view modeName) const
+{
+    for (const auto &entry : m_testServerPorts)
+    {
+        if (entry.first == modeName)
+        {
+            return entry.second;
+        }
+    }
+
+    return m_testServerPort;
+}
+
+uint16_t GCConfig::DedicatedServerPort() const
+{
+    std::string port = CommandLineValue("-port");
+    if (!port.empty())
+    {
+        return FromString<uint16_t>(port);
+    }
+
+    return m_testServerPort;
 }
 
 float GCConfig::GetRarityWeight(uint32_t rarity) const
