@@ -1,5 +1,8 @@
 #include "stdafx.h"
+#include <algorithm>
+
 #include "mm_modes.h"
+#include "keyvalue.h"
 
 namespace MM
 {
@@ -139,13 +142,111 @@ MapSelection DecodeMapSelection(const GameMode &mode, uint32_t gameType)
         Decode(s_demolition, selection);
         break;
 
-    case MapTable::Skirmish: // mask bits are skirmish variants (1 << (index - 1)), not maps
+    case MapTable::Skirmish: // mask bits are skirmish modes (1 << (id - 1)), see DecodeSkirmishSelection
     case MapTable::Cooperative: // mask is the quest id
     case MapTable::None:
         break;
     }
 
     return selection;
+}
+
+std::vector<SkirmishMode> ParseSkirmishModes(const KeyValue *skirmishModesKey)
+{
+    std::vector<SkirmishMode> modes;
+    if (!skirmishModesKey)
+    {
+        return modes;
+    }
+
+    for (const KeyValue &entry : *skirmishModesKey)
+    {
+        SkirmishMode mode;
+        const std::string_view id = entry.Name();
+        const std::from_chars_result parsed = std::from_chars(id.data(), id.data() + id.size(), mode.id);
+        // the mask has 24 bits, so ids 1..24 can be selected
+        if (parsed.ec != std::errc{} || parsed.ptr != id.data() + id.size() || mode.id < 1 || mode.id > 24)
+        {
+            continue;
+        }
+
+        mode.name = std::string(entry.GetString("name"));
+        mode.gameMode = std::string(entry.GetString("gamemode"));
+        if (!mode.name.empty())
+        {
+            modes.push_back(std::move(mode));
+        }
+    }
+
+    std::sort(modes.begin(), modes.end(), [](const SkirmishMode &a, const SkirmishMode &b) { return a.id < b.id; });
+    return modes;
+}
+
+std::vector<std::string> SkirmishMapGroupMaps(const KeyValue *gamemodes, std::string_view modeName)
+{
+    std::vector<std::string> maps;
+    if (!gamemodes || gamemodes->SubkeyCount() == 0)
+    {
+        return maps;
+    }
+
+    const KeyValue *groups = gamemodes->begin()->GetSubkey("mapgroups");
+    if (!groups)
+    {
+        return maps;
+    }
+
+    const std::string groupName = "mg_skirmish_" + std::string(modeName);
+    const KeyValue *group = groups->GetSubkey(groupName);
+    const KeyValue *groupMaps = group ? group->GetSubkey("maps") : nullptr;
+    if (groupMaps)
+    {
+        for (const KeyValue &map : *groupMaps)
+        {
+            maps.emplace_back(map.Name());
+        }
+    }
+
+    return maps;
+}
+
+std::vector<SkirmishVariant> DecodeSkirmishSelection(uint32_t mask, const std::vector<SkirmishMode> &modes,
+    const KeyValue *gamemodes, uint32_t *unknownBits)
+{
+    std::vector<SkirmishVariant> variants;
+    uint32_t known = 0;
+    for (const SkirmishMode &mode : modes)
+    {
+        const uint32_t bit = 1u << (mode.id - 1);
+        known |= bit;
+        if (mask & bit)
+        {
+            variants.push_back({ mode.name, mode.gameMode, SkirmishMapGroupMaps(gamemodes, mode.name) });
+        }
+    }
+
+    if (unknownBits)
+    {
+        *unknownBits = mask & ~known;
+    }
+
+    return variants;
+}
+
+std::string FormatSkirmish(const std::vector<SkirmishVariant> &variants)
+{
+    std::string result;
+    for (const SkirmishVariant &variant : variants)
+    {
+        if (!result.empty())
+        {
+            result += ",";
+        }
+
+        result += variant.name + "(" + std::to_string(variant.maps.size()) + " maps)";
+    }
+
+    return result.empty() ? "(none)" : result;
 }
 
 std::string FormatMaps(const MapSelection &selection)

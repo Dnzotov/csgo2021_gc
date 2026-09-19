@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Matchmaking Admin</title>
+<link rel="stylesheet" href="/admin/assets/admin.css">
+</head>
+<body class="login-page">
+<main class="login-card">
+  <h1>Matchmaking Admin</h1>
+  <p class="muted">csgo_gc matchmaking backend</p>
+  <form method="post" action="/admin/login" autocomplete="on">
+    <input type="hidden" name="_csrf" value="{{csrf}}">
+    <label>Username
+      <input type="text" name="username" autocomplete="username" required autofocus>
+    </label>
+    <label>Password
+      <input type="password" name="password" autocomplete="current-password" required>
+    </label>
+    <button type="submit" class="primary">Sign in</button>
+  </form>
+  <p class="notice {{message_class}}">{{message}}</p>
+</main>
+</body>
+</html>

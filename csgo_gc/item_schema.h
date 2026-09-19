@@ -1,6 +1,7 @@
 #pragma once
 
 #include "gc_const_csgo.h"
+#include "mm_modes.h"
 
 class KeyValue;
 class Random;
@@ -119,6 +120,9 @@ public:
 
     // for case opening
     const LootList *GetCrateLootList(uint32_t crateDefIndex) const;
+
+    // items_game.txt "skirmish_modes": what the bits of a Skirmish (War Games) search mask mean (mm_modes.h)
+    const std::vector<MM::SkirmishMode> &SkirmishModes() const { return m_skirmishModes; }
 
     // for case opening FIXME: do we want to keep this here???
     bool CreateItemFromLootListItem(Random &random,
@@ -261,4 +265,6 @@ private:
     std::unordered_map<std::string, LootList> m_lootLists;
 
     std::unordered_map<uint32_t, const LootList &> m_revolvingLootLists;
+
+    std::vector<MM::SkirmishMode> m_skirmishModes;
 };

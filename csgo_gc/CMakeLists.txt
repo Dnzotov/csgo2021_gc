@@ -22,6 +22,7 @@ FetchContent_MakeAvailable(funchook)
 
 add_library(csgo_gc SHARED
     appid.cpp
+    backend_client.cpp
     case_opening.cpp
     config.cpp
     gc_client.cpp
@@ -36,6 +37,7 @@ add_library(csgo_gc SHARED
     mm_modes.cpp
     networking_client.cpp
     networking_server.cpp
+    server_roster.cpp
     steam_hook.cpp
     test_accept.cpp
     test_diag.cpp

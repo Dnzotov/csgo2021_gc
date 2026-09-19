@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<meta name="csrf-token" content="{{csrf}}">
+<title>Matchmaking Admin</title>
+<link rel="stylesheet" href="/admin/assets/admin.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">Matchmaking Admin <span class="muted">stage 3: map groups, fake players</span></div>
+  <nav class="tabs" role="tablist">
+    <button class="tab active" data-tab="searches" role="tab">Active Searches <span id="searchCount" class="badge">0</span></button>
+    <button class="tab" data-tab="servers" role="tab">Game Servers <span id="serverCount" class="badge">0</span></button>
+    <button class="tab" data-tab="matches" role="tab">Matches <span id="matchCount" class="badge">0</span></button>
+    <button class="tab" data-tab="fake" role="tab">Fake Players <span id="fakeCount" class="badge">0</span></button>
+  </nav>
+  <div class="user">
+    <span class="muted">{{user}}</span>
+    <form method="post" action="/admin/logout" class="inline">
+      <input type="hidden" name="_csrf" value="{{csrf}}">
+      <button type="submit">Log out</button>
+    </form>
+  </div>
+</header>
+
+<div id="banner" class="banner" hidden></div>
+
+<main>
+  <!-- ============================ Active Searches ============================ -->
+  <section id="tab-searches" class="panel">
+    <div class="toolbar">
+      <label class="check"><input type="checkbox" id="showFinished"> show ended (last hour)</label>
+      <span class="muted" id="searchInfo"></span>
+    </div>
+    <table id="searchTable">
+      <thead>
+        <tr>
+          <th>AccountID</th><th>Mode</th><th>game_type</th><th>game_mode</th><th>Maps</th>
+          <th>Started</th><th>Duration</th><th>Server / match</th><th>Status</th><th></th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <p id="searchEmpty" class="empty" hidden>Nobody is searching right now.</p>
+
+    <details class="testbox">
+      <summary>Add a test search</summary>
+      <form id="testSearchForm" class="row">
+        <label>AccountID <input name="account_id" type="number" min="1" max="4294967295" required></label>
+        <label>Mode <select name="mode" id="testMode"></select></label>
+        <label>Map <input name="map" placeholder="de_dust2" pattern="[A-Za-z0-9_]{0,64}"></label>
+        <button type="submit" class="primary">Add</button>
+      </form>
+      <p class="muted">Test searches expire like real ones and can be ended with the End button.</p>
+    </details>
+  </section>
+
+  <!-- ============================== Game Servers ============================== -->
+  <section id="tab-servers" class="panel" hidden>
+    <table id="serverTable">
+      <thead>
+        <tr><th>Host / IP</th><th>Port</th><th>Category</th><th>Map</th><th>State</th><th>Enabled</th><th>Last report</th><th>Added</th><th></th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <p id="serverEmpty" class="empty" hidden>No game servers registered.</p>
+
+    <h3>Add game server</h3>
+    <form id="serverForm" class="row">
+      <label>Host / IP <input name="host" required maxlength="253" placeholder="192.168.1.150"></label>
+      <label>Port <input name="port" type="number" min="1" max="65535" required placeholder="27016"></label>
+      <label>Category <select name="category" id="serverCategory"></select></label>
+      <label>Map <input name="map" placeholder="de_dust2" pattern="[A-Za-z0-9_]{0,64}"></label>
+      <label>State <select name="state"><option value="AVAILABLE">Available</option><option value="BUSY">Busy</option></select></label>
+      <label class="check"><input name="enabled" type="checkbox" checked> enabled</label>
+      <button type="submit" class="primary">Add</button>
+    </form>
+    <p class="muted">The matchmaker assigns only enabled + Available servers whose category and map fit the search. Classic
+      modes (Casual, Deathmatch, Arms Race, Demolition, Skirmish) just point the player at the server, it stays Available.
+      Only the Accept modes (Competitive, Wingman, Danger Zone) reserve it for the match (Release / Available frees it,
+      otherwise it returns by itself after the reservation TTL). Servers are not health-checked; a server can report
+      itself with POST /api/v1/servers/state.</p>
+  </section>
+
+  <!-- ================================== Matches ================================== -->
+  <section id="tab-matches" class="panel" hidden>
+    <table id="matchTable">
+      <thead>
+        <tr><th>Match</th><th>Mode</th><th>Server</th><th>Map</th><th>Status</th><th>Players</th><th>AccountIDs</th><th>Created</th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <p id="matchEmpty" class="empty" hidden>No matches yet.</p>
+  </section>
+
+  <!-- ================================ Fake Players ================================ -->
+  <section id="tab-fake" class="panel" hidden>
+    <p class="muted intro">TEST tool. A fake search is a group of virtual players that fills a Competitive / Wingman / Danger Zone
+      match a <b>real</b> player has started (they never start a match or take a server on their own). The real player searches
+      as usual; when the server of the match is on one of the fake search's maps, the virtual players join it and the match is
+      complete. With no enabled fake search nothing changes. Retail sizes: Competitive 10, Wingman 4, Danger Zone 16, so the
+      real player + fake players have to add up to that (the backend setting <code>backend.required-players.*</code> lowers
+      the number for a test setup that does not use fake searches).</p>
+    <div id="fakeOff" class="banner-inline" hidden>The fake players tool is switched off on this backend (backend.fake-players.enabled=false).</div>
+    <table id="fakeTable">
+      <thead>
+        <tr><th>Status</th><th>Players</th><th>Mode</th><th>Maps</th><th>Match / server</th><th></th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <p id="fakeEmpty" class="empty" hidden>No fake searches. Add one below.</p>
+
+    <h3>Add fake search</h3>
+    <form id="fakeForm" class="row">
+      <label>Mode <select name="mode" id="fakeMode"></select></label>
+      <label>Players <input name="players" id="fakePlayers" type="number" min="1" max="15" value="3" required class="narrow"></label>
+      <label class="grow">Maps <input name="maps" id="fakeMaps" placeholder="empty = any map, or de_dust2, de_mirage" pattern="[A-Za-z0-9_, ]*"></label>
+      <label class="check"><input name="enabled" type="checkbox" checked> start searching</label>
+      <button type="submit" class="primary">Add</button>
+    </form>
+    <div id="fakeChips" class="chips"></div>
+    <p class="muted" id="fakeHint"></p>
+  </section>
+</main>
+
+<script src="/admin/assets/admin.js"></script>
+</body>
+</html>

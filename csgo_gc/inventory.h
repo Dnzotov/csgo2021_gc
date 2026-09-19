@@ -16,6 +16,8 @@ public:
 
     void BuildCacheSubscription(CMsgSOCacheSubscribed &message, int level, bool server);
 
+    const ItemSchema &Schema() const { return m_itemSchema; }
+
     bool EquipItem(uint64_t itemId, uint32_t classId, uint32_t slotId, CMsgSOMultipleObjects &update);
 
     bool RemoveItem(uint64_t itemId, CMsgSOSingleObject &destroy);

@@ -1,8 +1,14 @@
 #pragma once
 
+#include "backend_client.h"
 #include "config.h"
 #include "gc_shared.h"
 #include "inventory.h"
+
+namespace MM
+{
+struct GameMode;
+}
 
 class ClientGC final : public SharedGC
 {
@@ -25,6 +31,8 @@ private:
     void OnClientHello(GCMessageRead &messageRead);
     void OnMatchmakingStart(GCMessageRead &messageRead);
     void OnMatchmakingStop();
+    void OnBackendSearchResult(const std::vector<uint8_t> &buffer);
+    void StartServerFlow(const BackendClient::Assignment &assignment);
     void OnReservationFullyAccepted();
     void AdjustItemEquippedState(GCMessageRead &messageRead);
     void ClientPlayerDecalSign(GCMessageRead &messageRead);
@@ -67,6 +75,19 @@ private:
     };
 
     PendingAccept m_pendingAccept;
+
+    // The search the Java backend is working on for us (9101 seen, no server yet). Filled by OnMatchmakingStart, used by
+    // StartServerFlow once the backend assigned a server. Only touched from the worker thread.
+    struct ActiveSearch
+    {
+        bool active{};
+        uint32_t gameType{}; // 9101 game_type as received
+        uint32_t eGame{};
+        const MM::GameMode *mode{};
+        std::string fallbackMap; // the map we would advertise if the assignment carried none
+    };
+
+    ActiveSearch m_activeSearch;
 
     const uint64_t m_steamId;
 

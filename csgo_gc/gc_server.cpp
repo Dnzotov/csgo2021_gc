@@ -1,5 +1,8 @@
 #include "stdafx.h"
+#include <algorithm>
+
 #include "gc_server.h"
+#include "backend_client.h"
 #include "gc_const.h"
 #include "gc_const_csgo.h"
 #include "config.h"
@@ -21,6 +24,7 @@ ServerGC::ServerGC()
 ServerGC::~ServerGC()
 {
     AcceptTest::SetServerSniff(nullptr, nullptr, 0);
+    m_rosterPoller.reset(); // its worker thread posts events to us
     m_testRoster.reset();
     StopThread();
     Platform::Print("ServerGC destroyed\n");
@@ -44,6 +48,17 @@ void ServerGC::HandleEvent(GCEvent type, uint64_t id, const std::vector<uint8_t>
 
     case GCEvent::TestRealPlayerSeen:
         OnTestRealPlayerSeen(static_cast<uint32_t>(id));
+        break;
+
+    case GCEvent::BackendRoster:
+        OnBackendRoster(std::string(buffer.begin(), buffer.end()));
+        break;
+
+    case GCEvent::TestFakesReady:
+        if (m_rosterController)
+        {
+            m_rosterController->OnFakesReady(id != 0);
+        }
         break;
 
     default:
@@ -92,6 +107,12 @@ void ServerGC::HandleClientSOCacheUnsubscribe(uint64_t steamId)
     {
         // TEST ONLY: the last real client left, start over with a fresh roster for the next match
         m_testRoster->OnMatchEnded();
+    }
+
+    if (m_connectedClients.empty() && m_rosterController)
+    {
+        // a roster change the backend announced while a player was on the server can be applied now
+        m_rosterController->OnPlayersChanged();
     }
 
     Platform::Print("HandleClientSOCacheUnsubscribe: %llu\n", steamId);
@@ -325,12 +346,13 @@ void ServerGC::ReserveServerForOurCookie()
     PostToHost(HostEvent::ReserveServerForQueuedGame, 0, buffer, static_cast<uint32_t>(strlen(buffer)));
 }
 
-// TEST ONLY: matchmaking.test_accept_mode (or -gc_mode <mode> on the srcds command line) switches the reservation
+// TEST ONLY: -gc_mode <mode> on the srcds command line switches the reservation
 // from the plain 'G' (awaiting always 0, no Accept) to a queued 'Q' roster of the mode's required players (mm_modes.h):
 // the real player plus deterministic fake participants that exist only as roster entries and answer through real
 // 0x21 datagrams (AcceptTest::FakeRoster). One srcds serves ONE mode (the roster is built once per cookie); run one
 // srcds per mode. The real player's AccountID is learned automatically from the first 0x21 it sends (its SteamID
-// comes from ISteamUser::GetSteamID() on the client); matchmaking.test_real_account_id is only an optional override.
+// comes from ISteamUser::GetSteamID() on the client). The address the fakes send to is the srcds' own (-ip or loopback).
+// Which srcds a player is sent to is decided by the Java backend (RESEARCH_FINDINGS.md #49), not by this.
 // Returns false (=> old 'G' behavior) when the mode is unset or not an accept mode.
 bool ServerGC::StartAcceptTestRoster()
 {
@@ -343,7 +365,7 @@ bool ServerGC::StartAcceptTestRoster()
     const MM::GameMode *mode = MM::FindGameModeByName(config.TestAcceptMode());
     if (!mode || !mode->acceptRequired || !mode->supported || mode->requiredPlayers == 0)
     {
-        Platform::Print("[MM-ACCEPT] test_accept_mode '%.*s' is not a supported accept mode "
+        Platform::Print("[MM-ACCEPT] -gc_mode '%.*s' is not a supported accept mode "
             "(competitive/wingman/dangerzone/scrimcomp5v5), using the plain reservation\n",
             static_cast<int>(config.TestAcceptMode().size()), config.TestAcceptMode().data());
         return false;
@@ -356,13 +378,6 @@ bool ServerGC::StartAcceptTestRoster()
         mode->name, mode->requiredPlayers, mode->serverGameType, mode->serverGameMode, mode->serverMaxPlayers,
         config.DedicatedServerPort());
 
-    if (config.TestRealAccountId() != 0)
-    {
-        Platform::Print("[MM-ACCEPT] real player AccountID %u from the test_real_account_id override\n", config.TestRealAccountId());
-        CreateTestRoster(config.TestRealAccountId());
-        return true;
-    }
-
     // learn it from the first 0x21 of the real client; its retries (every ~1 s for the reservation timeout) succeed
     // as soon as the roster is armed
     m_testWaitingForPlayer = true;
@@ -373,7 +388,36 @@ bool ServerGC::StartAcceptTestRoster()
         },
         this, GameServerCookieId);
 
-    Platform::Print("[MM-ACCEPT] waiting for the real player's first 0x21 to learn its AccountID (no test_real_account_id needed)\n");
+    Platform::Print("[MM-ACCEPT] waiting for the real player's first 0x21 to learn its AccountID\n");
+
+    // The backend is the source of truth for the roster of a test match (RESEARCH_FINDINGS.md #55): ask it, once a
+    // second, what the match on this server consists of. The sniff above stays as the fallback (backend not
+    // reachable, no match for this server, a roster that is not the mode's size).
+    RosterFeed::Controller::Host host;
+    host.arm = [this](const std::vector<uint32_t> &participants, const std::string &source, bool unreserveFirst)
+    {
+        ArmRoster(participants, source, unreserveFirst);
+    };
+    host.confirm = [this](const std::string &matchId)
+    {
+        if (m_rosterPoller)
+        {
+            m_rosterPoller->Confirm(matchId);
+        }
+    };
+    host.playerOnServer = [this] { return !m_connectedClients.empty(); };
+    m_rosterController = std::make_unique<RosterFeed::Controller>(mode->name, mode->requiredPlayers, std::move(host));
+
+    if (BackendClient::Enabled() && !m_rosterPoller)
+    {
+        m_rosterPoller = std::make_unique<RosterFeed::Poller>(config.DedicatedServerAddress(), config.DedicatedServerPort(),
+            [this](const RosterFeed::Snapshot &snapshot)
+            {
+                const std::string text = RosterFeed::Serialize(snapshot);
+                PostToGC(GCEvent::BackendRoster, 0, text.data(), static_cast<uint32_t>(text.size()));
+            });
+    }
+
     return true;
 }
 
@@ -386,9 +430,18 @@ void ServerGC::CreateTestRoster(uint32_t realAccountId)
     params.realAccountId = realAccountId;
     params.rosterSize = m_testMode->requiredPlayers;
     params.modeName = m_testMode->name;
-    params.serverAddress = std::string(config.TestServerAddress());
+    params.serverAddress = config.DedicatedServerAddress();
     params.serverPort = config.DedicatedServerPort();
     params.acceptDelayMs = config.TestFakeAcceptDelayMs();
+    params.source = "legacy (first 0x21 of the real player)";
+    params.onFakesReady = [this](bool ready) { PostToGC(GCEvent::TestFakesReady, ready ? 1 : 0, nullptr, 0); };
+
+    // the same participants the driver builds for itself, so a backend roster of the same content is recognized
+    std::vector<uint32_t> participants{ realAccountId };
+    for (uint32_t i = 1; i < params.rosterSize; i++)
+    {
+        participants.push_back(AcceptTest::FakeAccountId(i));
+    }
 
     // ReserveServerForQueuedGame has to run on the main thread, so it goes through the usual host event queue
     m_testRoster = std::make_unique<AcceptTest::FakeRoster>(params,
@@ -396,16 +449,21 @@ void ServerGC::CreateTestRoster(uint32_t realAccountId)
         {
             PostToHost(HostEvent::ReserveServerForQueuedGame, 0, payload.data(), static_cast<uint32_t>(payload.size()));
         });
+
+    if (m_rosterController)
+    {
+        m_rosterController->OnLegacyArmed(participants);
+    }
 }
 
 void ServerGC::OnTestRealPlayerSeen(uint32_t accountId)
 {
     if (m_testRoster)
     {
-        if (accountId != m_testRealAccountId)
+        if (m_rosterController && !m_rosterController->InArmedRoster(accountId))
         {
-            Platform::Print("[MM-ACCEPT] another real player (AccountID %u) sent 0x21, the roster is armed for %u -- ignored\n",
-                accountId, m_testRealAccountId);
+            Platform::Print("[MM-ACCEPT] another real player (AccountID %u) sent 0x21, it is not in the armed roster (%s) -- ignored\n",
+                accountId, m_rosterController->ArmedSource().c_str());
         }
 
         return;
@@ -416,10 +474,80 @@ void ServerGC::OnTestRealPlayerSeen(uint32_t accountId)
         return;
     }
 
+    if (m_rosterController && m_rosterController->UsingBackendRoster())
+    {
+        // the backend has a complete roster for this server and it is armed by the roster controller (or postponed
+        // while another player is on the server): the sniffed player belongs to it, no need for the legacy roster
+        Platform::Print("[MM-ACCEPT] real player %u sent 0x21, the backend's roster (match %s) is in charge\n", accountId,
+            m_rosterController->MatchId().c_str());
+        return;
+    }
+
     Platform::Print("[MM-ACCEPT] real player detected from its 0x21: AccountID %u, arming the roster\n", accountId);
     m_testWaitingForPlayer = false;
     m_testRealAccountId = accountId;
     CreateTestRoster(accountId);
+}
+
+// ---- backend-driven roster (server_roster.h, RESEARCH_FINDINGS.md #55) ------------------------------------------
+
+// the poller's answer changed
+void ServerGC::OnBackendRoster(const std::string &text)
+{
+    RosterFeed::Snapshot snapshot;
+    if (!RosterFeed::Deserialize(text, snapshot))
+    {
+        Platform::Print("[MM-ACCEPT] backend roster: unreadable poller event ignored\n");
+        return;
+    }
+
+    if (m_rosterController)
+    {
+        m_rosterController->OnSnapshot(snapshot);
+    }
+}
+
+// arms the reservation with the backend's roster: the real players' AccountIDs and the fake ones it assigned
+void ServerGC::ArmRoster(const std::vector<uint32_t> &participants, const std::string &source, bool unreserveFirst)
+{
+    const GCConfig &config = GetConfig();
+
+    uint32_t real = 0;
+    for (uint32_t id : participants)
+    {
+        if (!AcceptTest::IsFakeAccountId(id))
+        {
+            real = id;
+            break;
+        }
+    }
+
+    Platform::Print("[MM-ACCEPT] arming the roster of %s (%zu participants)%s\n", source.c_str(), participants.size(),
+        unreserveFirst ? ", replacing the roster that is armed" : "");
+
+    m_testRoster.reset(); // stops its thread
+
+    AcceptTest::FakeRoster::Params params;
+    params.cookie = GameServerCookieId;
+    params.realAccountId = real;
+    params.rosterSize = static_cast<uint32_t>(participants.size());
+    params.modeName = m_testMode->name;
+    params.serverAddress = config.DedicatedServerAddress();
+    params.serverPort = config.DedicatedServerPort();
+    params.acceptDelayMs = config.TestFakeAcceptDelayMs();
+    params.participants = participants;
+    params.source = source;
+    params.unreserveFirst = unreserveFirst;
+    params.onFakesReady = [this](bool ready) { PostToGC(GCEvent::TestFakesReady, ready ? 1 : 0, nullptr, 0); };
+
+    m_testWaitingForPlayer = false;
+    m_testRealAccountId = real;
+
+    m_testRoster = std::make_unique<AcceptTest::FakeRoster>(params,
+        [this](const std::string &payload)
+        {
+            PostToHost(HostEvent::ReserveServerForQueuedGame, 0, payload.data(), static_cast<uint32_t>(payload.size()));
+        });
 }
 
 void ServerGC::IncrementKillCountAttribute(GCMessageRead &messageRead)

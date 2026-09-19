@@ -48,7 +48,7 @@ GCConfig::GCConfig()
 {
     KeyValue config{ "config" };
 
-    // TEST ONLY: -gc_mode <mode> on the (srcds) command line wins over matchmaking.test_accept_mode
+    // TEST ONLY: -gc_mode <mode> on the (srcds) command line
     auto applyCommandLine = [this]
     {
         std::string mode = CommandLineValue("-gc_mode");
@@ -109,37 +109,13 @@ GCConfig::GCConfig()
     const KeyValue *matchmaking = config.GetSubkey("matchmaking");
     if (matchmaking)
     {
-        m_testServerAddress = std::string(matchmaking->GetString("test_server_address", m_testServerAddress));
-        m_testServerPort = matchmaking->GetNumber("test_server_port", m_testServerPort);
-        m_testAcceptMode = std::string(matchmaking->GetString("test_accept_mode", m_testAcceptMode));
-        m_testRealAccountId = matchmaking->GetNumber("test_real_account_id", m_testRealAccountId);
-        m_testFakeAcceptDelayMs = matchmaking->GetNumber("test_fake_accept_delay_ms", m_testFakeAcceptDelayMs);
         m_testDiag = matchmaking->GetNumber("test_diag", m_testDiag);
 
-        const KeyValue *ports = matchmaking->GetSubkey("test_server_ports");
-        if (ports)
-        {
-            for (const KeyValue &subkey : *ports)
-            {
-                m_testServerPorts.emplace_back(std::string(subkey.Name()), FromString<uint16_t>(subkey.String()));
-            }
-        }
+        m_backendUrl = std::string(matchmaking->GetString("backend_url", m_backendUrl));
+        m_backendApiKey = std::string(matchmaking->GetString("backend_api_key", m_backendApiKey));
     }
 
     applyCommandLine();
-}
-
-uint16_t GCConfig::TestServerPortForMode(std::string_view modeName) const
-{
-    for (const auto &entry : m_testServerPorts)
-    {
-        if (entry.first == modeName)
-        {
-            return entry.second;
-        }
-    }
-
-    return m_testServerPort;
 }
 
 uint16_t GCConfig::DedicatedServerPort() const
@@ -150,7 +126,13 @@ uint16_t GCConfig::DedicatedServerPort() const
         return FromString<uint16_t>(port);
     }
 
-    return m_testServerPort;
+    return 27015; // srcds' default
+}
+
+std::string GCConfig::DedicatedServerAddress() const
+{
+    std::string address = CommandLineValue("-ip");
+    return address.empty() ? "127.0.0.1" : address;
 }
 
 float GCConfig::GetRarityWeight(uint32_t rarity) const

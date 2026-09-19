@@ -47,30 +47,30 @@ public:
     int Level() const { return m_level; }
     int Xp() const { return m_xp; }
 
-    // EXPERIMENTAL, see test_mm.h/RESEARCH_FINDINGS.md #26/#27 -- address/port of the
-    // dedicated server used for the manual Casual reservation-check test. NOT the future
-    // matchmaking backend (that'll be matchmaking.backend_address/backend_port).
-    std::string_view TestServerAddress() const { return m_testServerAddress; }
-    uint16_t TestServerPort() const { return m_testServerPort; }
+    // The client does not know (and does not choose) which dedicated server a search gets: the Java backend does
+    // (RESEARCH_FINDINGS.md #49). What is left below concerns the srcds process itself and comes from ITS command line.
 
     // TEST ONLY, srcds side, see test_accept.h/RESEARCH_FINDINGS.md #42 -- "competitive", "wingman" or
-    // "dangerzone" makes the server reserve a queued ('Q') roster of the real player plus fake
-    // participants instead of the plain 'G' reservation. Empty = old Casual behavior.
-    // (srcds: also settable with -gc_mode <mode> on the command line, so several servers can share one install)
+    // "dangerzone" (from -gc_mode <mode> on the srcds command line, one srcds per mode) makes the server reserve a
+    // queued ('Q') roster of the real player plus fake participants instead of the plain 'G' reservation.
+    // Empty = plain reservation (the classic modes).
     std::string_view TestAcceptMode() const { return m_testAcceptMode; }
-    // OPTIONAL TEST override for the real player's AccountID on srcds. Normally unset: srcds learns it from the
-    // first A2S_RESERVE_CHECK (0x21) the real client sends (its SteamID comes from ISteamUser::GetSteamID()).
-    uint32_t TestRealAccountId() const { return m_testRealAccountId; }
-
-    // TEST ONLY, client: the UDP port of the test srcds that serves a mode (matchmaking.test_server_ports
-    // { "competitive" "27016" ... }), falling back to test_server_port. Goes away with the Java backend.
-    uint16_t TestServerPortForMode(std::string_view modeName) const;
-    // TEST ONLY, srcds: its own game port (-port on the command line, else test_server_port)
+    // TEST ONLY, srcds: its own game port (-port on the command line, srcds' default 27015 otherwise) and address
+    // (-ip on the command line, else loopback): where its fake participants send their reservation checks to
     uint16_t DedicatedServerPort() const;
-    // how long after the Accept popup is up before the first fake participant accepts
-    uint32_t TestFakeAcceptDelayMs() const { return m_testFakeAcceptDelayMs; }
-    // TEST ONLY: runtime diagnostics of the matchmaking UI flow (test_diag.h), client only, default on
+    std::string DedicatedServerAddress() const;
+    // TEST ONLY, srcds: how long after the Accept popup is up before the first fake participant accepts
+    uint32_t TestFakeAcceptDelayMs() const { return 2500; }
+    // runtime diagnostics of the matchmaking UI flow (test_diag.h), client only, default on; matchmaking.test_diag
+    // can still switch it off but it is not part of config.txt any more
     bool TestDiag() const { return m_testDiag; }
+
+    // Java matchmaking backend (java-backend/, RESEARCH_FINDINGS.md #47-#49), client only: the ONLY matchmaking
+    // settings of the client. It receives the search and picks the dedicated server (backend_client.h). Empty url = off,
+    // and then no search can be served. Plain http:// only, e.g. "http://192.168.1.150:8080"; the key is sent as
+    // X-Api-Key (backend.api-key).
+    std::string_view BackendUrl() const { return m_backendUrl; }
+    std::string_view BackendApiKey() const { return m_backendApiKey; }
 
     float GetRarityWeight(uint32_t rarity) const;
 
@@ -98,13 +98,11 @@ private:
     int m_level{ 0 };
     int m_xp{ 0 };
 
-    std::string m_testServerAddress{ "127.0.0.1" };
-    uint16_t m_testServerPort{ 27015 };
     std::string m_testAcceptMode;
-    std::vector<std::pair<std::string, uint16_t>> m_testServerPorts;
-    uint32_t m_testRealAccountId{ 0 };
-    uint32_t m_testFakeAcceptDelayMs{ 2500 };
     bool m_testDiag{ true };
+
+    std::string m_backendUrl;
+    std::string m_backendApiKey;
 
     // default to valve weights
     std::vector<RarityWeight> m_rarityWeights{

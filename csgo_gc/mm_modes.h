@@ -5,6 +5,8 @@
 #include <string_view>
 #include <vector>
 
+class KeyValue;
+
 // Central table of the CS:GO 2021 matchmaking game modes (eGame = MatchmakingStart.game_type & 0xF) and the
 // decoding of the map selection the client packs into the same field: game_type = eGame | (mapMask << 8).
 // Everything is taken from confirmed data, see RESEARCH_FINDINGS.md #38.4/#41.4 (accept modes, client.dll
@@ -31,7 +33,7 @@ enum class MapTable
     DangerZone,       // case 0xD
     ArmsRace,         // case 4
     Demolition,       // case 5
-    Skirmish,         // case 0xC: mask = skirmish variants, not maps (index table not decoded)
+    Skirmish,         // case 0xC: mask = selected skirmish MODES (1 << (id - 1), ids of items_game.txt), not maps
     Cooperative,      // case 9: mask = quest id
 };
 
@@ -61,6 +63,40 @@ struct MapSelection
 };
 
 MapSelection DecodeMapSelection(const GameMode &mode, uint32_t gameType);
+
+// ---- Skirmish ("War Games"): Arms Race, Demolition, Flying Scoutsman, Retakes, ... (RESEARCH_FINDINGS.md #54) ----
+// The client does not select maps there but skirmish modes: for every ticked mode the composer (client.dll
+// sub_10288A90 case 0xC) ORs 1 << (id - 1) into the mask, id = the "skirmish_modes" entry of items_game.txt whose name
+// is the part of the map group token after "mg_skirmish_" (armsrace = 10 -> 0x200, demolition = 11 -> 0x400, retakes =
+// 12 -> 0x800, ...). In the current UI Arms Race and Demolition exist ONLY in this form: the client never sends
+// eGame 4 / 5 for them. The maps of a mode are the map group mg_skirmish_<name> of csgo/gamemodes.txt.
+struct SkirmishMode
+{
+    uint32_t id{};
+    std::string name;       // "armsrace", "demolition", "retakes", ...
+    std::string gameMode;   // srcds game_mode of the mode: "gungameprogressive", "gungametrbomb", "casual", ...
+};
+
+struct SkirmishVariant
+{
+    std::string name;
+    std::string gameMode;
+    std::vector<std::string> maps; // the maps of mg_skirmish_<name>, empty if gamemodes.txt could not be read
+};
+
+// items_game.txt "skirmish_modes" (children named by id, keys "name" / "gamemode")
+std::vector<SkirmishMode> ParseSkirmishModes(const KeyValue *skirmishModesKey);
+
+// the maps of the group mg_skirmish_<modeName>: csgo/gamemodes.txt (parsed root, its first child is the file table)
+// -> "mapgroups" -> group -> "maps". Empty if there is no such group.
+std::vector<std::string> SkirmishMapGroupMaps(const KeyValue *gamemodes, std::string_view modeName);
+
+// the modes selected by a mask, in id order. unknownBits (optional) receives the mask bits no known mode owns.
+std::vector<SkirmishVariant> DecodeSkirmishSelection(uint32_t mask, const std::vector<SkirmishMode> &modes,
+    const KeyValue *gamemodes, uint32_t *unknownBits = nullptr);
+
+// "armsrace(7 maps),demolition(6 maps)"
+std::string FormatSkirmish(const std::vector<SkirmishVariant> &variants);
 
 // "de_mirage,de_inferno" / "(none)"
 std::string FormatMaps(const MapSelection &selection);

@@ -31,36 +31,17 @@
 // remove keys, cases, stickers, etc. after they've been used
 "destroy_used_items"	"1"
 
-// EXPERIMENTAL -- address/port of the dedicated server TestMM's minimal reservation-check
-// responder targets/binds to for the manual Casual matchmaking test (RESEARCH_FINDINGS.md
-// #26/#27). This is the actual game server, NOT a matchmaking backend -- that'll be a
-// separate matchmaking.backend_address/backend_port once it exists.
+// matchmaking (read by the client, csgo.exe)
 "matchmaking"
 {
-	"test_server_address"	"127.0.0.1"
-	"test_server_port"	"27015"
+	// The Java matchmaking backend (java-backend/) is the ONLY matchmaking setting of the client: the GC reports every
+	// search to it and connects to the dedicated server it assigns (RESEARCH_FINDINGS.md #47-#49). Which server / port /
+	// map serves which mode is configured in the backend (admin panel -> Game Servers), not here.
+	// Plain http:// only. Empty backend_url = no search can be served.
+	"backend_url"	""
 
-	// TEST ONLY, client: the game port of the test srcds that serves each mode (one srcds per mode, so reservation
-	// state never mixes). Modes: casual deathmatch armsrace demolition skirmish competitive wingman scrimcomp5v5 dangerzone.
-	// Modes that are not listed use test_server_port. This all goes away with the Java matchmaking backend.
-	"test_server_ports"
-	{
-		"competitive"	"27016"
-		"wingman"	"27017"
-		"dangerzone"	"27018"
-	}
-
-	// TEST ONLY, dedicated server (srcds): queued reservation with fake participants for the retail Accept flow
-	// (RESEARCH_FINDINGS.md #42/#45). Start each srcds for ONE mode, best with -gc_mode on its command line
-	// (wins over this key, lets several servers share one install), e.g.
-	//   srcds.exe -game csgo -console -port 27018 -gc_mode dangerzone +game_type 6 +game_mode 0 +map dz_blacksite
-	// The mode decides the roster: competitive 10, wingman 4, dangerzone 16 (1 real + N-1 fake), scrimcomp5v5 10.
-	// Leave empty for a plain (non accept) server. The real player's AccountID is detected automatically from
-	// its first reservation check, test_real_account_id is only an optional override.
-	"test_accept_mode"	""
-	"test_real_account_id"	"0"
-	// milliseconds between the Accept popup showing up and the first fake participant accepting
-	"test_fake_accept_delay_ms"	"2500"
+	// the same value as backend.api-key of the backend (java-backend\config\application.properties), sent as X-Api-Key
+	"backend_api_key"	""
 }
 
 // steam related options

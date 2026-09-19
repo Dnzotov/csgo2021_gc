@@ -1,0 +1,6 @@
+target/
+data/
+# real credentials live here, never commit it (copy config/application-example.properties)
+config/application.properties
+*.db
+*.db-journal

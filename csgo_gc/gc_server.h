@@ -5,6 +5,7 @@
 
 #include "gc_shared.h"
 #include "mm_modes.h"
+#include "server_roster.h"
 #include "test_accept.h"
 
 class ServerGC final : public SharedGC
@@ -26,6 +27,10 @@ private:
     bool StartAcceptTestRoster();
     void CreateTestRoster(uint32_t realAccountId);
     void OnTestRealPlayerSeen(uint32_t accountId);
+
+    // backend-driven roster (server_roster.h, RESEARCH_FINDINGS.md #55)
+    void OnBackendRoster(const std::string &text);
+    void ArmRoster(const std::vector<uint32_t> &participants, const std::string &source, bool unreserveFirst);
     void IncrementKillCountAttribute(GCMessageRead &messageRead);
 
     bool m_sentWelcome{};
@@ -35,5 +40,9 @@ private:
     const MM::GameMode *m_testMode{};
     bool m_testWaitingForPlayer{}; // roster is armed as soon as the real player's first 0x21 is seen
     uint32_t m_testRealAccountId{};
+
+    // what the backend says the match on this server consists of: the poller asks, the controller decides (GC thread)
+    std::unique_ptr<RosterFeed::Poller> m_rosterPoller;
+    std::unique_ptr<RosterFeed::Controller> m_rosterController;
     std::unordered_set<uint64_t> m_connectedClients; // worker thread only
 };

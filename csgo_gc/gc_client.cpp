@@ -1,5 +1,6 @@
 #include "stdafx.h"
 #include "gc_client.h"
+#include "backend_client.h"
 #include "graffiti.h"
 #include "keyvalue.h"
 #include "mm_modes.h"
@@ -24,10 +25,22 @@ ClientGC::ClientGC(uint64_t steamId)
             static_cast<ClientGC *>(context)->PostToGC(GCEvent::ReservationFullyAccepted, 0, nullptr, 0);
         },
         this);
+
+    // the Java backend picks the server of every search; its worker thread reports the state of our search back
+    // here (RESEARCH_FINDINGS.md #49), we only post it to our own thread
+    BackendClient::SetResultHandler(
+        [](void *context, const BackendClient::SearchResult &result)
+        {
+            const std::string text = BackendClient::SerializeResult(result);
+            static_cast<ClientGC *>(context)->PostToGC(GCEvent::BackendSearchResult, 0, text.data(),
+                static_cast<uint32_t>(text.size()));
+        },
+        this);
 }
 
 ClientGC::~ClientGC()
 {
+    BackendClient::SetResultHandler(nullptr, nullptr);
     AcceptTest::SetClientNotify(nullptr, nullptr);
     AcceptTest::DisarmClient();
 
@@ -53,6 +66,10 @@ void ClientGC::HandleEvent(GCEvent type, uint64_t id, const std::vector<uint8_t>
 
     case GCEvent::ReservationFullyAccepted:
         OnReservationFullyAccepted();
+        break;
+
+    case GCEvent::BackendSearchResult:
+        OnBackendSearchResult(buffer);
         break;
 
     default:
@@ -406,19 +423,19 @@ void ClientGC::UseItemRequest(GCMessageRead &messageRead)
     }
 }
 
-// EXPERIMENTAL, see test_mm.h -- parses "a.b.c.d" from config.txt's matchmaking.test_server_address
-static uint32_t ParseIpAddress(std::string_view ip)
+// parses "a.b.c.d" (the backend hands out an IPv4 literal, a hostname of its registry is resolved there)
+static bool TryParseIpAddress(std::string_view ip, uint32_t &address)
 {
     std::string ipStr{ ip };
     unsigned a, b, c, d;
-    if (sscanf(ipStr.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) != 4)
+    char extra;
+    if (sscanf(ipStr.c_str(), "%u.%u.%u.%u%c", &a, &b, &c, &d, &extra) != 4 || a > 255 || b > 255 || c > 255 || d > 255)
     {
-        Platform::Print("[MM-TEST] Failed to parse matchmaking.test_server_address '%s', falling back to 127.0.0.1\n",
-            ipStr.c_str());
-        return MakeAddress(127, 0, 0, 1);
+        return false;
     }
 
-    return MakeAddress(a, b, c, d);
+    address = MakeAddress(a, b, c, d);
+    return true;
 }
 
 static void AddressString(uint32_t ip, uint32_t port, char *buffer, size_t bufferSize)
@@ -472,22 +489,30 @@ void ClientGC::ClientRequestJoinServerData(GCMessageRead &messageRead)
     SendMessageToGame(false, k_EMsgGCCStrike15_v2_ClientRequestJoinServerData, response);
 }
 
-// EXPERIMENTAL: manual native-pipeline test. Reads the real MatchmakingStart (9101) the
-// client already sends, and answers with a MatchmakingGC2ClientReserve (9107) pointed at
-// config.txt's matchmaking.test_server_address/test_server_port -- this must now be a REAL
-// CS:GO 2021 dedicated server, not TestMM (see RESEARCH_FINDINGS.md #27): the reservation
-// protobuf only carries one address, used both for A2S_RESERVE_CHECK and the final
-// QueueConnect target, so a separate fake responder can never lead to a real connect.
-// TestMM (test_mm.h) is deliberately NOT started from here anymore -- it's kept in the
-// project for future protocol-only tests, just not wired into this runtime path. Getting
-// the real dedicated server to actually answer 0x21 requires
-// IVEngineServer::ReserveServerForQueuedGame() to be called server-side -- this now happens
-// via BuildReservationPayload()/PostToHost(HostEvent::ReserveServerForQueuedGame, ...) below,
-// which DispatchReserveServerForQueuedGame() (steam_hook.cpp) picks up on the main thread
-// and turns into the real engine call (RESEARCH_FINDINGS.md #28-#30).
-// Casual (eGame=7) only for this first vertical test -- other game types are logged and
-// ignored, not because they can't work, but because the Accept flow (game_type in
-// {8,9,10,11,13}, see RESEARCH_FINDINGS.md #5/#9) isn't implemented here yet.
+// MatchmakingStart (9101), the client pressed Play. Everything mode specific comes from the central table
+// (mm_modes.h). The server is not chosen here any more: the search goes to the Java backend (backend_client.h), which
+// picks a free dedicated server of the mode whose map is one of the selected maps and answers through
+// OnBackendSearchResult(); StartServerFlow() then runs the reservation / Accept / QueueConnect flow that already
+// worked with a fixed test server (RESEARCH_FINDINGS.md #28-#30, #38-#45, #49).
+// csgo/gamemodes.txt, parsed on the first Skirmish search: the maps of the map groups mg_skirmish_<mode>
+static const KeyValue *GameModesFile()
+{
+    static KeyValue s_gameModes{ "gamemodes" };
+    static bool s_tried = false;
+    static bool s_ok = false;
+    if (!s_tried)
+    {
+        s_tried = true;
+        s_ok = s_gameModes.ParseFromFile("csgo/gamemodes.txt");
+        if (!s_ok)
+        {
+            Platform::Print("[MM] csgo/gamemodes.txt could not be read: the maps of the skirmish modes are unknown\n");
+        }
+    }
+
+    return s_ok ? &s_gameModes : nullptr;
+}
+
 void ClientGC::OnMatchmakingStart(GCMessageRead &messageRead)
 {
     CMsgGCCStrike15_v2_MatchmakingStart request;
@@ -522,22 +547,142 @@ void ClientGC::OnMatchmakingStart(GCMessageRead &messageRead)
     const std::string testMapString = MM::PickMap(*mode, selection);
     const char *testMap = testMapString.c_str();
 
+    // Skirmish (War Games: Arms Race, Demolition, Flying Scoutsman, Retakes, ...) selects MODES, not maps: the mask bits
+    // are 1 << (id - 1) of the items_game.txt "skirmish_modes" (RESEARCH_FINDINGS.md #54). That is the only form in which
+    // the current client offers Arms Race and Demolition (it never sends eGame 4 / 5).
+    std::vector<MM::SkirmishVariant> skirmish;
+    std::string skirmishText;
+    if (mode->mapTable == MM::MapTable::Skirmish)
+    {
+        uint32_t unknownBits = 0;
+        skirmish = MM::DecodeSkirmishSelection(selection.mask, m_inventory.Schema().SkirmishModes(), GameModesFile(), &unknownBits);
+        skirmishText = "skirmish modes " + MM::FormatSkirmish(skirmish);
+        if (unknownBits)
+        {
+            char bits[48];
+            snprintf(bits, sizeof(bits), " (mask bits 0x%x are no known skirmish mode)", unknownBits);
+            skirmishText += bits;
+        }
+    }
+
     // identity: ISteamUser::GetSteamID() (m_steamId), the 9101 account_ids are only cross-checked
     Platform::Print("[MM] mode=%s accept_required=%d required_players=%u server=%s/%s | maps: mask=0x%x flags=0x%x %s -> "
         "advertised map=%s | account=%u (9101 account_ids[0]=%u)\n",
         mode->name, mode->acceptRequired ? 1 : 0, mode->requiredPlayers, mode->serverGameType, mode->serverGameMode,
-        selection.mask, selection.flags, selection.decoded ? MM::FormatMaps(selection).c_str() : "(not decodable for this mode)",
+        selection.mask, selection.flags,
+        selection.decoded ? MM::FormatMaps(selection).c_str()
+            : (skirmishText.empty() ? "(not decodable for this mode)" : skirmishText.c_str()),
         testMap, AccountId(), request.account_ids_size() > 0 ? request.account_ids(0) : 0);
 
     // a new search supersedes whatever accept we were still waiting for
     m_pendingAccept = {};
     AcceptTest::DisarmClient();
+    m_activeSearch = {};
 
-    uint32_t testServerIp = ParseIpAddress(GetConfig().TestServerAddress());
-    uint16_t testServerPort = GetConfig().TestServerPortForMode(mode->name);
+    // The GC does not pick a server: the Java matchmaking backend does (RESEARCH_FINDINGS.md #49). We report the
+    // search (this only queues it for the backend worker thread, nothing here blocks) and carry on when the backend
+    // says which server the search got, see OnBackendSearchResult().
+    if (!BackendClient::Enabled())
+    {
+        Platform::Print("[MM] matchmaking.backend_url is not configured (or invalid): the GC does not choose a server "
+            "itself any more, so this search cannot be served\n");
+        return;
+    }
 
-    Platform::Print("[MM-TEST] Test server (REAL dedicated server expected): %.*s:%u\n",
-        static_cast<int>(GetConfig().TestServerAddress().size()), GetConfig().TestServerAddress().data(), testServerPort);
+    m_activeSearch.active = true;
+    m_activeSearch.gameType = request.game_type();
+    m_activeSearch.eGame = eGame;
+    m_activeSearch.mode = mode;
+    m_activeSearch.fallbackMap = testMap;
+
+    BackendClient::SearchInfo info;
+    info.accountId = AccountId() ? AccountId() : (request.account_ids_size() > 0 ? request.account_ids(0) : 0);
+    info.gameType = request.game_type();
+    info.mode = mode->name;
+    info.gameMode = mode->serverGameMode;
+    if (selection.decoded)
+    {
+        info.maps = selection.maps;
+    }
+    for (const MM::SkirmishVariant &variant : skirmish)
+    {
+        info.variants.push_back({ variant.name, variant.gameMode, variant.maps });
+    }
+
+    BackendClient::SearchStarted(info, m_steamId);
+
+    Platform::Print("[MM] search %s reported to the backend, waiting for the server it assigns\n",
+        BackendClient::ActiveRequestId().c_str());
+}
+
+// The backend worker thread reported the state of our search (posted here as GCEvent::BackendSearchResult).
+void ClientGC::OnBackendSearchResult(const std::vector<uint8_t> &buffer)
+{
+    BackendClient::SearchResult result;
+    if (!BackendClient::DeserializeResult({ reinterpret_cast<const char *>(buffer.data()), buffer.size() }, result))
+    {
+        Platform::Print("[MM] unreadable backend search result, ignoring\n");
+        return;
+    }
+
+    if (!m_activeSearch.active || result.requestId != BackendClient::ActiveRequestId())
+    {
+        // an older search, or one that was cancelled meanwhile
+        Platform::Print("[MM] backend result of search %s (%s) ignored: not the current search\n", result.requestId.c_str(),
+            result.status.c_str());
+        return;
+    }
+
+    if (result.IsAssigned())
+    {
+        StartServerFlow(result.assignment);
+        return;
+    }
+
+    if (result.IsEnded())
+    {
+        // e.g. an admin removed the search, or the backend timed it out; the client UI has no message for that
+        Platform::Print("[MM] the backend ended search %s (%s)\n", result.requestId.c_str(), result.status.c_str());
+        m_activeSearch = {};
+        return;
+    }
+
+    if (result.status == "MATCHED")
+    {
+        Platform::Print("[MM] backend: a server is reserved for the match, %u/%u players gathered\n", result.matchPlayers,
+            result.matchRequired);
+    }
+    else
+    {
+        Platform::Print("[MM] backend: search %s is %s\n", result.requestId.c_str(), result.status.c_str());
+    }
+}
+
+// The server of the search is known: from here on it is the flow that already worked with a fixed test server. Accept
+// modes (game_type 8/10/13) take the reservation + Accept path, all the others the direct (Casual style) path, the only
+// difference to before is where the address comes from (the backend's assignment instead of config.txt).
+void ClientGC::StartServerFlow(const BackendClient::Assignment &assignment)
+{
+    const MM::GameMode *mode = m_activeSearch.mode;
+    const uint32_t gameType = m_activeSearch.gameType;
+    const uint32_t eGame = m_activeSearch.eGame;
+    const std::string testMapString = assignment.map.empty() ? m_activeSearch.fallbackMap : assignment.map;
+    const char *testMap = testMapString.c_str();
+
+    uint32_t testServerIp = 0;
+    if (!TryParseIpAddress(assignment.serverAddress, testServerIp) || assignment.serverPort == 0)
+    {
+        Platform::Print("[MM] backend assignment %s has an unusable server address '%s:%u', ignoring it\n",
+            assignment.matchId.c_str(), assignment.serverAddress.c_str(), assignment.serverPort);
+        return;
+    }
+
+    const uint16_t testServerPort = assignment.serverPort;
+    m_activeSearch.active = false; // the server flow below owns the search from now on
+
+    Platform::Print("[MM] backend assigned match %s: server %s:%u map=%s (%s, accept_required=%d)\n",
+        assignment.matchId.c_str(), assignment.serverAddress.c_str(), testServerPort, testMap, mode->name,
+        assignment.acceptRequired ? 1 : 0);
 
     Platform::Print("[MM-TEST] Sending MatchmakingGC2ClientReserve: map=%s reservationid=%llx\n",
         testMap, static_cast<unsigned long long>(GameServerCookieId));
@@ -558,7 +703,7 @@ void ClientGC::OnMatchmakingStart(GCMessageRead &messageRead)
         // First 9107 of the Accept flow: a `reservation` whose game_type & 0xF is in {8,9,10,11,13} makes the
         // client's 9107 handler (client.dll sub_103F49F0) create the reservation callback as (stage 1, mode 0),
         // i.e. the retail Accept popup, instead of (stage 2, mode 2) = direct connect. RESEARCH_FINDINGS.md #38/#41.
-        reserve.mutable_reservation()->set_game_type(request.game_type());
+        reserve.mutable_reservation()->set_game_type(gameType);
     }
 
     SendMessageToGame(false, k_EMsgGCCStrike15_v2_MatchmakingGC2ClientReserve, reserve);
@@ -599,12 +744,16 @@ void ClientGC::OnMatchmakingStop()
 {
     AcceptTest::DiagLog("client -> GC MatchmakingStop (9102) received");
 
+    // SIDE CHANNEL: tell the Java matchmaking backend the search we reported is over (RESEARCH_FINDINGS.md #48)
+    BackendClient::SearchCancelled();
+
     if (m_pendingAccept.active)
     {
         Platform::Print("[MM-ACCEPT] MatchmakingStop received, dropping the pending accept\n");
     }
 
     m_pendingAccept = {};
+    m_activeSearch = {};
     AcceptTest::DisarmClient();
 }
 

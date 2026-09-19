@@ -18,6 +18,9 @@ enum class GCEvent
     ClientSOCacheUnsubscribe, // sent to server gc when a client disconnects, id contains the steam id
     TestRealPlayerSeen, // TEST ONLY: sent to server gc when srcds saw the first 0x21 of a real player, id contains the AccountID
     ReservationFullyAccepted, // TEST ONLY: sent to client gc when the reserved server reports 0x25 stage 2 / awaiting 0 (test_accept.h)
+    BackendSearchResult, // sent to client gc by the backend client's worker thread: buffer is BackendClient::SerializeResult (backend_client.h)
+    BackendRoster, // sent to server gc by the roster poller: buffer is RosterFeed::Serialize (server_roster.h), the backend's roster of this server's match
+    TestFakesReady, // TEST ONLY: sent to server gc by the fake roster driver, id = 1 when every fake participant is at reservation stage 1, 0 while (re)arming
 };
 
 struct EventData

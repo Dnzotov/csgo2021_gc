@@ -188,6 +188,9 @@ ItemSchema::ItemSchema()
     {
         ParseRevolvingLootLists(revolvingLootListsKey);
     }
+
+    // matchmaking only: which skirmish modes the bits of a War Games search mask mean (Arms Race, Demolition, ...)
+    m_skirmishModes = MM::ParseSkirmishModes(itemsGame->GetSubkey("skirmish_modes"));
 }
 
 static std::string DecodeAttributeString(std::string_view data)
