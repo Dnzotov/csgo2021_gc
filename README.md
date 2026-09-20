@@ -501,11 +501,11 @@ Java backend  ◄──HTTP──►  C++ GC (в csgo.exe)  ◄──►  кли
 
 | Режим | Команда |
 |---|---|
-| Competitive | `srcds.exe -game csgo -console -usercon -insecure -ip 192.168.1.150 -port 27016 -backend_ip 146.158.123.140 -backend_port 27016 -gc_mode competitive +game_type 0 +game_mode 1 +map de_overpass` |
-| Wingman | `srcds.exe -game csgo -console -usercon -insecure -ip 192.168.1.150 -port 27016 -backend_ip 146.158.123.140 -backend_port 27016 -gc_mode wingman +game_type 0 +game_mode 2 +map de_lake` |
-| Danger Zone | `srcds.exe -game csgo -console -usercon -insecure -ip 192.168.1.150 -port 27016 -backend_ip 146.158.123.140 -backend_port 27016 -gc_mode dangerzone +game_type 6 +game_mode 0 +map dz_sirocco` |
-| Casual | `srcds.exe -game csgo -console -usercon -insecure -ip 192.168.1.150 -port 27016 -backend_ip 146.158.123.140 -backend_port 27016 +game_type 0 +game_mode 0 +map de_overpass` |
-| Deathmatch | `srcds.exe -game csgo -console -usercon -insecure -ip 192.168.1.150 -port 27016 -backend_ip 146.158.123.140 -backend_port 27016 +game_type 1 +game_mode 2 +map de_dust2` |
+| Competitive | `srcds.exe -game csgo -console -usercon -insecure -ip <LOCAL_IP> -port 27016 -backend_ip <PUBLIC_IP> -backend_port 27016 -gc_mode competitive +game_type 0 +game_mode 1 +map de_overpass` |
+| Wingman | `srcds.exe -game csgo -console -usercon -insecure -ip <LOCAL_IP> -port 27016 -backend_ip <PUBLIC_IP> -backend_port 27016 -gc_mode wingman +game_type 0 +game_mode 2 +map de_lake` |
+| Danger Zone | `srcds.exe -game csgo -console -usercon -insecure -ip <LOCAL_IP> -port 27016 -backend_ip <PUBLIC_IP> -backend_port 27016 -gc_mode dangerzone +game_type 6 +game_mode 0 +map dz_sirocco` |
+| Casual | `srcds.exe -game csgo -console -usercon -insecure -ip <LOCAL_IP> -port 27016 -backend_ip <PUBLIC_IP> -backend_port 27016 +game_type 0 +game_mode 0 +map de_overpass` |
+| Deathmatch | `srcds.exe -game csgo -console -usercon -insecure -ip <LOCAL_IP> -port 27016 -backend_ip <PUBLIC_IP> -backend_port 27016 +game_type 1 +game_mode 2 +map de_dust2` |
 
 - `-gc_mode <competitive|wingman|dangerzone>` нужен **только** Accept-режимам: без него сервер держит обычную резервацию и
   Accept для нескольких игроков не синхронизируется. Для Casual / Deathmatch `-gc_mode` **не** указывается.
