@@ -19,3 +19,5 @@ cmake --build Build\build_ninja --target csgo_gc -v
 if errorlevel 1 exit /b 1
 cmake --build Build\build_ninja --target csgo -v
 if errorlevel 1 exit /b 1
+cmake --build Build\build_ninja --target srcds -v
+if errorlevel 1 exit /b 1
