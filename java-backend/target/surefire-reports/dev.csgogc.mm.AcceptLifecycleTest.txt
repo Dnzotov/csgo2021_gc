@@ -1,0 +1,4 @@
+-------------------------------------------------------------------------------
+Test set: dev.csgogc.mm.AcceptLifecycleTest
+-------------------------------------------------------------------------------
+Tests run: 26, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 4.513 s -- in dev.csgogc.mm.AcceptLifecycleTest

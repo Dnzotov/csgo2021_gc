@@ -1,0 +1,4 @@
+-------------------------------------------------------------------------------
+Test set: dev.csgogc.mm.BackendIntegrationTest
+-------------------------------------------------------------------------------
+Tests run: 15, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.940 s -- in dev.csgogc.mm.BackendIntegrationTest

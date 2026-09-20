@@ -1,0 +1,527 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="https://maven.apache.org/surefire/maven-surefire-plugin/xsd/surefire-test-report.xsd" version="3.0.2" name="dev.csgogc.mm.AcceptLifecycleTest" time="4.513" tests="26" errors="0" skipped="0" failures="0" flakes="0">
+  <properties>
+    <property name="java.specification.version" value="21"/>
+    <property name="sun.cpu.isalist" value="amd64"/>
+    <property name="sun.jnu.encoding" value="Cp1252"/>
+    <property name="java.class.path" value="D:\csgo2021_gc\java-backend\target\test-classes;D:\csgo2021_gc\java-backend\target\classes;C:\Users\Administrator\.m2\repository\org\springframework\boot\spring-boot-starter-web\3.5.16\spring-boot-starter-web-3.5.16.jar;C:\Users\Administrator\.m2\repository\org\springframework\boot\spring-boot-starter\3.5.16\spring-boot-starter-3.5.16.jar;C:\Users\Administrator\.m2\repository\org\springframework\boot\spring-boot\3.5.16\spring-boot-3.5.16.jar;C:\Users\Administrator\.m2\repository\org\springframework\boot\spring-boot-autoconfigure\3.5.16\spring-boot-autoconfigure-3.5.16.jar;C:\Users\Administrator\.m2\repository\org\springframework\boot\spring-boot-starter-logging\3.5.16\spring-boot-starter-logging-3.5.16.jar;C:\Users\Administrator\.m2\repository\ch\qos\logback\logback-classic\1.5.34\logback-classic-1.5.34.jar;C:\Users\Administrator\.m2\repository\ch\qos\logback\logback-core\1.5.34\logback-core-1.5.34.jar;C:\Users\Administrator\.m2\repository\org\apache\logging\log4j\log4j-to-slf4j\2.24.3\log4j-to-slf4j-2.24.3.jar;C:\Users\Administrator\.m2\repository\org\apache\logging\log4j\log4j-api\2.24.3\log4j-api-2.24.3.jar;C:\Users\Administrator\.m2\repository\org\slf4j\jul-to-slf4j\2.0.18\jul-to-slf4j-2.0.18.jar;C:\Users\Administrator\.m2\repository\jakarta\annotation\jakarta.annotation-api\2.1.1\jakarta.annotation-api-2.1.1.jar;C:\Users\Administrator\.m2\repository\org\yaml\snakeyaml\2.4\snakeyaml-2.4.jar;C:\Users\Administrator\.m2\repository\org\springframework\boot\spring-boot-starter-json\3.5.16\spring-boot-starter-json-3.5.16.jar;C:\Users\Administrator\.m2\repository\com\fasterxml\jackson\core\jackson-databind\2.21.4\jackson-databind-2.21.4.jar;C:\Users\Administrator\.m2\repository\com\fasterxml\jackson\core\jackson-annotations\2.21\jackson-annotations-2.21.jar;C:\Users\Administrator\.m2\repository\com\fasterxml\jackson\core\jackson-core\2.21.4\jackson-core-2.21.4.jar;C:\Users\Administrator\.m2\repository\com\fasterxml\jackson\datatype\jackson-datatype-jdk8\2.21.4\jackson-datatype-jdk8-2.21.4.jar;C:\Users\Administrator\.m2\repository\com\fasterxml\jackson\datatype\jackson-datatype-jsr310\2.21.4\jackson-datatype-jsr310-2.21.4.jar;C:\Users\Administrator\.m2\repository\com\fasterxml\jackson\module\jackson-module-parameter-names\2.21.4\jackson-module-parameter-names-2.21.4.jar;C:\Users\Administrator\.m2\repository\org\springframework\boot\spring-boot-starter-tomcat\3.5.16\spring-boot-starter-tomcat-3.5.16.jar;C:\Users\Administrator\.m2\repository\org\apache\tomcat\embed\tomcat-embed-core\10.1.55\tomcat-embed-core-10.1.55.jar;C:\Users\Administrator\.m2\repository\org\apache\tomcat\embed\tomcat-embed-websocket\10.1.55\tomcat-embed-websocket-10.1.55.jar;C:\Users\Administrator\.m2\repository\org\springframework\spring-web\6.2.19\spring-web-6.2.19.jar;C:\Users\Administrator\.m2\repository\org\springframework\spring-beans\6.2.19\spring-beans-6.2.19.jar;C:\Users\Administrator\.m2\repository\io\micrometer\micrometer-observation\1.15.12\micrometer-observation-1.15.12.jar;C:\Users\Administrator\.m2\repository\io\micrometer\micrometer-commons\1.15.12\micrometer-commons-1.15.12.jar;C:\Users\Administrator\.m2\repository\org\springframework\spring-webmvc\6.2.19\spring-webmvc-6.2.19.jar;C:\Users\Administrator\.m2\repository\org\springframework\spring-context\6.2.19\spring-context-6.2.19.jar;C:\Users\Administrator\.m2\repository\org\springframework\spring-expression\6.2.19\spring-expression-6.2.19.jar;C:\Users\Administrator\.m2\repository\org\springframework\boot\spring-boot-starter-security\3.5.16\spring-boot-starter-security-3.5.16.jar;C:\Users\Administrator\.m2\repository\org\springframework\spring-aop\6.2.19\spring-aop-6.2.19.jar;C:\Users\Administrator\.m2\repository\org\springframework\security\spring-security-config\6.5.11\spring-security-config-6.5.11.jar;C:\Users\Administrator\.m2\repository\org\springframework\security\spring-security-web\6.5.11\spring-security-web-6.5.11.jar;C:\Users\Administrator\.m2\repository\org\springframework\boot\spring-boot-starter-validation\3.5.16\spring-boot-starter-validation-3.5.16.jar;C:\Users\Administrator\.m2\repository\org\apache\tomcat\embed\tomcat-embed-el\10.1.55\tomcat-embed-el-10.1.55.jar;C:\Users\Administrator\.m2\repository\org\hibernate\validator\hibernate-validator\8.0.3.Final\hibernate-validator-8.0.3.Final.jar;C:\Users\Administrator\.m2\repository\jakarta\validation\jakarta.validation-api\3.0.2\jakarta.validation-api-3.0.2.jar;C:\Users\Administrator\.m2\repository\org\jboss\logging\jboss-logging\3.6.3.Final\jboss-logging-3.6.3.Final.jar;C:\Users\Administrator\.m2\repository\com\fasterxml\classmate\1.7.3\classmate-1.7.3.jar;C:\Users\Administrator\.m2\repository\org\springframework\boot\spring-boot-starter-jdbc\3.5.16\spring-boot-starter-jdbc-3.5.16.jar;C:\Users\Administrator\.m2\repository\com\zaxxer\HikariCP\6.3.3\HikariCP-6.3.3.jar;C:\Users\Administrator\.m2\repository\org\slf4j\slf4j-api\2.0.18\slf4j-api-2.0.18.jar;C:\Users\Administrator\.m2\repository\org\springframework\spring-jdbc\6.2.19\spring-jdbc-6.2.19.jar;C:\Users\Administrator\.m2\repository\org\springframework\spring-tx\6.2.19\spring-tx-6.2.19.jar;C:\Users\Administrator\.m2\repository\org\xerial\sqlite-jdbc\3.49.1.0\sqlite-jdbc-3.49.1.0.jar;C:\Users\Administrator\.m2\repository\org\springframework\boot\spring-boot-starter-test\3.5.16\spring-boot-starter-test-3.5.16.jar;C:\Users\Administrator\.m2\repository\org\springframework\boot\spring-boot-test\3.5.16\spring-boot-test-3.5.16.jar;C:\Users\Administrator\.m2\repository\org\springframework\boot\spring-boot-test-autoconfigure\3.5.16\spring-boot-test-autoconfigure-3.5.16.jar;C:\Users\Administrator\.m2\repository\com\jayway\jsonpath\json-path\2.9.0\json-path-2.9.0.jar;C:\Users\Administrator\.m2\repository\jakarta\xml\bind\jakarta.xml.bind-api\4.0.5\jakarta.xml.bind-api-4.0.5.jar;C:\Users\Administrator\.m2\repository\jakarta\activation\jakarta.activation-api\2.1.4\jakarta.activation-api-2.1.4.jar;C:\Users\Administrator\.m2\repository\net\minidev\json-smart\2.5.2\json-smart-2.5.2.jar;C:\Users\Administrator\.m2\repository\net\minidev\accessors-smart\2.5.2\accessors-smart-2.5.2.jar;C:\Users\Administrator\.m2\repository\org\ow2\asm\asm\9.7.1\asm-9.7.1.jar;C:\Users\Administrator\.m2\repository\org\assertj\assertj-core\3.27.7\assertj-core-3.27.7.jar;C:\Users\Administrator\.m2\repository\net\bytebuddy\byte-buddy\1.17.8\byte-buddy-1.17.8.jar;C:\Users\Administrator\.m2\repository\org\awaitility\awaitility\4.2.2\awaitility-4.2.2.jar;C:\Users\Administrator\.m2\repository\org\hamcrest\hamcrest\3.0\hamcrest-3.0.jar;C:\Users\Administrator\.m2\repository\org\junit\jupiter\junit-jupiter\5.12.2\junit-jupiter-5.12.2.jar;C:\Users\Administrator\.m2\repository\org\junit\jupiter\junit-jupiter-api\5.12.2\junit-jupiter-api-5.12.2.jar;C:\Users\Administrator\.m2\repository\org\opentest4j\opentest4j\1.3.0\opentest4j-1.3.0.jar;C:\Users\Administrator\.m2\repository\org\junit\platform\junit-platform-commons\1.12.2\junit-platform-commons-1.12.2.jar;C:\Users\Administrator\.m2\repository\org\apiguardian\apiguardian-api\1.1.2\apiguardian-api-1.1.2.jar;C:\Users\Administrator\.m2\repository\org\junit\jupiter\junit-jupiter-params\5.12.2\junit-jupiter-params-5.12.2.jar;C:\Users\Administrator\.m2\repository\org\junit\jupiter\junit-jupiter-engine\5.12.2\junit-jupiter-engine-5.12.2.jar;C:\Users\Administrator\.m2\repository\org\junit\platform\junit-platform-engine\1.12.2\junit-platform-engine-1.12.2.jar;C:\Users\Administrator\.m2\repository\org\mockito\mockito-core\5.17.0\mockito-core-5.17.0.jar;C:\Users\Administrator\.m2\repository\net\bytebuddy\byte-buddy-agent\1.17.8\byte-buddy-agent-1.17.8.jar;C:\Users\Administrator\.m2\repository\org\objenesis\objenesis\3.3\objenesis-3.3.jar;C:\Users\Administrator\.m2\repository\org\mockito\mockito-junit-jupiter\5.17.0\mockito-junit-jupiter-5.17.0.jar;C:\Users\Administrator\.m2\repository\org\skyscreamer\jsonassert\1.5.3\jsonassert-1.5.3.jar;C:\Users\Administrator\.m2\repository\com\vaadin\external\google\android-json\0.0.20131108.vaadin1\android-json-0.0.20131108.vaadin1.jar;C:\Users\Administrator\.m2\repository\org\springframework\spring-core\6.2.19\spring-core-6.2.19.jar;C:\Users\Administrator\.m2\repository\org\springframework\spring-jcl\6.2.19\spring-jcl-6.2.19.jar;C:\Users\Administrator\.m2\repository\org\springframework\spring-test\6.2.19\spring-test-6.2.19.jar;C:\Users\Administrator\.m2\repository\org\xmlunit\xmlunit-core\2.10.4\xmlunit-core-2.10.4.jar;C:\Users\Administrator\.m2\repository\org\springframework\security\spring-security-test\6.5.11\spring-security-test-6.5.11.jar;C:\Users\Administrator\.m2\repository\org\springframework\security\spring-security-core\6.5.11\spring-security-core-6.5.11.jar;C:\Users\Administrator\.m2\repository\org\springframework\security\spring-security-crypto\6.5.11\spring-security-crypto-6.5.11.jar;"/>
+    <property name="java.vm.vendor" value="Eclipse Adoptium"/>
+    <property name="sun.arch.data.model" value="64"/>
+    <property name="user.variant" value=""/>
+    <property name="java.vendor.url" value="https://adoptium.net/"/>
+    <property name="user.timezone" value="Europe/Saratov"/>
+    <property name="org.jboss.logging.provider" value="slf4j"/>
+    <property name="os.name" value="Windows 11"/>
+    <property name="java.vm.specification.version" value="21"/>
+    <property name="APPLICATION_NAME" value="matchmaking-backend"/>
+    <property name="sun.java.launcher" value="SUN_STANDARD"/>
+    <property name="user.country" value="US"/>
+    <property name="sun.boot.library.path" value="D:\csgo2021_gc\tools\jdk21\bin"/>
+    <property name="sun.java.command" value="C:\Users\Administrator\AppData\Local\Temp\surefire9729337116057372657\surefirebooter-20260920124723613_3.jar C:\Users\Administrator\AppData\Local\Temp\surefire9729337116057372657 2026-09-20T12-47-23_507-jvmRun1 surefire-20260920124723613_1tmp surefire_0-20260920124723613_2tmp"/>
+    <property name="jdk.debug" value="release"/>
+    <property name="surefire.test.class.path" value="D:\csgo2021_gc\java-backend\target\test-classes;D:\csgo2021_gc\java-backend\target\classes;C:\Users\Administrator\.m2\repository\org\springframework\boot\spring-boot-starter-web\3.5.16\spring-boot-starter-web-3.5.16.jar;C:\Users\Administrator\.m2\repository\org\springframework\boot\spring-boot-starter\3.5.16\spring-boot-starter-3.5.16.jar;C:\Users\Administrator\.m2\repository\org\springframework\boot\spring-boot\3.5.16\spring-boot-3.5.16.jar;C:\Users\Administrator\.m2\repository\org\springframework\boot\spring-boot-autoconfigure\3.5.16\spring-boot-autoconfigure-3.5.16.jar;C:\Users\Administrator\.m2\repository\org\springframework\boot\spring-boot-starter-logging\3.5.16\spring-boot-starter-logging-3.5.16.jar;C:\Users\Administrator\.m2\repository\ch\qos\logback\logback-classic\1.5.34\logback-classic-1.5.34.jar;C:\Users\Administrator\.m2\repository\ch\qos\logback\logback-core\1.5.34\logback-core-1.5.34.jar;C:\Users\Administrator\.m2\repository\org\apache\logging\log4j\log4j-to-slf4j\2.24.3\log4j-to-slf4j-2.24.3.jar;C:\Users\Administrator\.m2\repository\org\apache\logging\log4j\log4j-api\2.24.3\log4j-api-2.24.3.jar;C:\Users\Administrator\.m2\repository\org\slf4j\jul-to-slf4j\2.0.18\jul-to-slf4j-2.0.18.jar;C:\Users\Administrator\.m2\repository\jakarta\annotation\jakarta.annotation-api\2.1.1\jakarta.annotation-api-2.1.1.jar;C:\Users\Administrator\.m2\repository\org\yaml\snakeyaml\2.4\snakeyaml-2.4.jar;C:\Users\Administrator\.m2\repository\org\springframework\boot\spring-boot-starter-json\3.5.16\spring-boot-starter-json-3.5.16.jar;C:\Users\Administrator\.m2\repository\com\fasterxml\jackson\core\jackson-databind\2.21.4\jackson-databind-2.21.4.jar;C:\Users\Administrator\.m2\repository\com\fasterxml\jackson\core\jackson-annotations\2.21\jackson-annotations-2.21.jar;C:\Users\Administrator\.m2\repository\com\fasterxml\jackson\core\jackson-core\2.21.4\jackson-core-2.21.4.jar;C:\Users\Administrator\.m2\repository\com\fasterxml\jackson\datatype\jackson-datatype-jdk8\2.21.4\jackson-datatype-jdk8-2.21.4.jar;C:\Users\Administrator\.m2\repository\com\fasterxml\jackson\datatype\jackson-datatype-jsr310\2.21.4\jackson-datatype-jsr310-2.21.4.jar;C:\Users\Administrator\.m2\repository\com\fasterxml\jackson\module\jackson-module-parameter-names\2.21.4\jackson-module-parameter-names-2.21.4.jar;C:\Users\Administrator\.m2\repository\org\springframework\boot\spring-boot-starter-tomcat\3.5.16\spring-boot-starter-tomcat-3.5.16.jar;C:\Users\Administrator\.m2\repository\org\apache\tomcat\embed\tomcat-embed-core\10.1.55\tomcat-embed-core-10.1.55.jar;C:\Users\Administrator\.m2\repository\org\apache\tomcat\embed\tomcat-embed-websocket\10.1.55\tomcat-embed-websocket-10.1.55.jar;C:\Users\Administrator\.m2\repository\org\springframework\spring-web\6.2.19\spring-web-6.2.19.jar;C:\Users\Administrator\.m2\repository\org\springframework\spring-beans\6.2.19\spring-beans-6.2.19.jar;C:\Users\Administrator\.m2\repository\io\micrometer\micrometer-observation\1.15.12\micrometer-observation-1.15.12.jar;C:\Users\Administrator\.m2\repository\io\micrometer\micrometer-commons\1.15.12\micrometer-commons-1.15.12.jar;C:\Users\Administrator\.m2\repository\org\springframework\spring-webmvc\6.2.19\spring-webmvc-6.2.19.jar;C:\Users\Administrator\.m2\repository\org\springframework\spring-context\6.2.19\spring-context-6.2.19.jar;C:\Users\Administrator\.m2\repository\org\springframework\spring-expression\6.2.19\spring-expression-6.2.19.jar;C:\Users\Administrator\.m2\repository\org\springframework\boot\spring-boot-starter-security\3.5.16\spring-boot-starter-security-3.5.16.jar;C:\Users\Administrator\.m2\repository\org\springframework\spring-aop\6.2.19\spring-aop-6.2.19.jar;C:\Users\Administrator\.m2\repository\org\springframework\security\spring-security-config\6.5.11\spring-security-config-6.5.11.jar;C:\Users\Administrator\.m2\repository\org\springframework\security\spring-security-web\6.5.11\spring-security-web-6.5.11.jar;C:\Users\Administrator\.m2\repository\org\springframework\boot\spring-boot-starter-validation\3.5.16\spring-boot-starter-validation-3.5.16.jar;C:\Users\Administrator\.m2\repository\org\apache\tomcat\embed\tomcat-embed-el\10.1.55\tomcat-embed-el-10.1.55.jar;C:\Users\Administrator\.m2\repository\org\hibernate\validator\hibernate-validator\8.0.3.Final\hibernate-validator-8.0.3.Final.jar;C:\Users\Administrator\.m2\repository\jakarta\validation\jakarta.validation-api\3.0.2\jakarta.validation-api-3.0.2.jar;C:\Users\Administrator\.m2\repository\org\jboss\logging\jboss-logging\3.6.3.Final\jboss-logging-3.6.3.Final.jar;C:\Users\Administrator\.m2\repository\com\fasterxml\classmate\1.7.3\classmate-1.7.3.jar;C:\Users\Administrator\.m2\repository\org\springframework\boot\spring-boot-starter-jdbc\3.5.16\spring-boot-starter-jdbc-3.5.16.jar;C:\Users\Administrator\.m2\repository\com\zaxxer\HikariCP\6.3.3\HikariCP-6.3.3.jar;C:\Users\Administrator\.m2\repository\org\slf4j\slf4j-api\2.0.18\slf4j-api-2.0.18.jar;C:\Users\Administrator\.m2\repository\org\springframework\spring-jdbc\6.2.19\spring-jdbc-6.2.19.jar;C:\Users\Administrator\.m2\repository\org\springframework\spring-tx\6.2.19\spring-tx-6.2.19.jar;C:\Users\Administrator\.m2\repository\org\xerial\sqlite-jdbc\3.49.1.0\sqlite-jdbc-3.49.1.0.jar;C:\Users\Administrator\.m2\repository\org\springframework\boot\spring-boot-starter-test\3.5.16\spring-boot-starter-test-3.5.16.jar;C:\Users\Administrator\.m2\repository\org\springframework\boot\spring-boot-test\3.5.16\spring-boot-test-3.5.16.jar;C:\Users\Administrator\.m2\repository\org\springframework\boot\spring-boot-test-autoconfigure\3.5.16\spring-boot-test-autoconfigure-3.5.16.jar;C:\Users\Administrator\.m2\repository\com\jayway\jsonpath\json-path\2.9.0\json-path-2.9.0.jar;C:\Users\Administrator\.m2\repository\jakarta\xml\bind\jakarta.xml.bind-api\4.0.5\jakarta.xml.bind-api-4.0.5.jar;C:\Users\Administrator\.m2\repository\jakarta\activation\jakarta.activation-api\2.1.4\jakarta.activation-api-2.1.4.jar;C:\Users\Administrator\.m2\repository\net\minidev\json-smart\2.5.2\json-smart-2.5.2.jar;C:\Users\Administrator\.m2\repository\net\minidev\accessors-smart\2.5.2\accessors-smart-2.5.2.jar;C:\Users\Administrator\.m2\repository\org\ow2\asm\asm\9.7.1\asm-9.7.1.jar;C:\Users\Administrator\.m2\repository\org\assertj\assertj-core\3.27.7\assertj-core-3.27.7.jar;C:\Users\Administrator\.m2\repository\net\bytebuddy\byte-buddy\1.17.8\byte-buddy-1.17.8.jar;C:\Users\Administrator\.m2\repository\org\awaitility\awaitility\4.2.2\awaitility-4.2.2.jar;C:\Users\Administrator\.m2\repository\org\hamcrest\hamcrest\3.0\hamcrest-3.0.jar;C:\Users\Administrator\.m2\repository\org\junit\jupiter\junit-jupiter\5.12.2\junit-jupiter-5.12.2.jar;C:\Users\Administrator\.m2\repository\org\junit\jupiter\junit-jupiter-api\5.12.2\junit-jupiter-api-5.12.2.jar;C:\Users\Administrator\.m2\repository\org\opentest4j\opentest4j\1.3.0\opentest4j-1.3.0.jar;C:\Users\Administrator\.m2\repository\org\junit\platform\junit-platform-commons\1.12.2\junit-platform-commons-1.12.2.jar;C:\Users\Administrator\.m2\repository\org\apiguardian\apiguardian-api\1.1.2\apiguardian-api-1.1.2.jar;C:\Users\Administrator\.m2\repository\org\junit\jupiter\junit-jupiter-params\5.12.2\junit-jupiter-params-5.12.2.jar;C:\Users\Administrator\.m2\repository\org\junit\jupiter\junit-jupiter-engine\5.12.2\junit-jupiter-engine-5.12.2.jar;C:\Users\Administrator\.m2\repository\org\junit\platform\junit-platform-engine\1.12.2\junit-platform-engine-1.12.2.jar;C:\Users\Administrator\.m2\repository\org\mockito\mockito-core\5.17.0\mockito-core-5.17.0.jar;C:\Users\Administrator\.m2\repository\net\bytebuddy\byte-buddy-agent\1.17.8\byte-buddy-agent-1.17.8.jar;C:\Users\Administrator\.m2\repository\org\objenesis\objenesis\3.3\objenesis-3.3.jar;C:\Users\Administrator\.m2\repository\org\mockito\mockito-junit-jupiter\5.17.0\mockito-junit-jupiter-5.17.0.jar;C:\Users\Administrator\.m2\repository\org\skyscreamer\jsonassert\1.5.3\jsonassert-1.5.3.jar;C:\Users\Administrator\.m2\repository\com\vaadin\external\google\android-json\0.0.20131108.vaadin1\android-json-0.0.20131108.vaadin1.jar;C:\Users\Administrator\.m2\repository\org\springframework\spring-core\6.2.19\spring-core-6.2.19.jar;C:\Users\Administrator\.m2\repository\org\springframework\spring-jcl\6.2.19\spring-jcl-6.2.19.jar;C:\Users\Administrator\.m2\repository\org\springframework\spring-test\6.2.19\spring-test-6.2.19.jar;C:\Users\Administrator\.m2\repository\org\xmlunit\xmlunit-core\2.10.4\xmlunit-core-2.10.4.jar;C:\Users\Administrator\.m2\repository\org\springframework\security\spring-security-test\6.5.11\spring-security-test-6.5.11.jar;C:\Users\Administrator\.m2\repository\org\springframework\security\spring-security-core\6.5.11\spring-security-core-6.5.11.jar;C:\Users\Administrator\.m2\repository\org\springframework\security\spring-security-crypto\6.5.11\spring-security-crypto-6.5.11.jar;"/>
+    <property name="sun.cpu.endian" value="little"/>
+    <property name="user.home" value="C:\Users\Administrator"/>
+    <property name="user.language" value="en"/>
+    <property name="java.specification.vendor" value="Oracle Corporation"/>
+    <property name="java.version.date" value="2026-08-18"/>
+    <property name="java.home" value="D:\csgo2021_gc\tools\jdk21"/>
+    <property name="file.separator" value="\"/>
+    <property name="basedir" value="D:\csgo2021_gc\java-backend"/>
+    <property name="java.vm.compressedOopsMode" value="Zero based"/>
+    <property name="line.separator" value="&#10;"/>
+    <property name="java.vm.specification.vendor" value="Oracle Corporation"/>
+    <property name="java.specification.name" value="Java Platform API Specification"/>
+    <property name="FILE_LOG_CHARSET" value="UTF-8"/>
+    <property name="java.awt.headless" value="true"/>
+    <property name="surefire.real.class.path" value="C:\Users\Administrator\AppData\Local\Temp\surefire9729337116057372657\surefirebooter-20260920124723613_3.jar"/>
+    <property name="user.script" value=""/>
+    <property name="sun.management.compiler" value="HotSpot 64-Bit Tiered Compilers"/>
+    <property name="java.runtime.version" value="21.0.12.1+1-LTS"/>
+    <property name="user.name" value="Administrator"/>
+    <property name="stdout.encoding" value="Cp1252"/>
+    <property name="path.separator" value=";"/>
+    <property name="os.version" value="10.0"/>
+    <property name="java.runtime.name" value="OpenJDK Runtime Environment"/>
+    <property name="file.encoding" value="UTF-8"/>
+    <property name="java.vm.name" value="OpenJDK 64-Bit Server VM"/>
+    <property name="java.vendor.version" value="Temurin-21.0.12.1+1"/>
+    <property name="localRepository" value="C:\Users\Administrator\.m2\repository"/>
+    <property name="java.vendor.url.bug" value="https://github.com/adoptium/adoptium-support/issues"/>
+    <property name="java.io.tmpdir" value="C:\Users\ADMINI~1\AppData\Local\Temp\"/>
+    <property name="java.version" value="21.0.12.1"/>
+    <property name="user.dir" value="D:\csgo2021_gc\java-backend"/>
+    <property name="os.arch" value="amd64"/>
+    <property name="java.vm.specification.name" value="Java Virtual Machine Specification"/>
+    <property name="PID" value="3832"/>
+    <property name="sun.os.patch.level" value=""/>
+    <property name="CONSOLE_LOG_CHARSET" value="UTF-8"/>
+    <property name="native.encoding" value="Cp1252"/>
+    <property name="java.library.path" value="D:\csgo2021_gc\tools\jdk21\bin;C:\Windows\Sun\Java\bin;C:\Windows\system32;C:\Windows;C:\Program Files\Eclipse Adoptium\jdk-21.0.12.101-hotspot\bin;C:\Windows\system32;C:\Windows;C:\Windows\System32\Wbem;C:\Windows\System32\WindowsPowerShell\v1.0\;C:\Windows\System32\OpenSSH\;C:\Program Files (x86)\NVIDIA Corporation\PhysX\Common;C:\Program Files\Git\cmd;C:\Program Files\dotnet\;C:\Program Files\Go\bin;C:\Program Files\nodejs\;C:\Users\Administrator\AppData\Local\Programs\Python\Python311\Scripts\;C:\Users\Administrator\AppData\Local\Programs\Python\Python311\;C:\Users\Administrator\AppData\Local\Microsoft\WindowsApps;C:\Users\Administrator\.dotnet\tools;C:\Users\Administrator\go\bin;C:\Users\Administrator\AppData\Roaming\npm;C:\Users\Administrator\AppData\Local\GitHubDesktop\bin;."/>
+    <property name="java.vm.info" value="mixed mode, sharing"/>
+    <property name="stderr.encoding" value="Cp1252"/>
+    <property name="java.vendor" value="Eclipse Adoptium"/>
+    <property name="java.vm.version" value="21.0.12.1+1-LTS"/>
+    <property name="sun.io.unicode.encoding" value="UnicodeLittle"/>
+    <property name="java.class.version" value="65.0"/>
+    <property name="LOGGED_APPLICATION_NAME" value="[matchmaking-backend] "/>
+  </properties>
+  <testcase name="concurrentFullMatchesNeverShareAServer" classname="dev.csgogc.mm.AcceptLifecycleTest" time="1.005">
+    <system-out><![CDATA[12:47:24.323 [main] INFO org.springframework.test.context.support.AnnotationConfigContextLoaderUtils -- Could not detect default configuration classes for test class [dev.csgogc.mm.AcceptLifecycleTest]: AcceptLifecycleTest does not declare any static, non-private, non-final, nested classes annotated with @Configuration.
+12:47:24.434 [main] INFO org.springframework.boot.test.context.SpringBootTestContextBootstrapper -- Found @SpringBootConfiguration dev.csgogc.mm.MatchmakingBackendApplication for test class dev.csgogc.mm.AcceptLifecycleTest
+
+  .   ____          _            __ _ _
+ /\\ / ___'_ __ _ _(_)_ __  __ _ \ \ \ \
+( ( )\___ | '_ | '_| | '_ \/ _` | \ \ \ \
+ \\/  ___)| |_)| | | | | || (_| |  ) ) ) )
+  '  |____| .__|_| |_|_| |_\__, | / / / /
+ =========|_|==============|___/=/_/_/_/
+
+ :: Spring Boot ::               (v3.5.16)
+
+2026-09-20T12:47:24.822+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.AcceptLifecycleTest        : Starting AcceptLifecycleTest using Java 21.0.12.1 with PID 3832 (started by Administrator in D:\csgo2021_gc\java-backend)
+2026-09-20T12:47:24.824+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.AcceptLifecycleTest        : No active profile set, falling back to 1 default profile: "default"
+2026-09-20T12:47:25.650+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.config.DatabaseConfig      : SQLite database: C:\Users\ADMINI~1\AppData\Local\Temp\mm-backend-lifecycle-test4069113110986987964\mm.db
+2026-09-20T12:47:25.658+04:00  INFO 3832 --- [matchmaking-backend] [           main] com.zaxxer.hikari.HikariDataSource       : sqlite - Starting...
+2026-09-20T12:47:25.779+04:00  INFO 3832 --- [matchmaking-backend] [           main] com.zaxxer.hikari.pool.HikariPool        : sqlite - Added connection org.sqlite.jdbc4.JDBC4Connection@66bf40e5
+2026-09-20T12:47:25.780+04:00  INFO 3832 --- [matchmaking-backend] [           main] com.zaxxer.hikari.HikariDataSource       : sqlite - Start completed.
+2026-09-20T12:47:25.809+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.config.SchemaInitializer   : database migrated: game_server.state added
+2026-09-20T12:47:25.810+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.config.SchemaInitializer   : database migrated: game_server.reserved_match_id added
+2026-09-20T12:47:25.811+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.config.SchemaInitializer   : database migrated: game_server.reserved_at added
+2026-09-20T12:47:25.812+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.config.SchemaInitializer   : database migrated: game_server.last_assigned_at added
+2026-09-20T12:47:25.813+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.config.SchemaInitializer   : database migrated: game_server.last_heartbeat_at added
+2026-09-20T12:47:25.814+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.config.SchemaInitializer   : database migrated: game_server.max_players added
+2026-09-20T12:47:25.815+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.config.SchemaInitializer   : database migrated: matchmaking_search.match_id added
+2026-09-20T12:47:25.817+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.config.SchemaInitializer   : database migrated: matchmaking_search.matched_at added
+2026-09-20T12:47:25.817+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.config.SchemaInitializer   : database migrated: matchmaking_search.variants added
+2026-09-20T12:47:25.819+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.config.SchemaInitializer   : database migrated: matchmaking_search.accepted_at added
+2026-09-20T12:47:25.820+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.config.SchemaInitializer   : database migrated: matchmaking_match.accept_deadline_at added
+2026-09-20T12:47:25.821+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.config.SchemaInitializer   : database migrated: matchmaking_match.accepted_at added
+2026-09-20T12:47:25.822+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.config.SchemaInitializer   : database migrated: game_server.available_after added
+2026-09-20T12:47:25.925+04:00  WARN 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.config.StartupValidator    : backend.required-players.competitive=10 (retail: 10): matches of this category start with 10 real player(s)
+2026-09-20T12:47:25.926+04:00  WARN 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.config.StartupValidator    : backend.required-players.wingman=4 (retail: 4): matches of this category start with 4 real player(s)
+2026-09-20T12:47:25.926+04:00  WARN 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.config.StartupValidator    : backend.required-players.dangerzone=16 (retail: 16): matches of this category start with 16 real player(s)
+2026-09-20T12:47:25.926+04:00  WARN 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.config.StartupValidator    : HTTP is bound to 192.168.1.150 (not loopback) and served without TLS: admin credentials travel in clear text
+2026-09-20T12:47:26.232+04:00  INFO 3832 --- [matchmaking-backend] [           main] r$InitializeUserDetailsManagerConfigurer : Global AuthenticationManager configured with UserDetailsService bean with name adminUser
+2026-09-20T12:47:26.537+04:00  INFO 3832 --- [matchmaking-backend] [           main] o.s.b.t.m.w.SpringBootMockServletContext : Initializing Spring TestDispatcherServlet ''
+2026-09-20T12:47:26.537+04:00  INFO 3832 --- [matchmaking-backend] [           main] o.s.t.web.servlet.TestDispatcherServlet  : Initializing Servlet ''
+2026-09-20T12:47:26.538+04:00  INFO 3832 --- [matchmaking-backend] [           main] o.s.t.web.servlet.TestDispatcherServlet  : Completed initialization in 1 ms
+2026-09-20T12:47:26.559+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.AcceptLifecycleTest        : Started AcceptLifecycleTest in 1.971 seconds (process running for 2.845)
+2026-09-20T12:47:27.230+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.server.GameServerService   : game server added: 192.168.1.150:27100 wingman map='de_lake' enabled=true state=AVAILABLE
+2026-09-20T12:47:27.265+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.server.GameServerService   : game server added: 192.168.1.150:27101 wingman map='de_lake' enabled=true state=AVAILABLE
+2026-09-20T12:47:27.269+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.server.GameServerService   : game server added: 192.168.1.150:27102 wingman map='de_lake' enabled=true state=AVAILABLE
+2026-09-20T12:47:27.291+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : fake search 1 added: 3 virtual wingman player(s) maps=[] enabled=true
+2026-09-20T12:47:27.308+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : fake search 2 added: 3 virtual wingman player(s) maps=[] enabled=true
+2026-09-20T12:47:27.312+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : fake search 3 added: 3 virtual wingman player(s) maps=[] enabled=true
+2026-09-20T12:47:27.317+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : fake search 4 added: 3 virtual wingman player(s) maps=[] enabled=true
+2026-09-20T12:47:27.322+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : fake search 5 added: 3 virtual wingman player(s) maps=[] enabled=true
+2026-09-20T12:47:27.327+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : fake search 6 added: 3 virtual wingman player(s) maps=[] enabled=true
+2026-09-20T12:47:27.332+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : fake search 7 added: 3 virtual wingman player(s) maps=[] enabled=true
+2026-09-20T12:47:27.337+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : fake search 8 added: 3 virtual wingman player(s) maps=[] enabled=true
+2026-09-20T12:47:27.380+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-7] dev.csgogc.mm.search.SearchService       : search started: account=104 mode=wingman maps=[de_lake] game_type=10 source=gc
+2026-09-20T12:47:27.384+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-7] dev.csgogc.mm.search.SearchService       : match m-7756c100 created: wingman gathering 4 player(s), no server yet
+2026-09-20T12:47:27.387+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-7] dev.csgogc.mm.search.SearchService       : match m-7756c100: account 104 joined (1/4)
+2026-09-20T12:47:27.393+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-7] dev.csgogc.mm.search.SearchService       : match m-7756c100: 3 virtual player(s) joined (fake search 1) (4/4)
+2026-09-20T12:47:27.395+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-7] dev.csgogc.mm.search.SearchService       : match m-7756c100 is full (4/4, 3 virtual): looking for a free wingman server
+2026-09-20T12:47:27.402+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-7] dev.csgogc.mm.search.SearchService       : match m-7756c100: server 192.168.1.150:27100 map=de_lake is RESERVED
+2026-09-20T12:47:27.407+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-7] dev.csgogc.mm.search.SearchService       : match m-7756c100 is ACCEPTING: 1 player(s) have until 2026-01-01T12:00:25Z (PT25S)
+2026-09-20T12:47:27.407+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-7] dev.csgogc.mm.search.SearchService       : match m-7756c100 complete (4/4, 3 virtual): WAITING_ACCEPT -> 192.168.1.150:27100 map=de_lake
+2026-09-20T12:47:27.412+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-3] dev.csgogc.mm.search.SearchService       : search started: account=100 mode=wingman maps=[de_lake] game_type=10 source=gc
+2026-09-20T12:47:27.414+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-3] dev.csgogc.mm.search.SearchService       : match m-796b54a2 created: wingman gathering 4 player(s), no server yet
+2026-09-20T12:47:27.416+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-3] dev.csgogc.mm.search.SearchService       : match m-796b54a2: account 100 joined (1/4)
+2026-09-20T12:47:27.419+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-3] dev.csgogc.mm.search.SearchService       : match m-796b54a2: 3 virtual player(s) joined (fake search 2) (4/4)
+2026-09-20T12:47:27.420+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-3] dev.csgogc.mm.search.SearchService       : match m-796b54a2 is full (4/4, 3 virtual): looking for a free wingman server
+2026-09-20T12:47:27.422+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-3] dev.csgogc.mm.search.SearchService       : match m-796b54a2: server 192.168.1.150:27101 map=de_lake is RESERVED
+2026-09-20T12:47:27.425+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-3] dev.csgogc.mm.search.SearchService       : match m-796b54a2 is ACCEPTING: 1 player(s) have until 2026-01-01T12:00:25Z (PT25S)
+2026-09-20T12:47:27.425+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-3] dev.csgogc.mm.search.SearchService       : match m-796b54a2 complete (4/4, 3 virtual): WAITING_ACCEPT -> 192.168.1.150:27101 map=de_lake
+2026-09-20T12:47:27.428+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-5] dev.csgogc.mm.search.SearchService       : search started: account=102 mode=wingman maps=[de_lake] game_type=10 source=gc
+2026-09-20T12:47:27.430+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-5] dev.csgogc.mm.search.SearchService       : match m-01b673fd created: wingman gathering 4 player(s), no server yet
+2026-09-20T12:47:27.431+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-5] dev.csgogc.mm.search.SearchService       : match m-01b673fd: account 102 joined (1/4)
+2026-09-20T12:47:27.435+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-5] dev.csgogc.mm.search.SearchService       : match m-01b673fd: 3 virtual player(s) joined (fake search 3) (4/4)
+2026-09-20T12:47:27.436+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-5] dev.csgogc.mm.search.SearchService       : match m-01b673fd is full (4/4, 3 virtual): looking for a free wingman server
+2026-09-20T12:47:27.438+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-5] dev.csgogc.mm.search.SearchService       : match m-01b673fd: server 192.168.1.150:27102 map=de_lake is RESERVED
+2026-09-20T12:47:27.440+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-5] dev.csgogc.mm.search.SearchService       : match m-01b673fd is ACCEPTING: 1 player(s) have until 2026-01-01T12:00:25Z (PT25S)
+2026-09-20T12:47:27.441+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-5] dev.csgogc.mm.search.SearchService       : match m-01b673fd complete (4/4, 3 virtual): WAITING_ACCEPT -> 192.168.1.150:27102 map=de_lake
+2026-09-20T12:47:27.443+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-6] dev.csgogc.mm.search.SearchService       : search started: account=103 mode=wingman maps=[de_lake] game_type=10 source=gc
+2026-09-20T12:47:27.445+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-6] dev.csgogc.mm.search.SearchService       : match m-664ff5f4 created: wingman gathering 4 player(s), no server yet
+2026-09-20T12:47:27.446+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-6] dev.csgogc.mm.search.SearchService       : match m-664ff5f4: account 103 joined (1/4)
+2026-09-20T12:47:27.449+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-6] dev.csgogc.mm.search.SearchService       : match m-664ff5f4: 3 virtual player(s) joined (fake search 4) (4/4)
+2026-09-20T12:47:27.450+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-6] dev.csgogc.mm.search.SearchService       : match m-664ff5f4 is full (4/4, 3 virtual): looking for a free wingman server
+2026-09-20T12:47:27.451+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-6] dev.csgogc.mm.search.SearchService       : match m-664ff5f4 is full but no free wingman server runs one of [de_lake]: it waits for one
+2026-09-20T12:47:27.454+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-4] dev.csgogc.mm.search.SearchService       : search started: account=101 mode=wingman maps=[de_lake] game_type=10 source=gc
+2026-09-20T12:47:27.456+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-4] dev.csgogc.mm.search.SearchService       : match m-e361ab4e created: wingman gathering 4 player(s), no server yet
+2026-09-20T12:47:27.457+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-4] dev.csgogc.mm.search.SearchService       : match m-e361ab4e: account 101 joined (1/4)
+2026-09-20T12:47:27.460+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-4] dev.csgogc.mm.search.SearchService       : match m-e361ab4e: 3 virtual player(s) joined (fake search 5) (4/4)
+2026-09-20T12:47:27.461+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-4] dev.csgogc.mm.search.SearchService       : match m-e361ab4e is full (4/4, 3 virtual): looking for a free wingman server
+2026-09-20T12:47:27.462+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-4] dev.csgogc.mm.search.SearchService       : match m-e361ab4e is full but no free wingman server runs one of [de_lake]: it waits for one
+2026-09-20T12:47:27.465+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-9] dev.csgogc.mm.search.SearchService       : search started: account=106 mode=wingman maps=[de_lake] game_type=10 source=gc
+2026-09-20T12:47:27.467+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-9] dev.csgogc.mm.search.SearchService       : match m-48c9007d created: wingman gathering 4 player(s), no server yet
+2026-09-20T12:47:27.468+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-9] dev.csgogc.mm.search.SearchService       : match m-48c9007d: account 106 joined (1/4)
+2026-09-20T12:47:27.470+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-9] dev.csgogc.mm.search.SearchService       : match m-48c9007d: 3 virtual player(s) joined (fake search 6) (4/4)
+2026-09-20T12:47:27.471+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-9] dev.csgogc.mm.search.SearchService       : match m-48c9007d is full (4/4, 3 virtual): looking for a free wingman server
+2026-09-20T12:47:27.472+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-9] dev.csgogc.mm.search.SearchService       : match m-48c9007d is full but no free wingman server runs one of [de_lake]: it waits for one
+2026-09-20T12:47:27.476+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-8] dev.csgogc.mm.search.SearchService       : search started: account=105 mode=wingman maps=[de_lake] game_type=10 source=gc
+2026-09-20T12:47:27.478+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-8] dev.csgogc.mm.search.SearchService       : match m-4090460a created: wingman gathering 4 player(s), no server yet
+2026-09-20T12:47:27.479+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-8] dev.csgogc.mm.search.SearchService       : match m-4090460a: account 105 joined (1/4)
+2026-09-20T12:47:27.482+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-8] dev.csgogc.mm.search.SearchService       : match m-4090460a: 3 virtual player(s) joined (fake search 7) (4/4)
+2026-09-20T12:47:27.483+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-8] dev.csgogc.mm.search.SearchService       : match m-4090460a is full (4/4, 3 virtual): looking for a free wingman server
+2026-09-20T12:47:27.484+04:00  INFO 3832 --- [matchmaking-backend] [       Thread-8] dev.csgogc.mm.search.SearchService       : match m-4090460a is full but no free wingman server runs one of [de_lake]: it waits for one
+2026-09-20T12:47:27.489+04:00  INFO 3832 --- [matchmaking-backend] [      Thread-10] dev.csgogc.mm.search.SearchService       : search started: account=107 mode=wingman maps=[de_lake] game_type=10 source=gc
+2026-09-20T12:47:27.491+04:00  INFO 3832 --- [matchmaking-backend] [      Thread-10] dev.csgogc.mm.search.SearchService       : match m-4a980d9b created: wingman gathering 4 player(s), no server yet
+2026-09-20T12:47:27.493+04:00  INFO 3832 --- [matchmaking-backend] [      Thread-10] dev.csgogc.mm.search.SearchService       : match m-4a980d9b: account 107 joined (1/4)
+2026-09-20T12:47:27.495+04:00  INFO 3832 --- [matchmaking-backend] [      Thread-10] dev.csgogc.mm.search.SearchService       : match m-4a980d9b: 3 virtual player(s) joined (fake search 8) (4/4)
+2026-09-20T12:47:27.496+04:00  INFO 3832 --- [matchmaking-backend] [      Thread-10] dev.csgogc.mm.search.SearchService       : match m-4a980d9b is full (4/4, 3 virtual): looking for a free wingman server
+2026-09-20T12:47:27.497+04:00  INFO 3832 --- [matchmaking-backend] [      Thread-10] dev.csgogc.mm.search.SearchService       : match m-4a980d9b is full but no free wingman server runs one of [de_lake]: it waits for one
+]]></system-out>
+    <system-err><![CDATA[Mockito is currently self-attaching to enable the inline-mock-maker. This will no longer work in future releases of the JDK. Please add Mockito as an agent to your build as described in Mockito's documentation: https://javadoc.io/doc/org.mockito/mockito-core/latest/org.mockito/org/mockito/Mockito.html#0.3
+WARNING: A Java agent has been loaded dynamically (C:\Users\Administrator\.m2\repository\net\bytebuddy\byte-buddy-agent\1.17.8\byte-buddy-agent-1.17.8.jar)
+WARNING: If a serviceability tool is in use, please run with -XX:+EnableDynamicAgentLoading to hide this warning
+WARNING: If a serviceability tool is not in use, please run with -Djdk.instrument.traceUsage for more information
+WARNING: Dynamic loading of agents will be disallowed by default in a future release
+]]></system-err>
+  </testcase>
+  <testcase name="theFakePlayersAreSearchingWhenTheRealPlayerLeavesDuringTheAccept" classname="dev.csgogc.mm.AcceptLifecycleTest" time="0.062">
+    <system-out><![CDATA[2026-09-20T12:47:27.585+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.server.GameServerService   : game server added: 192.168.1.150:27017 competitive map='de_dust2' enabled=true state=AVAILABLE
+2026-09-20T12:47:27.590+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : fake search 9 added: 9 virtual competitive player(s) maps=[de_dust2] enabled=true
+2026-09-20T12:47:27.595+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : search started: account=1050166997 mode=competitive maps=[de_dust2] game_type=8 source=gc
+2026-09-20T12:47:27.596+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-870bfc6e created: competitive gathering 10 player(s), no server yet
+2026-09-20T12:47:27.598+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-870bfc6e: account 1050166997 joined (1/10)
+2026-09-20T12:47:27.600+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-870bfc6e: 9 virtual player(s) joined (fake search 9) (10/10)
+2026-09-20T12:47:27.601+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-870bfc6e is full (10/10, 9 virtual): looking for a free competitive server
+2026-09-20T12:47:27.603+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-870bfc6e: server 192.168.1.150:27017 map=de_dust2 is RESERVED
+2026-09-20T12:47:27.606+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-870bfc6e is ACCEPTING: 1 player(s) have until 2026-01-01T12:00:25Z (PT25S)
+2026-09-20T12:47:27.606+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-870bfc6e complete (10/10, 9 virtual): WAITING_ACCEPT -> 192.168.1.150:27017 map=de_dust2
+2026-09-20T12:47:27.625+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-870bfc6e cancelled (account 1050166997 left before the Accept was over): 0 player(s) search again, server 192.168.1.150:27017 is AVAILABLE again
+2026-09-20T12:47:27.625+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : search cancelled: account=1050166997
+]]></system-out>
+  </testcase>
+  <testcase name="aSearchWithoutAnyServerThatCouldRunItsMapsKeepsSearching" classname="dev.csgogc.mm.AcceptLifecycleTest" time="0.036">
+    <system-out><![CDATA[2026-09-20T12:47:27.649+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.server.GameServerService   : game server added: 192.168.1.150:27017 competitive map='de_dust2' enabled=true state=AVAILABLE
+2026-09-20T12:47:27.653+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : search started: account=1050166997 mode=competitive maps=[de_nuke] game_type=8 source=gc
+2026-09-20T12:47:27.659+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.server.GameServerService   : game server added: 192.168.1.150:27018 competitive map='de_nuke' enabled=true state=AVAILABLE
+2026-09-20T12:47:27.660+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-3f802725 created: competitive gathering 10 player(s), no server yet
+2026-09-20T12:47:27.662+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-3f802725: account 1050166997 joined (1/10)
+]]></system-out>
+  </testcase>
+  <testcase name="aServerCanBeReservedByOnlyOneMatch" classname="dev.csgogc.mm.AcceptLifecycleTest" time="0.015">
+    <system-out><![CDATA[2026-09-20T12:47:27.685+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.server.GameServerService   : game server added: 192.168.1.150:27018 wingman map='de_lake' enabled=true state=AVAILABLE
+]]></system-out>
+  </testcase>
+  <testcase name="tenOfTenStartsAcceptingWithADeadline" classname="dev.csgogc.mm.AcceptLifecycleTest" time="0.034">
+    <system-out><![CDATA[2026-09-20T12:47:27.702+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.server.GameServerService   : game server added: 192.168.1.150:27017 competitive map='de_dust2' enabled=true state=AVAILABLE
+2026-09-20T12:47:27.706+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : fake search 10 added: 9 virtual competitive player(s) maps=[de_dust2] enabled=true
+2026-09-20T12:47:27.710+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : search started: account=1050166997 mode=competitive maps=[de_dust2] game_type=8 source=gc
+2026-09-20T12:47:27.712+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-2eddfa83 created: competitive gathering 10 player(s), no server yet
+2026-09-20T12:47:27.714+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-2eddfa83: account 1050166997 joined (1/10)
+2026-09-20T12:47:27.716+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-2eddfa83: 9 virtual player(s) joined (fake search 10) (10/10)
+2026-09-20T12:47:27.717+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-2eddfa83 is full (10/10, 9 virtual): looking for a free competitive server
+2026-09-20T12:47:27.718+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-2eddfa83: server 192.168.1.150:27017 map=de_dust2 is RESERVED
+2026-09-20T12:47:27.720+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-2eddfa83 is ACCEPTING: 1 player(s) have until 2026-01-01T12:00:25Z (PT25S)
+2026-09-20T12:47:27.720+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-2eddfa83 complete (10/10, 9 virtual): WAITING_ACCEPT -> 192.168.1.150:27017 map=de_dust2
+]]></system-out>
+  </testcase>
+  <testcase name="aPlayerWhoLeavesAFullMatchThatWaitsForAServerMakesItGatherAgain" classname="dev.csgogc.mm.AcceptLifecycleTest" time="0.06">
+    <system-out><![CDATA[2026-09-20T12:47:27.735+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.server.GameServerService   : game server added: 192.168.1.150:27018 wingman map='de_lake' enabled=true state=AVAILABLE
+2026-09-20T12:47:27.740+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : fake search 11 added: 3 virtual wingman player(s) maps=[] enabled=true
+2026-09-20T12:47:27.744+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : search started: account=1 mode=wingman maps=[de_lake] game_type=10 source=gc
+2026-09-20T12:47:27.746+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-c066f410 created: wingman gathering 4 player(s), no server yet
+2026-09-20T12:47:27.747+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-c066f410: account 1 joined (1/4)
+2026-09-20T12:47:27.750+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-c066f410: 3 virtual player(s) joined (fake search 11) (4/4)
+2026-09-20T12:47:27.751+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-c066f410 is full (4/4, 3 virtual): looking for a free wingman server
+2026-09-20T12:47:27.753+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-c066f410: server 192.168.1.150:27018 map=de_lake is RESERVED
+2026-09-20T12:47:27.755+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-c066f410 is ACCEPTING: 1 player(s) have until 2026-01-01T12:00:25Z (PT25S)
+2026-09-20T12:47:27.756+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-c066f410 complete (4/4, 3 virtual): WAITING_ACCEPT -> 192.168.1.150:27018 map=de_lake
+2026-09-20T12:47:27.759+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : fake search 12 added: 2 virtual wingman player(s) maps=[] enabled=true
+2026-09-20T12:47:27.765+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : search started: account=2 mode=wingman maps=[de_lake] game_type=10 source=gc
+2026-09-20T12:47:27.766+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-dd044408 created: wingman gathering 4 player(s), no server yet
+2026-09-20T12:47:27.767+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-dd044408: account 2 joined (1/4)
+2026-09-20T12:47:27.769+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-dd044408: 2 virtual player(s) joined (fake search 12) (3/4)
+2026-09-20T12:47:27.773+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : search started: account=3 mode=wingman maps=[de_lake] game_type=10 source=gc
+2026-09-20T12:47:27.776+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-dd044408 is full (4/4, 2 virtual): looking for a free wingman server
+2026-09-20T12:47:27.777+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-dd044408 is full but no free wingman server runs one of [de_lake]: it waits for one
+2026-09-20T12:47:27.783+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-dd044408 is not full any more (3/4), gathering again
+2026-09-20T12:47:27.783+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : search cancelled: account=3
+]]></system-out>
+  </testcase>
+  <testcase name="theAcceptTimeoutQueuesTheFakePlayersAgain" classname="dev.csgogc.mm.AcceptLifecycleTest" time="0.059">
+    <system-out><![CDATA[2026-09-20T12:47:27.798+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.server.GameServerService   : game server added: 192.168.1.150:27017 competitive map='de_dust2' enabled=true state=AVAILABLE
+2026-09-20T12:47:27.804+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : fake search 13 added: 9 virtual competitive player(s) maps=[de_dust2] enabled=true
+2026-09-20T12:47:27.810+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : search started: account=1050166997 mode=competitive maps=[de_dust2] game_type=8 source=gc
+2026-09-20T12:47:27.813+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-30889b72 created: competitive gathering 10 player(s), no server yet
+2026-09-20T12:47:27.815+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-30889b72: account 1050166997 joined (1/10)
+2026-09-20T12:47:27.817+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-30889b72: 9 virtual player(s) joined (fake search 13) (10/10)
+2026-09-20T12:47:27.818+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-30889b72 is full (10/10, 9 virtual): looking for a free competitive server
+2026-09-20T12:47:27.820+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-30889b72: server 192.168.1.150:27017 map=de_dust2 is RESERVED
+2026-09-20T12:47:27.822+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-30889b72 is ACCEPTING: 1 player(s) have until 2026-01-01T12:00:25Z (PT25S)
+2026-09-20T12:47:27.823+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-30889b72 complete (10/10, 9 virtual): WAITING_ACCEPT -> 192.168.1.150:27017 map=de_dust2
+2026-09-20T12:47:27.833+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-30889b72 cancelled (accept timeout, the players did not all accept within PT25S): 1 player(s) search again, server 192.168.1.150:27017 is AVAILABLE again
+2026-09-20T12:47:27.837+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-93a481b9 created: competitive gathering 10 player(s), no server yet
+2026-09-20T12:47:27.838+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-93a481b9: account 1050166997 joined (1/10)
+2026-09-20T12:47:27.840+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-93a481b9: 9 virtual player(s) joined (fake search 13) (10/10)
+2026-09-20T12:47:27.841+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-93a481b9 is full (10/10, 9 virtual): looking for a free competitive server
+2026-09-20T12:47:27.842+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-93a481b9 is full but no free competitive server runs one of [de_dust2]: it waits for one
+]]></system-out>
+  </testcase>
+  <testcase name="theDeadlineStartsWhenThePlayersGetTheServerNotWhenItIsReserved" classname="dev.csgogc.mm.AcceptLifecycleTest" time="0.078">
+    <system-out><![CDATA[2026-09-20T12:47:27.857+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.server.GameServerService   : game server added: 192.168.1.150:27017 competitive map='de_dust2' enabled=true state=AVAILABLE
+2026-09-20T12:47:27.861+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : fake search 14 added: 9 virtual competitive player(s) maps=[de_dust2] enabled=true
+2026-09-20T12:47:27.872+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : search started: account=1050166997 mode=competitive maps=[de_dust2] game_type=8 source=gc
+2026-09-20T12:47:27.873+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-91bac157 created: competitive gathering 10 player(s), no server yet
+2026-09-20T12:47:27.875+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-91bac157: account 1050166997 joined (1/10)
+2026-09-20T12:47:27.876+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-91bac157: 9 virtual player(s) joined (fake search 14) (10/10)
+2026-09-20T12:47:27.877+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-91bac157 is full (10/10, 9 virtual): looking for a free competitive server
+2026-09-20T12:47:27.879+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-91bac157: server 192.168.1.150:27017 map=de_dust2 is RESERVED
+2026-09-20T12:47:27.879+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-91bac157 complete (10/10, 9 virtual) on 192.168.1.150:27017: waiting for the game server to arm the roster
+2026-09-20T12:47:27.902+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-91bac157 is ACCEPTING: 1 player(s) have until 2026-01-01T12:01:11Z (PT25S)
+2026-09-20T12:47:27.902+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-91bac157: game server 192.168.1.150:27017 armed the roster, 1 player(s) get the server
+2026-09-20T12:47:27.915+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-91bac157 cancelled (accept timeout, the players did not all accept within PT25S): 1 player(s) search again, server 192.168.1.150:27017 is AVAILABLE again
+2026-09-20T12:47:27.917+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-2b9c0836 created: competitive gathering 10 player(s), no server yet
+2026-09-20T12:47:27.918+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-2b9c0836: account 1050166997 joined (1/10)
+2026-09-20T12:47:27.920+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-2b9c0836: 9 virtual player(s) joined (fake search 14) (10/10)
+2026-09-20T12:47:27.921+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-2b9c0836 is full (10/10, 9 virtual): looking for a free competitive server
+2026-09-20T12:47:27.921+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-2b9c0836 is full but no free competitive server runs one of [de_dust2]: it waits for one
+]]></system-out>
+  </testcase>
+  <testcase name="classicModesKnowNothingOfAccept" classname="dev.csgogc.mm.AcceptLifecycleTest" time="0.028">
+    <system-out><![CDATA[2026-09-20T12:47:27.935+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.server.GameServerService   : game server added: 192.168.1.150:27016 casual map='de_dust2' enabled=true state=AVAILABLE
+2026-09-20T12:47:27.939+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : search started: account=1 mode=casual maps=[de_dust2] game_type=7 source=gc
+2026-09-20T12:47:27.941+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-25583966 created: casual on 192.168.1.150:27016 map=de_dust2 needs 1 player(s), server 12 is assigned (classic mode: no reservation)
+2026-09-20T12:47:27.945+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-25583966 complete (1/1): READY_TO_CONNECT -> 192.168.1.150:27016 map=de_dust2
+]]></system-out>
+  </testcase>
+  <testcase name="theAcceptTimeoutCancelsTheMatch" classname="dev.csgogc.mm.AcceptLifecycleTest" time="0.047">
+    <system-out><![CDATA[2026-09-20T12:47:27.964+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.server.GameServerService   : game server added: 192.168.1.150:27017 competitive map='de_dust2' enabled=true state=AVAILABLE
+2026-09-20T12:47:27.967+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : fake search 15 added: 9 virtual competitive player(s) maps=[de_dust2] enabled=true
+2026-09-20T12:47:27.971+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : search started: account=1050166997 mode=competitive maps=[de_dust2] game_type=8 source=gc
+2026-09-20T12:47:27.972+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-78b7573a created: competitive gathering 10 player(s), no server yet
+2026-09-20T12:47:27.974+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-78b7573a: account 1050166997 joined (1/10)
+2026-09-20T12:47:27.975+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-78b7573a: 9 virtual player(s) joined (fake search 15) (10/10)
+2026-09-20T12:47:27.976+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-78b7573a is full (10/10, 9 virtual): looking for a free competitive server
+2026-09-20T12:47:27.978+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-78b7573a: server 192.168.1.150:27017 map=de_dust2 is RESERVED
+2026-09-20T12:47:27.979+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-78b7573a is ACCEPTING: 1 player(s) have until 2026-01-01T12:02:37Z (PT25S)
+2026-09-20T12:47:27.980+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-78b7573a complete (10/10, 9 virtual): WAITING_ACCEPT -> 192.168.1.150:27017 map=de_dust2
+2026-09-20T12:47:27.991+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-78b7573a cancelled (accept timeout, the players did not all accept within PT25S): 1 player(s) search again, server 192.168.1.150:27017 is AVAILABLE again
+2026-09-20T12:47:27.993+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-d2335332 created: competitive gathering 10 player(s), no server yet
+2026-09-20T12:47:27.995+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-d2335332: account 1050166997 joined (1/10)
+2026-09-20T12:47:27.996+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-d2335332: 9 virtual player(s) joined (fake search 15) (10/10)
+2026-09-20T12:47:27.997+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-d2335332 is full (10/10, 9 virtual): looking for a free competitive server
+2026-09-20T12:47:27.998+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-d2335332 is full but no free competitive server runs one of [de_dust2]: it waits for one
+]]></system-out>
+  </testcase>
+  <testcase name="anEmptyGatheringMatchIsDissolved" classname="dev.csgogc.mm.AcceptLifecycleTest" time="0.033">
+    <system-out><![CDATA[2026-09-20T12:47:28.013+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.server.GameServerService   : game server added: 192.168.1.150:27017 competitive map='de_dust2' enabled=true state=AVAILABLE
+2026-09-20T12:47:28.017+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : fake search 16 added: 3 virtual competitive player(s) maps=[de_dust2] enabled=true
+2026-09-20T12:47:28.020+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : search started: account=1050166997 mode=competitive maps=[de_dust2] game_type=8 source=gc
+2026-09-20T12:47:28.022+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-564fae94 created: competitive gathering 10 player(s), no server yet
+2026-09-20T12:47:28.023+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-564fae94: account 1050166997 joined (1/10)
+2026-09-20T12:47:28.025+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-564fae94: 3 virtual player(s) joined (fake search 16) (4/10)
+2026-09-20T12:47:28.032+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-564fae94 cancelled (nobody is in it any more): 0 player(s) search again
+]]></system-out>
+  </testcase>
+  <testcase name="aPlayerInAGatheringMatchCannotAccept" classname="dev.csgogc.mm.AcceptLifecycleTest" time="0.03">
+    <system-out><![CDATA[2026-09-20T12:47:28.047+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.server.GameServerService   : game server added: 192.168.1.150:27017 competitive map='de_dust2' enabled=true state=AVAILABLE
+2026-09-20T12:47:28.055+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : search started: account=1050166997 mode=competitive maps=[de_dust2] game_type=8 source=gc
+2026-09-20T12:47:28.057+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-073bee23 created: competitive gathering 10 player(s), no server yet
+2026-09-20T12:47:28.058+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-073bee23: account 1050166997 joined (1/10)
+]]></system-out>
+  </testcase>
+  <testcase name="aFormingMatchThatHoldsAServerFromAnOlderVersionIsDissolved" classname="dev.csgogc.mm.AcceptLifecycleTest" time="0.026">
+    <system-out><![CDATA[2026-09-20T12:47:28.078+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.server.GameServerService   : game server added: 192.168.1.150:27017 competitive map='de_dust2' enabled=true state=AVAILABLE
+2026-09-20T12:47:28.085+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-0ldf0rm1 cancelled (it reserved a server while still gathering (older version)): 1 player(s) search again, server 192.168.1.150:27017 is AVAILABLE again
+2026-09-20T12:47:28.087+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-0d1289b1 created: competitive gathering 10 player(s), no server yet
+2026-09-20T12:47:28.088+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-0d1289b1: account 5 joined (1/10)
+]]></system-out>
+  </testcase>
+  <testcase name="theMatchNeedsTheReportOfEveryRealPlayerAndOnlyMembersCanReport" classname="dev.csgogc.mm.AcceptLifecycleTest" time="0.058">
+    <system-out><![CDATA[2026-09-20T12:47:28.104+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.server.GameServerService   : game server added: 192.168.1.150:27018 wingman map='de_lake' enabled=true state=AVAILABLE
+2026-09-20T12:47:28.108+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : fake search 17 added: 2 virtual wingman player(s) maps=[] enabled=true
+2026-09-20T12:47:28.111+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : search started: account=1 mode=wingman maps=[de_lake] game_type=10 source=gc
+2026-09-20T12:47:28.113+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-63d1a8f5 created: wingman gathering 4 player(s), no server yet
+2026-09-20T12:47:28.114+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-63d1a8f5: account 1 joined (1/4)
+2026-09-20T12:47:28.116+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-63d1a8f5: 2 virtual player(s) joined (fake search 17) (3/4)
+2026-09-20T12:47:28.119+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : search started: account=2 mode=wingman maps=[de_lake] game_type=10 source=gc
+2026-09-20T12:47:28.122+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-63d1a8f5 is full (4/4, 2 virtual): looking for a free wingman server
+2026-09-20T12:47:28.124+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-63d1a8f5: server 192.168.1.150:27018 map=de_lake is RESERVED
+2026-09-20T12:47:28.127+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-63d1a8f5 is ACCEPTING: 2 player(s) have until 2026-01-01T12:03:03Z (PT25S)
+2026-09-20T12:47:28.127+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-63d1a8f5 complete (4/4, 2 virtual): WAITING_ACCEPT -> 192.168.1.150:27018 map=de_lake
+2026-09-20T12:47:28.132+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-63d1a8f5: account 1 accepted, the others are still to accept
+2026-09-20T12:47:28.147+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-63d1a8f5: everybody accepted, ACCEPTED (last: account 2)
+]]></system-out>
+  </testcase>
+  <testcase name="aReservationNoLiveMatchHoldsIsGivenBack" classname="dev.csgogc.mm.AcceptLifecycleTest" time="0.019">
+    <system-out><![CDATA[2026-09-20T12:47:28.163+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.server.GameServerService   : game server added: 192.168.1.150:27017 competitive map='de_dust2' enabled=true state=AVAILABLE
+2026-09-20T12:47:28.170+04:00  WARN 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : server 192.168.1.150:27017 was RESERVED for match m-deadbeef that does not hold it: AVAILABLE again
+]]></system-out>
+  </testcase>
+  <testcase name="oneOfTenDoesNotReserveAServer" classname="dev.csgogc.mm.AcceptLifecycleTest" time="0.019">
+    <system-out><![CDATA[2026-09-20T12:47:28.183+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.server.GameServerService   : game server added: 192.168.1.150:27017 competitive map='de_dust2' enabled=true state=AVAILABLE
+2026-09-20T12:47:28.186+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : search started: account=1050166997 mode=competitive maps=[de_dust2] game_type=8 source=gc
+2026-09-20T12:47:28.187+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-201f3031 created: competitive gathering 10 player(s), no server yet
+2026-09-20T12:47:28.189+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-201f3031: account 1050166997 joined (1/10)
+]]></system-out>
+  </testcase>
+  <testcase name="theAcceptTimeoutFreesTheServer" classname="dev.csgogc.mm.AcceptLifecycleTest" time="0.038">
+    <system-out><![CDATA[2026-09-20T12:47:28.202+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.server.GameServerService   : game server added: 192.168.1.150:27017 competitive map='de_dust2' enabled=true state=AVAILABLE
+2026-09-20T12:47:28.206+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : fake search 18 added: 9 virtual competitive player(s) maps=[de_dust2] enabled=true
+2026-09-20T12:47:28.209+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : search started: account=1050166997 mode=competitive maps=[de_dust2] game_type=8 source=gc
+2026-09-20T12:47:28.210+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-7d37b46b created: competitive gathering 10 player(s), no server yet
+2026-09-20T12:47:28.212+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-7d37b46b: account 1050166997 joined (1/10)
+2026-09-20T12:47:28.213+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-7d37b46b: 9 virtual player(s) joined (fake search 18) (10/10)
+2026-09-20T12:47:28.214+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-7d37b46b is full (10/10, 9 virtual): looking for a free competitive server
+2026-09-20T12:47:28.216+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-7d37b46b: server 192.168.1.150:27017 map=de_dust2 is RESERVED
+2026-09-20T12:47:28.218+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-7d37b46b is ACCEPTING: 1 player(s) have until 2026-01-01T12:05:33Z (PT25S)
+2026-09-20T12:47:28.218+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-7d37b46b complete (10/10, 9 virtual): WAITING_ACCEPT -> 192.168.1.150:27017 map=de_dust2
+2026-09-20T12:47:28.225+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-7d37b46b cancelled (accept timeout, the players did not all accept within PT25S): 1 player(s) search again, server 192.168.1.150:27017 is AVAILABLE again
+2026-09-20T12:47:28.226+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-ad9346c5 created: competitive gathering 10 player(s), no server yet
+2026-09-20T12:47:28.227+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-ad9346c5: account 1050166997 joined (1/10)
+2026-09-20T12:47:28.229+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-ad9346c5: 9 virtual player(s) joined (fake search 18) (10/10)
+2026-09-20T12:47:28.230+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-ad9346c5 is full (10/10, 9 virtual): looking for a free competitive server
+2026-09-20T12:47:28.230+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-ad9346c5 is full but no free competitive server runs one of [de_dust2]: it waits for one
+]]></system-out>
+  </testcase>
+  <testcase name="theTimeoutSendsEveryPlayerBackToTheQueueEvenTheOneWhoAccepted" classname="dev.csgogc.mm.AcceptLifecycleTest" time="0.068">
+    <system-out><![CDATA[2026-09-20T12:47:28.244+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.server.GameServerService   : game server added: 192.168.1.150:27018 wingman map='de_lake' enabled=true state=AVAILABLE
+2026-09-20T12:47:28.249+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : fake search 19 added: 2 virtual wingman player(s) maps=[] enabled=true
+2026-09-20T12:47:28.252+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : search started: account=1 mode=wingman maps=[de_lake] game_type=10 source=gc
+2026-09-20T12:47:28.253+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-5a555ebe created: wingman gathering 4 player(s), no server yet
+2026-09-20T12:47:28.255+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-5a555ebe: account 1 joined (1/4)
+2026-09-20T12:47:28.256+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-5a555ebe: 2 virtual player(s) joined (fake search 19) (3/4)
+2026-09-20T12:47:28.260+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : search started: account=2 mode=wingman maps=[de_lake] game_type=10 source=gc
+2026-09-20T12:47:28.262+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-5a555ebe is full (4/4, 2 virtual): looking for a free wingman server
+2026-09-20T12:47:28.264+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-5a555ebe: server 192.168.1.150:27018 map=de_lake is RESERVED
+2026-09-20T12:47:28.267+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-5a555ebe is ACCEPTING: 2 player(s) have until 2026-01-01T12:05:59Z (PT25S)
+2026-09-20T12:47:28.267+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-5a555ebe complete (4/4, 2 virtual): WAITING_ACCEPT -> 192.168.1.150:27018 map=de_lake
+2026-09-20T12:47:28.271+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-5a555ebe: account 1 accepted, the others are still to accept
+2026-09-20T12:47:28.278+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-5a555ebe cancelled (accept timeout, the players did not all accept within PT25S): 2 player(s) search again, server 192.168.1.150:27018 is AVAILABLE again
+2026-09-20T12:47:28.281+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-65649b95 created: wingman gathering 4 player(s), no server yet
+2026-09-20T12:47:28.282+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-65649b95: account 1 joined (1/4)
+2026-09-20T12:47:28.285+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-65649b95: account 2 joined (2/4)
+2026-09-20T12:47:28.287+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-65649b95: 2 virtual player(s) joined (fake search 19) (4/4)
+2026-09-20T12:47:28.288+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-65649b95 is full (4/4, 2 virtual): looking for a free wingman server
+2026-09-20T12:47:28.288+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-65649b95 is full but no free wingman server runs one of [de_lake]: it waits for one
+]]></system-out>
+  </testcase>
+  <testcase name="tenOfTenReservesTheServer" classname="dev.csgogc.mm.AcceptLifecycleTest" time="0.037">
+    <system-out><![CDATA[2026-09-20T12:47:28.311+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.server.GameServerService   : game server added: 192.168.1.150:27017 competitive map='de_dust2' enabled=true state=AVAILABLE
+2026-09-20T12:47:28.314+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : fake search 20 added: 8 virtual competitive player(s) maps=[de_dust2] enabled=true
+2026-09-20T12:47:28.318+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : search started: account=1050166997 mode=competitive maps=[de_dust2] game_type=8 source=gc
+2026-09-20T12:47:28.319+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-0e8bb5f1 created: competitive gathering 10 player(s), no server yet
+2026-09-20T12:47:28.320+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-0e8bb5f1: account 1050166997 joined (1/10)
+2026-09-20T12:47:28.321+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-0e8bb5f1: 8 virtual player(s) joined (fake search 20) (9/10)
+2026-09-20T12:47:28.326+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : fake search 21 added: 1 virtual competitive player(s) maps=[de_dust2] enabled=true
+2026-09-20T12:47:28.328+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-0e8bb5f1: 1 virtual player(s) joined (fake search 21) (10/10)
+2026-09-20T12:47:28.329+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-0e8bb5f1 is full (10/10, 9 virtual): looking for a free competitive server
+2026-09-20T12:47:28.331+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-0e8bb5f1: server 192.168.1.150:27017 map=de_dust2 is RESERVED
+2026-09-20T12:47:28.333+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-0e8bb5f1 is ACCEPTING: 1 player(s) have until 2026-01-01T12:06:25Z (PT25S)
+2026-09-20T12:47:28.333+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-0e8bb5f1 complete (10/10, 9 virtual): WAITING_ACCEPT -> 192.168.1.150:27017 map=de_dust2
+]]></system-out>
+  </testcase>
+  <testcase name="twoFullMatchesNeverGetTheSameServer" classname="dev.csgogc.mm.AcceptLifecycleTest" time="0.101">
+    <system-out><![CDATA[2026-09-20T12:47:28.349+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.server.GameServerService   : game server added: 192.168.1.150:27018 wingman map='de_lake' enabled=true state=AVAILABLE
+2026-09-20T12:47:28.352+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : fake search 22 added: 3 virtual wingman player(s) maps=[] enabled=true
+2026-09-20T12:47:28.356+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : fake search 23 added: 3 virtual wingman player(s) maps=[] enabled=true
+2026-09-20T12:47:28.359+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : search started: account=1 mode=wingman maps=[de_lake] game_type=10 source=gc
+2026-09-20T12:47:28.361+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-801e053d created: wingman gathering 4 player(s), no server yet
+2026-09-20T12:47:28.362+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-801e053d: account 1 joined (1/4)
+2026-09-20T12:47:28.364+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-801e053d: 3 virtual player(s) joined (fake search 22) (4/4)
+2026-09-20T12:47:28.365+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-801e053d is full (4/4, 3 virtual): looking for a free wingman server
+2026-09-20T12:47:28.367+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-801e053d: server 192.168.1.150:27018 map=de_lake is RESERVED
+2026-09-20T12:47:28.395+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-801e053d is ACCEPTING: 1 player(s) have until 2026-01-01T12:06:25Z (PT25S)
+2026-09-20T12:47:28.395+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-801e053d complete (4/4, 3 virtual): WAITING_ACCEPT -> 192.168.1.150:27018 map=de_lake
+2026-09-20T12:47:28.412+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : search started: account=2 mode=wingman maps=[de_lake] game_type=10 source=gc
+2026-09-20T12:47:28.415+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-7c87afb8 created: wingman gathering 4 player(s), no server yet
+2026-09-20T12:47:28.417+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-7c87afb8: account 2 joined (1/4)
+2026-09-20T12:47:28.420+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-7c87afb8: 3 virtual player(s) joined (fake search 23) (4/4)
+2026-09-20T12:47:28.421+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-7c87afb8 is full (4/4, 3 virtual): looking for a free wingman server
+2026-09-20T12:47:28.421+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-7c87afb8 is full but no free wingman server runs one of [de_lake]: it waits for one
+2026-09-20T12:47:28.433+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.server.GameServerService   : game server added: 192.168.1.150:27019 wingman map='de_lake' enabled=true state=AVAILABLE
+2026-09-20T12:47:28.435+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-7c87afb8: server 192.168.1.150:27019 map=de_lake is RESERVED
+2026-09-20T12:47:28.436+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-7c87afb8 is ACCEPTING: 1 player(s) have until 2026-01-01T12:06:25Z (PT25S)
+2026-09-20T12:47:28.436+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-7c87afb8 complete (4/4, 3 virtual): WAITING_ACCEPT -> 192.168.1.150:27019 map=de_lake
+]]></system-out>
+  </testcase>
+  <testcase name="theGameServerSeesTheRosterUntilTheMatchIsCancelled" classname="dev.csgogc.mm.AcceptLifecycleTest" time="0.059">
+    <system-out><![CDATA[2026-09-20T12:47:28.454+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.server.GameServerService   : game server added: 192.168.1.150:27017 competitive map='de_dust2' enabled=true state=AVAILABLE
+2026-09-20T12:47:28.457+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : fake search 24 added: 9 virtual competitive player(s) maps=[de_dust2] enabled=true
+2026-09-20T12:47:28.463+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : search started: account=1050166997 mode=competitive maps=[de_dust2] game_type=8 source=gc
+2026-09-20T12:47:28.465+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-29906ad5 created: competitive gathering 10 player(s), no server yet
+2026-09-20T12:47:28.467+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-29906ad5: account 1050166997 joined (1/10)
+2026-09-20T12:47:28.468+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-29906ad5: 9 virtual player(s) joined (fake search 24) (10/10)
+2026-09-20T12:47:28.469+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-29906ad5 is full (10/10, 9 virtual): looking for a free competitive server
+2026-09-20T12:47:28.472+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-29906ad5: server 192.168.1.150:27017 map=de_dust2 is RESERVED
+2026-09-20T12:47:28.472+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-29906ad5 complete (10/10, 9 virtual) on 192.168.1.150:27017: waiting for the game server to arm the roster
+2026-09-20T12:47:28.479+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-29906ad5 is ACCEPTING: 1 player(s) have until 2026-01-01T12:06:25Z (PT25S)
+2026-09-20T12:47:28.479+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-29906ad5: game server 192.168.1.150:27017 armed the roster, 1 player(s) get the server
+2026-09-20T12:47:28.490+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-29906ad5 cancelled (accept timeout, the players did not all accept within PT25S): 1 player(s) search again, server 192.168.1.150:27017 is AVAILABLE again
+2026-09-20T12:47:28.491+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-91584fe5 created: competitive gathering 10 player(s), no server yet
+2026-09-20T12:47:28.493+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-91584fe5: account 1050166997 joined (1/10)
+2026-09-20T12:47:28.495+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-91584fe5: 9 virtual player(s) joined (fake search 24) (10/10)
+2026-09-20T12:47:28.496+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-91584fe5 is full (10/10, 9 virtual): looking for a free competitive server
+2026-09-20T12:47:28.497+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-91584fe5 is full but no free competitive server runs one of [de_dust2]: it waits for one
+]]></system-out>
+  </testcase>
+  <testcase name="theAcceptedEndpointNeedsTheApiKeyAndAValidBody" classname="dev.csgogc.mm.AcceptLifecycleTest" time="0.024"/>
+  <testcase name="everybodyAcceptedMakesTheMatchAccepted" classname="dev.csgogc.mm.AcceptLifecycleTest" time="0.045">
+    <system-out><![CDATA[2026-09-20T12:47:28.535+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.server.GameServerService   : game server added: 192.168.1.150:27017 competitive map='de_dust2' enabled=true state=AVAILABLE
+2026-09-20T12:47:28.538+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : fake search 25 added: 9 virtual competitive player(s) maps=[de_dust2] enabled=true
+2026-09-20T12:47:28.542+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : search started: account=1050166997 mode=competitive maps=[de_dust2] game_type=8 source=gc
+2026-09-20T12:47:28.543+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-7c5cb347 created: competitive gathering 10 player(s), no server yet
+2026-09-20T12:47:28.544+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-7c5cb347: account 1050166997 joined (1/10)
+2026-09-20T12:47:28.546+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-7c5cb347: 9 virtual player(s) joined (fake search 25) (10/10)
+2026-09-20T12:47:28.547+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-7c5cb347 is full (10/10, 9 virtual): looking for a free competitive server
+2026-09-20T12:47:28.548+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-7c5cb347: server 192.168.1.150:27017 map=de_dust2 is RESERVED
+2026-09-20T12:47:28.551+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-7c5cb347 is ACCEPTING: 1 player(s) have until 2026-01-01T12:06:51Z (PT25S)
+2026-09-20T12:47:28.551+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-7c5cb347 complete (10/10, 9 virtual): WAITING_ACCEPT -> 192.168.1.150:27017 map=de_dust2
+2026-09-20T12:47:28.556+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-7c5cb347: everybody accepted, ACCEPTED (last: account 1050166997)
+]]></system-out>
+  </testcase>
+  <testcase name="aSearchAfterTheTimeoutMakesANewMatchOnTheFreedServer" classname="dev.csgogc.mm.AcceptLifecycleTest" time="0.06">
+    <system-out><![CDATA[2026-09-20T12:47:28.585+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.server.GameServerService   : game server added: 192.168.1.150:27017 competitive map='de_dust2' enabled=true state=AVAILABLE
+2026-09-20T12:47:28.588+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : fake search 26 added: 9 virtual competitive player(s) maps=[de_dust2] enabled=true
+2026-09-20T12:47:28.592+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : search started: account=1050166997 mode=competitive maps=[de_dust2] game_type=8 source=gc
+2026-09-20T12:47:28.594+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-426cf9a1 created: competitive gathering 10 player(s), no server yet
+2026-09-20T12:47:28.596+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-426cf9a1: account 1050166997 joined (1/10)
+2026-09-20T12:47:28.597+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-426cf9a1: 9 virtual player(s) joined (fake search 26) (10/10)
+2026-09-20T12:47:28.598+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-426cf9a1 is full (10/10, 9 virtual): looking for a free competitive server
+2026-09-20T12:47:28.599+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-426cf9a1: server 192.168.1.150:27017 map=de_dust2 is RESERVED
+2026-09-20T12:47:28.602+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-426cf9a1 is ACCEPTING: 1 player(s) have until 2026-01-01T12:07:51Z (PT25S)
+2026-09-20T12:47:28.602+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-426cf9a1 complete (10/10, 9 virtual): WAITING_ACCEPT -> 192.168.1.150:27017 map=de_dust2
+2026-09-20T12:47:28.608+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-426cf9a1 cancelled (accept timeout, the players did not all accept within PT25S): 1 player(s) search again, server 192.168.1.150:27017 is AVAILABLE again
+2026-09-20T12:47:28.610+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-b5b15133 created: competitive gathering 10 player(s), no server yet
+2026-09-20T12:47:28.611+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-b5b15133: account 1050166997 joined (1/10)
+2026-09-20T12:47:28.613+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-b5b15133: 9 virtual player(s) joined (fake search 26) (10/10)
+2026-09-20T12:47:28.614+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-b5b15133 is full (10/10, 9 virtual): looking for a free competitive server
+2026-09-20T12:47:28.614+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-b5b15133 is full but no free competitive server runs one of [de_dust2]: it waits for one
+2026-09-20T12:47:28.623+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-b5b15133: server 192.168.1.150:27017 map=de_dust2 is RESERVED
+2026-09-20T12:47:28.625+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-b5b15133 is ACCEPTING: 1 player(s) have until 2026-01-01T12:08:32Z (PT25S)
+2026-09-20T12:47:28.625+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-b5b15133 complete (10/10, 9 virtual): WAITING_ACCEPT -> 192.168.1.150:27017 map=de_dust2
+2026-09-20T12:47:28.632+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-b5b15133: everybody accepted, ACCEPTED (last: account 1050166997)
+]]></system-out>
+  </testcase>
+  <testcase name="nineOfTenDoesNotReserveAServer" classname="dev.csgogc.mm.AcceptLifecycleTest" time="0.025">
+    <system-out><![CDATA[2026-09-20T12:47:28.644+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.server.GameServerService   : game server added: 192.168.1.150:27017 competitive map='de_dust2' enabled=true state=AVAILABLE
+2026-09-20T12:47:28.648+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : fake search 27 added: 8 virtual competitive player(s) maps=[de_dust2] enabled=true
+2026-09-20T12:47:28.651+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : search started: account=1050166997 mode=competitive maps=[de_dust2] game_type=8 source=gc
+2026-09-20T12:47:28.653+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-a168ecca created: competitive gathering 10 player(s), no server yet
+2026-09-20T12:47:28.655+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-a168ecca: account 1050166997 joined (1/10)
+2026-09-20T12:47:28.656+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-a168ecca: 8 virtual player(s) joined (fake search 27) (9/10)
+]]></system-out>
+  </testcase>
+  <testcase name="aPlayerWhoLeavesAfterAcceptingDoesNotCancelTheMatch" classname="dev.csgogc.mm.AcceptLifecycleTest" time="0.05">
+    <system-out><![CDATA[2026-09-20T12:47:28.668+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.server.GameServerService   : game server added: 192.168.1.150:27018 wingman map='de_lake' enabled=true state=AVAILABLE
+2026-09-20T12:47:28.671+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : fake search 28 added: 2 virtual wingman player(s) maps=[] enabled=true
+2026-09-20T12:47:28.674+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : search started: account=1 mode=wingman maps=[de_lake] game_type=10 source=gc
+2026-09-20T12:47:28.675+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-c1f95d16 created: wingman gathering 4 player(s), no server yet
+2026-09-20T12:47:28.676+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-c1f95d16: account 1 joined (1/4)
+2026-09-20T12:47:28.678+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-c1f95d16: 2 virtual player(s) joined (fake search 28) (3/4)
+2026-09-20T12:47:28.682+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : search started: account=2 mode=wingman maps=[de_lake] game_type=10 source=gc
+2026-09-20T12:47:28.684+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-c1f95d16 is full (4/4, 2 virtual): looking for a free wingman server
+2026-09-20T12:47:28.685+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-c1f95d16: server 192.168.1.150:27018 map=de_lake is RESERVED
+2026-09-20T12:47:28.688+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-c1f95d16 is ACCEPTING: 2 player(s) have until 2026-01-01T12:08:32Z (PT25S)
+2026-09-20T12:47:28.688+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-c1f95d16 complete (4/4, 2 virtual): WAITING_ACCEPT -> 192.168.1.150:27018 map=de_lake
+2026-09-20T12:47:28.691+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-c1f95d16: account 1 accepted, the others are still to accept
+2026-09-20T12:47:28.695+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : search cancelled: account=1
+2026-09-20T12:47:28.701+04:00  INFO 3832 --- [matchmaking-backend] [           main] dev.csgogc.mm.search.SearchService       : match m-c1f95d16: everybody accepted, ACCEPTED (last: account 2)
+]]></system-out>
+  </testcase>
+</testsuite>

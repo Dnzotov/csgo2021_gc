@@ -1,0 +1,15 @@
+dev\csgogc\mm\BackendTestBase$ClockConfig.class
+dev\csgogc\mm\MapGroupMatchingTest.class
+dev\csgogc\mm\FakePlayersIntegrationTest.class
+dev\csgogc\mm\BackendIntegrationTest$ClockConfig.class
+dev\csgogc\mm\BackendIntegrationTest$MutableClock.class
+dev\csgogc\mm\MatchmakingIntegrationTest$MutableClock.class
+dev\csgogc\mm\BackendDrivenRosterTest.class
+dev\csgogc\mm\AcceptLifecycleTest.class
+dev\csgogc\mm\BackendTestBase$MutableClock.class
+dev\csgogc\mm\BackendIntegrationTest.class
+dev\csgogc\mm\MatchmakingIntegrationTest.class
+dev\csgogc\mm\BackendTestBase.class
+dev\csgogc\mm\MatchmakingIntegrationTest$ClockConfig.class
+dev\csgogc\mm\FakePlayersDisabledTest.class
+dev\csgogc\mm\config\SchemaMigrationTest.class
