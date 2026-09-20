@@ -401,6 +401,14 @@ bool ServerGC::StartAcceptTestRoster()
         mode->name, mode->requiredPlayers, mode->serverGameType, mode->serverGameMode, mode->serverMaxPlayers,
         config.DedicatedServerPort());
 
+    // -ip/-port is where the game server listens; the backend may know it under another address (-backend_ip/-backend_port)
+    if (config.BackendServerAddress() != config.DedicatedServerAddress() || config.BackendServerPort() != config.DedicatedServerPort())
+    {
+        Platform::Print("[MM-ACCEPT] game server listens on %s:%u, the backend roster is asked for %s:%u (-backend_ip/-backend_port)\n",
+            config.DedicatedServerAddress().c_str(), config.DedicatedServerPort(), config.BackendServerAddress().c_str(),
+            config.BackendServerPort());
+    }
+
     // learn it from the first 0x21 of the real client; its retries (every ~1 s for the reservation timeout) succeed
     // as soon as the roster is armed
     m_testWaitingForPlayer = true;
@@ -434,7 +442,7 @@ bool ServerGC::StartAcceptTestRoster()
 
     if (BackendClient::Enabled() && !m_rosterPoller)
     {
-        m_rosterPoller = std::make_unique<RosterFeed::Poller>(config.DedicatedServerAddress(), config.DedicatedServerPort(),
+        m_rosterPoller = std::make_unique<RosterFeed::Poller>(config.BackendServerAddress(), config.BackendServerPort(),
             [this](const RosterFeed::Snapshot &snapshot)
             {
                 const std::string text = RosterFeed::Serialize(snapshot);
@@ -507,6 +515,18 @@ void ServerGC::OnTestRealPlayerSeen(uint32_t accountId)
         return;
     }
 
+    if (m_rosterPoller && m_rosterController && !m_rosterController->HasSnapshot())
+    {
+        // A fresh srcds: the first 0x21 is here before the backend answered its first roster poll. Arming the legacy roster now
+        // would give this match ONE real player (whoever sent the first 0x21) and drop the others, and the backend's roster would
+        // then replace it after a 12 s unreserve: no popup on the first search, a normal one on the second (RESEARCH_FINDINGS.md
+        // #66). Wait for the answer (OnBackendRoster decides).
+        m_testPendingSniff = accountId;
+        Platform::Print("[MM-ACCEPT] real player %u sent 0x21 before the backend answered the first roster poll: waiting for it\n",
+            accountId);
+        return;
+    }
+
     Platform::Print("[MM-ACCEPT] real player detected from its 0x21: AccountID %u, arming the roster\n", accountId);
     m_testWaitingForPlayer = false;
     m_testRealAccountId = accountId;
@@ -528,6 +548,15 @@ void ServerGC::OnBackendRoster(const std::string &text)
     if (m_rosterController)
     {
         m_rosterController->OnSnapshot(snapshot);
+    }
+
+    // a player whose 0x21 came before the first answer: the backend's roster is in charge now, or (no match for it / backend
+    // down) the legacy roster is armed for him after all
+    if (m_testPendingSniff && !m_testRoster)
+    {
+        const uint32_t pending = m_testPendingSniff;
+        m_testPendingSniff = 0;
+        OnTestRealPlayerSeen(pending);
     }
 }
 

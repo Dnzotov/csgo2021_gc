@@ -67,10 +67,11 @@ $env:BACKEND_API_KEY        = '...'
 | `backend.accept-timeout` | … | `PT25S` | Accept-режимы: сколько у игроков полного матча на Accept с момента, когда они получили сервер (retail popup 20 с + время до его появления). Потом матч `CANCELLED` |
 | `backend.server-release-cooldown` | … | `PT15S` | сервер, освобождённый из отменённого Accept-матча, не выдаётся столько (srcds снимает резервацию, fake-драйверу нужно 12 с) |
 | `backend.assigned-search-timeout` | … | `PT2M` | назначенная заявка (WAITING_ACCEPT / READY_TO_CONNECT) через это время → Completed |
-| `backend.required-players.<mode>` | … | competitive 10, wingman 4, dangerzone 16 | сколько игроков собирает матч Accept-режима. **Только тестовая среда:** пока недостающих участников даёт тестовый ростер srcds (`-gc_mode`) и нет fake-поисков backend, ставят `1`. С fake-поисками (панель → Fake Players) значение не нужно: игроков до 10/4/16 добирают виртуальные участники |
+| `backend.required-players.<mode>` | … | competitive 10, wingman 4, dangerzone 16 | сколько игроков собирает матч Accept-режима. **Только тестовая среда:** пока недостающих участников даёт тестовый ростер srcds (`-gc_mode`) и нет fake-поисков backend, ставят `1`. С профилями Fake Players (панель) значение не нужно: число виртуальных игроков задаёт профиль, capacity режима остаётся 10/4/16 |
 | `backend.roster-ack-timeout` | … | `PT25S` | Accept-матч на сервере, который сам читает ростер у backend (srcds новой сборки), отдаётся игрокам только после подтверждения «ростер взведён»; если подтверждения нет столько времени — игроки получают сервер всё равно |
 | `backend.roster-poll-window` | … | `PT10S` | сервер, спрашивавший ростер не позже этого времени назад, считается «читающим ростер с backend» (старый srcds с локальным fake-драйвером ничего не спрашивает — его игроков никто не держит) |
 | `backend.fake-players.enabled` | `BACKEND_FAKE_PLAYERS_ENABLED` | `true` | тестовый инструмент «Fake Players»; `false` (production) — API отвечает `409`, matcher fake-поиски не смотрит |
+| `backend.fake-players.gather-window` | `BACKEND_FAKE_PLAYERS_GATHER_WINDOW` | `PT10S` | сколько собирающийся матч ждёт **других реальных игроков**, прежде чем определится число fake (значение, сохранённое в панели, важнее); отсчёт — от входа последнего реального игрока (или партии). Без окна первый игрок сразу получал полный матч (1 + 9 fake), а все, кто нажал Play через несколько секунд, оставались без матча (§66). `PT0S` — решать сразу (тест с одним игроком). Реальным игрокам стоит нажимать Play в пределах окна друг от друга |
 | `backend.login.max-failures` / `failure-window` / `lock-duration` | … | `5` / `PT5M` / `PT5M` | блокировка формы входа по IP после неудачных попыток |
 | `server.servlet.session.timeout` | … | `30m` | срок админ-сессии |
 | `server.servlet.session.cookie.secure` | … | `false` | `true`, если панель отдаётся по HTTPS |
@@ -151,18 +152,40 @@ Accept / подключения и «искать снова» — обычны�
 `players` — состав матча: реальные игроки и виртуальные (`fake: true`, id `0xFA4E0000 + n`, n = порядок вступления; та же схема, что у
 тестового ростера srcds). Старый GC поле игнорирует.
 
-### Fake Players (тестовый инструмент, RESEARCH_FINDINGS.md §54)
+### Fake Players (тестовый инструмент, RESEARCH_FINDINGS.md §54, §67)
 
-Админ-панель → **Fake Players**: группа виртуальных игроков (режим Competitive / Wingman / Danger Zone, число игроков, карты или «любая»),
-которая **добирает матч, начатый настоящим игроком**. Fake-поиск сам матч не открывает и сервер не занимает; пока нет включённых
-fake-поисков, поведение backend не меняется. Присоединяется к `FORMING` матчу, если категория та же, `server.map` входит в карты fake-поиска
-(пусто = любая) и игроков хватает («влезает»); несколько fake-поисков складываются. Статусы: `SEARCHING` → `MATCHED` (в матче; в панели
-виден матч и сервер) → `COMPLETED` (матч закончился; **Start** ставит заново); `STOPPED` — выключен (Stop search). Остановка выходит из ещё
-собирающегося матча. Максимум на один fake-поиск — `required − 1` (9 / 3 / 15). Состав матча (реальные + fake) видно во вкладке Matches,
-для srcds — `GET /api/v1/servers/roster?address=&port=`.
+Админ-панель → **Fake Players** управляет наполнением подбора виртуальными игроками. Это **профили**, а не очередь:
+профиль режима говорит, **сколько** fake-игроков получит матч этого режима. Настройки хранятся в SQLite и меняются из панели,
+действуют на **следующий** матч, у которого fake определяются (уже решённый матч свой состав не меняет).
 
-**Ростер с backend на srcds (§55).** srcds с `-gc_mode` раз в секунду спрашивает этот эндпоинт (адрес и порт — его `-ip`/`-port`, они должны
-совпадать с записью в Game Servers). Когда матч на его сервере `READY` и в нём ровно столько участников, сколько игроков у режима (10 / 4 / 16),
+Два разных вопроса:
+
+* **Кто в матче** — `gather-window` (панель → «Gather window», иначе `backend.fake-players.gather-window`, по умолчанию 10 с). Реальные игроки
+  (и party) одного режима, нажавшие Play в пределах окна, попадают в один собирающийся матч (`MATCHED`, без сервера, без Match Found);
+  каждый вошедший перезапускает окно.
+* **Сколько fake** — профиль. Когда окно закончилось, берётся включённый профиль режима с наибольшим приоритетом (при равенстве — старейший), у
+  которого карты совместимы с матчем и (если задан) есть свободный/существующий привязанный сервер. Матч получает
+  `effectiveFake = min(count профиля, capacity − real)`. `capacity` режима (Competitive 10, Wingman 4, Danger Zone 16) не меняется и до него
+  **не добирается**: 3 real + count 2 = матч из 5 (ростер srcds из 5), 3 real + count 7 = 10, 8 real + count 7 = 8 + 2 = 10 (лишние не используются,
+  лог: «the rest is not used»). Count `0` — матч стартует только с реальными игроками после окна.
+
+Поля профиля: режим, включён (ON/OFF), число fake (0…capacity−1), карты (пусто = любая; профиль ограничивает и карты матча, и сервер: играть можно
+только на сервере с картой из пересечения карт игроков и профиля), сервер (необязательно: тогда матчи профиля идут только на нём),
+приоритет. Профили складываются **не** суммой — выбирается один. Общий выключатель **Fake Players ON/OFF** (панель) и «нет включённого
+профиля режима / нет подходящего по картам» означают обычный matchmaking: матч ждёт реальных игроков, fake не добавляются.
+Виртуальные игроки Accept'а не имеют: матч ждёт каждого **реального** игрока (`match.real_players` / `match.accepted_players`).
+Профиль сам матч не открывает и сервер не занимает.
+
+API (админ-сессия + CSRF): `GET /admin/api/fake-searches` (`enabled` — инструмент включён на backend, `master`, `gather_window_seconds`,
+`fake_searches[]` с `matches[]` — живые матчи, использующие профиль), `POST` / `PUT /admin/api/fake-searches[/{id}]`
+(`mode`, `players`, `maps`, `enabled`, `priority`, `server_id`), `POST /{id}/enabled`, `DELETE /{id}`, `PUT /admin/api/fake-settings`
+(`master`, `gather_window_seconds` 0…600). Состав матча (реальные + fake) видно во вкладке Matches, для srcds —
+`GET /api/v1/servers/roster?address=&port=` (`required_players` там — размер ростера = real + fake, `capacity` — в `match.required_players` поиска).
+
+**Ростер с backend на srcds (§55).** srcds с `-gc_mode` раз в секунду спрашивает этот эндпоинт (адрес и порт — то, под чем сервер записан в Game Servers:
+`-backend_ip`/`-backend_port` в командной строке srcds, а без них его `-ip`/`-port`; игровой сокет всегда `-ip`/`-port`, `-backend_*` влияют только на
+этот запрос и на `roster/ready`. Например `srcds.exe ... -ip 192.168.1.150 -port 27016 -backend_ip 146.158.123.140 -backend_port 27016 -gc_mode competitive`,
+если сервер в панели записан как `146.158.123.140:27016`; при несовпадении эндпоинт отвечает 404 и srcds остаётся на legacy-ростере). Когда матч на его сервере `READY` (режим srcds, есть реальный игрок; размер любой: число fake задаёт профиль, §67),
 srcds взводит резервацию именно с этим составом (настоящие AccountID и fake-id backend'а), доводит fake-участников до stage 1 и
 шлёт `POST /api/v1/servers/roster/ready {address, port, match_id}`. **До этого подтверждения игрок остаётся `MATCHED`** (матч 10/10, `awaiting_server`)
 и не получает `assignment` — поэтому первая же проверка резервации у клиента даёт `awaiting=0`. Для сервера, который ростер не спрашивает
@@ -200,6 +223,8 @@ srcds — этап C/D (см. RESEARCH_FINDINGS.md §49).
 | `POST /api/v1/matchmaking/search` | `X-Api-Key` | игрок начал поиск |
 | `GET /api/v1/matchmaking/search/{request_id}` | `X-Api-Key` или сессия админа | состояние поиска + `assignment`; **GC опрашивает раз в секунду**, это же продлевает поиск (heartbeat); 404 — backend такого поиска не знает |
 | `POST /api/v1/matchmaking/cancel` | `X-Api-Key` | игрок отменил поиск |
+| `POST /api/v1/matchmaking/accepted` | `X-Api-Key` | GC игрока: srcds сообщил «все на stage 2»; `ACCEPTED` наступает, когда отчитались **все** реальные игроки матча; GC подключает игрока только после этого |
+| `GET /api/v1/matchmaking/account/{account_id}` | `X-Api-Key` | GC участника party находит поиск, который создал лидер (`party_leader_id`, `request_id`, `mode`, `game_type`); 404 — поиска нет |
 | `GET /api/v1/servers/roster?address=&port=` | `X-Api-Key` | состав ближайшего `FORMING`/`READY` матча на зарегистрированном сервере (`players[]` с `fake`), 404 если матча нет; канал для srcds (§54) |
 | `POST /api/v1/servers/state` | `X-Api-Key` | сервер сообщает о себе: `{"address","port","map"?,"state"?}` (state `AVAILABLE`/`BUSY`); только зарегистрированные серверы, `AVAILABLE` не снимает RESERVED |
 | `GET /api/v1/matchmaking/searches[?include_finished=true]` | `X-Api-Key` или сессия админа | список заявок (его же читает панель) |
@@ -342,3 +367,26 @@ java-backend/
   `NoDefaultCurrentDirectoryInExePath` — вызывайте скрипты по полному пути (`build.cmd`/`run.cmd` это уже делают).
 * **`Admin credentials are not configured`** — задайте логин и пароль (см. «Быстрый старт»).
 * **Порт занят** — `run.cmd --server.port=9090`.
+
+## Party: несколько реальных игроков в одном матче (RESEARCH_FINDINGS.md §65)
+
+`MatchmakingStart.account_ids` лидера лобби содержит **всех** участников лобби; клиенты остальных участников поиск не шлют.
+GC лидера передаёт остальных в `POST /matchmaking/search` как `"party_account_ids": [..]`. Backend:
+
+* создаёт участнику поиск (тот же режим/карты, `party_leader_id` = поиск лидера, `request_id` = `pt<id строки>`) и размещает **всю
+  партию в один матч** (нужно место на всех, fake добирают остаток);
+* все участники получают assignment, попадают в ростер srcds и должны принять; `ACCEPTED` — только когда приняли все;
+* GC участника раз в секунду (пока нет своего поиска) спрашивает `GET /matchmaking/account/{id}`, находит поиск и ведёт его как
+  свой: собственный 9107 и Match Found;
+* отмена лидера до его Accept снимает всю партию; Stop лидера после Accept (подключение) остальных не трогает.
+
+Fake-заявка — пул: партия из двух реальных игроков в Competitive добирается 8 из пула 9 (после `gather-window`), отдельной заявки «на 8» не нужно (§66).
+
+## Несколько реальных игроков (не в party), RESEARCH_FINDINGS.md §66
+
+Игроки, которые ищут по отдельности, попадают в один матч, пока он собирается (`MATCHED`, без сервера): каждому — свой поиск и своё
+assignment, все в ростре srcds, `ACCEPTED` только когда приняли все реальные. Прогресс виден в ответе поиска:
+`match.real_players` / `match.accepted_players` (пока `accepted_players < real_players`, никто не подключается). В логе backend на каждый матч:
+кто вошёл, кто получил Match Found (`fetched the server data`), кто принял; при таймауте Accept — «accepted 1/3: account 7 accepted,
+account 8 got Match Found but did not accept, account 9 never fetched the server data». `backend.required-players.<mode>=1` для игры
+несколькими людьми **не использовать**: каждый игрок получил бы свой матч и свой сервер (стартовая проверка пишет WARN).

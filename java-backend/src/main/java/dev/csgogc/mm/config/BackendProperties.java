@@ -60,7 +60,15 @@ public record BackendProperties(
      * {@code backend.fake-players.enabled=false} switches the whole tool off (production): the panel section is inert,
      * the API refuses new fake searches and the matcher never looks at them.
      */
-    public record FakePlayers(@DefaultValue("true") boolean enabled) {
+    public record FakePlayers(
+            @DefaultValue("true") boolean enabled,
+            /**
+             * How long a forming match waits for more REAL players before the fake players fill what is missing. It runs from
+             * the moment the last real player (or party) joined the match. Without it the first real player would be given a
+             * complete match at once and everybody who presses Play a few seconds later would be left without one
+             * (RESEARCH_FINDINGS.md #66). 0 = fill at once (a single-player test setup).
+             */
+            @DefaultValue("PT10S") Duration gatherWindow) {
     }
 
     public record Admin(@DefaultValue("") String username, @DefaultValue("") String password) {

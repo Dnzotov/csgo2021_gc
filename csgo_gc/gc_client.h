@@ -32,7 +32,9 @@ private:
     void OnMatchmakingStart(GCMessageRead &messageRead);
     void OnMatchmakingStop();
     void OnBackendSearchResult(const std::vector<uint8_t> &buffer);
-    void StartServerFlow(const BackendClient::Assignment &assignment);
+    void StartServerFlow(const BackendClient::Assignment &assignment, bool alreadyAccepted = false);
+    void OnPartySearchDiscovered(const BackendClient::SearchResult &result);
+    void TryConnectAfterAccept();
     void OnReservationFullyAccepted();
     void WithdrawAccept(const std::string &reason);
     void EndAccept(const std::string &reason);
@@ -76,6 +78,10 @@ private:
         uint32_t eGame{};
         std::string map;
         std::string matchId; // the backend match whose Accept this is (the backend withdraws it when the deadline passes)
+        // Connecting needs BOTH (RESEARCH_FINDINGS.md #65): the game server says everybody is at stage 2 (0x25 awaiting 0) AND
+        // the backend says every real player accepted (the search is READY_TO_CONNECT). One player accepting early is not enough.
+        bool serverAccepted{};
+        bool backendAccepted{};
     };
 
     PendingAccept m_pendingAccept;
@@ -89,9 +95,14 @@ private:
         uint32_t eGame{};
         const MM::GameMode *mode{};
         std::string fallbackMap; // the map we would advertise if the assignment carried none
+        bool partyMember{};      // the search was sent by the lobby leader, this client only follows it
     };
 
     ActiveSearch m_activeSearch;
+
+    // The search this client follows was sent by the lobby leader (party member): it is not this client's to cancel while its
+    // Accept is running - a MatchmakingStop then is the client's own reaction to a lobby state it does not know (RESEARCH_FINDINGS.md #65)
+    bool m_followsParty{};
 
     const uint64_t m_steamId;
 

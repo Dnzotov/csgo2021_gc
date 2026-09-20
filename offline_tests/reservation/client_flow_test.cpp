@@ -7,6 +7,7 @@
 //   1. the engine rule (baseserver.cpp ConnectClient) as a model, replayed with the old and the new client flow;
 //   2. the call graph, checked on the real sources (copied to the build folder by build.bat): who may call
 //      ReserveServerForQueuedGame in which process kind, and that the flows that must keep it still do.
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
@@ -106,19 +107,21 @@ static std::string ReadFile(const char *path)
     std::ifstream in(path, std::ios::binary);
     std::stringstream ss;
     ss << in.rdbuf();
-    return ss.str();
+    std::string text = ss.str();
+    text.erase(std::remove(text.begin(), text.end(), '\r'), text.end());   // a checkout may have CRLF line ends
+    return text;
 }
 
 // the text of `void Class::name(...) { ... }` up to the closing brace at column 0
-static std::string FunctionBody(const std::string &source, const std::string &signature)
+static std::string FunctionBody(const std::string &source, const std::string &signature, const char *close = "\n}\n")
 {
     size_t start = source.find(signature);
     if (start == std::string::npos)
     {
         return {};
     }
-    size_t end = source.find("\n}\n", start);
-    return end == std::string::npos ? source.substr(start) : source.substr(start, end - start + 3);
+    size_t end = source.find(close, start);
+    return end == std::string::npos ? source.substr(start) : source.substr(start, end - start + std::string(close).size());
 }
 
 static bool Has(const std::string &text, const char *needle)
@@ -175,10 +178,115 @@ static void TestCallGraph()
     CHECK(roster != std::string::npos && dedicated != std::string::npos && roster < dedicated);
 }
 
+// ---- 3. Accept gating (RESEARCH_FINDINGS.md #65): nobody connects on his own accept ----------------------------------------
+static void TestAcceptGating()
+{
+    printf("accept gating\n");
+
+    const std::string client = ReadFile("gc_client.cpp.src");
+    const std::string backend = ReadFile("backend_client.cpp.src");
+    CHECK(!client.empty() && !backend.empty());
+
+    // the notification of the game server (0x25 stage 2 awaiting 0) only reports; it does not connect by itself
+    const std::string notified = StripLineComments(FunctionBody(client, "void ClientGC::OnReservationFullyAccepted()"));
+    CHECK(!notified.empty());
+    CHECK(Has(notified, "BackendClient::ReportAccepted()"));
+    CHECK(Has(notified, "TryConnectAfterAccept()"));
+    CHECK(!Has(notified, "SendMessageToGame"));
+    CHECK(!Has(notified, "MatchmakingGC2ClientReserve"));
+
+    // the connect (second 9107) needs BOTH: the game server and the backend
+    const std::string connect = StripLineComments(FunctionBody(client, "void ClientGC::TryConnectAfterAccept()"));
+    CHECK(!connect.empty());
+    CHECK(Has(connect, "!m_pendingAccept.serverAccepted || !m_pendingAccept.backendAccepted"));
+    CHECK(Has(connect, "MatchmakingGC2ClientReserve"));
+    // ... and it is the only place that sends it
+    size_t sends = 0;
+    for (size_t at = client.find("SetFinalAcceptGameType"); at != std::string::npos; at = client.find("SetFinalAcceptGameType", at + 1))
+    {
+        sends++;
+    }
+    CHECK(sends == 1);
+
+    // the backend's answer that every real player accepted is what completes the second condition
+    const std::string result = StripLineComments(FunctionBody(client, "void ClientGC::OnBackendSearchResult("));
+    CHECK(Has(result, "READY_TO_CONNECT"));
+    CHECK(Has(result, "backendAccepted = true"));
+
+    // the search keeps being polled after the report (the report must not stop it), the connect stops it
+    const std::string report = StripLineComments(FunctionBody(backend, "    void ReportAccepted()", "\n    }\n"));
+    CHECK(!report.empty());
+    CHECK(!Has(report, "Phase::Done"));
+
+    // a lobby leader reports the whole party, a member's GC follows the leader's search
+    const std::string start = StripLineComments(FunctionBody(client, "void ClientGC::OnMatchmakingStart("));
+    CHECK(Has(start, "partyAccountIds"));
+    CHECK(Has(StripLineComments(client), "BackendClient::WatchAccount("));
+    CHECK(Has(StripLineComments(FunctionBody(client, "void ClientGC::OnPartySearchDiscovered(")), "m_followsParty = true"));
+}
+
+// ---- 4. every player has to hear about the match and see who else is in it (RESEARCH_FINDINGS.md #66) ------------------------
+static void TestMatchFoundForEveryPlayer()
+{
+    printf("match found for every player\n");
+
+    const std::string client = ReadFile("gc_client.cpp.src");
+    const std::string backend = ReadFile("backend_client.cpp.src");
+    const std::string server = ReadFile("gc_server.cpp.src");
+    CHECK(!client.empty() && !backend.empty() && !server.empty());
+
+    // the 9107 of a client is built from the assignment ITS OWN GC got (nobody sends one for another player): the roster of
+    // the match is logged there, with a warning when the account is not in it
+    const std::string flow = StripLineComments(FunctionBody(client, "void ClientGC::StartServerFlow("));
+    CHECK(Has(flow, "assignment.realAccounts"));
+    CHECK(Has(flow, "NOT IN THE ROSTER"));
+    CHECK(Has(flow, "MatchmakingGC2ClientReserve"));
+    // the total the client expects from the game server is the roster of the backend's match (real + the configured fake players,
+    // RESEARCH_FINDINGS.md #67), not the capacity of the mode
+    CHECK(Has(flow, "assignment.requiredPlayers"));
+    CHECK(Has(flow, "AcceptTest::ArmClient(testServerIp, testServerPort, rosterSize)"));
+
+    // the progress of the accepts reaches the client and is logged on every change
+    const std::string result = StripLineComments(FunctionBody(client, "void ClientGC::OnBackendSearchResult("));
+    CHECK(Has(result, "matchAcceptedPlayers"));
+    CHECK(Has(result, "nobody connects before all of them did"));
+    CHECK(Has(backend, "accepted_players"));
+    CHECK(Has(backend, "real_accounts"));
+
+    // srcds: a real player's first 0x21 before the backend answered its first roster poll must not arm the one-real-player
+    // legacy roster (the first search would lose every player but one)
+    const std::string seen = StripLineComments(FunctionBody(server, "void ServerGC::OnTestRealPlayerSeen("));
+    CHECK(!seen.empty());
+    CHECK(Has(seen, "HasSnapshot()"));
+    CHECK(Has(seen, "m_testPendingSniff"));
+    size_t wait = seen.find("HasSnapshot()");
+    size_t legacy = seen.find("CreateTestRoster(");
+    CHECK(wait != std::string::npos && legacy != std::string::npos && wait < legacy);
+    const std::string roster = StripLineComments(FunctionBody(server, "void ServerGC::OnBackendRoster("));
+    CHECK(Has(roster, "m_testPendingSniff"));
+
+    // srcds -backend_ip/-backend_port: the roster poller identifies the game server to the backend by the backend address,
+    // while everything that talks to the game server itself (the fake participants) keeps -ip/-port
+    // (offline_tests/roster/launch_args_test.cpp runs the real Poller with what these getters resolve to)
+    const std::string start = StripLineComments(FunctionBody(server, "bool ServerGC::StartAcceptTestRoster("));
+    CHECK(!start.empty());
+    CHECK(Has(start, "RosterFeed::Poller>(config.BackendServerAddress(), config.BackendServerPort()"));
+    CHECK(!Has(start, "RosterFeed::Poller>(config.DedicatedServerAddress()"));
+    const std::string legacyRoster = StripLineComments(FunctionBody(server, "void ServerGC::CreateTestRoster("));
+    CHECK(Has(legacyRoster, "params.serverAddress = config.DedicatedServerAddress();"));
+    CHECK(Has(legacyRoster, "params.serverPort = config.DedicatedServerPort();"));
+    const std::string armed = StripLineComments(FunctionBody(server, "void ServerGC::ArmRoster("));
+    CHECK(Has(armed, "params.serverAddress = config.DedicatedServerAddress();"));
+    CHECK(Has(armed, "params.serverPort = config.DedicatedServerPort();"));
+    CHECK(!Has(armed, "BackendServer") && !Has(legacyRoster, "BackendServer"));
+}
+
 int main()
 {
     TestEngineModel();
     TestCallGraph();
+    TestAcceptGating();
+    TestMatchFoundForEveryPlayer();
 
     printf("\n%d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;

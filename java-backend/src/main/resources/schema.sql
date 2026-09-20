@@ -68,3 +68,9 @@ CREATE TABLE IF NOT EXISTS fake_search (
     matched_at  INTEGER
 );
 CREATE INDEX IF NOT EXISTS ix_fake_match ON fake_search (match_id);
+
+-- runtime settings edited from the admin panel (RESEARCH_FINDINGS.md #67): the Fake Players master switch, the gather window
+CREATE TABLE IF NOT EXISTS backend_setting (
+    key    TEXT PRIMARY KEY,
+    value  TEXT NOT NULL
+);

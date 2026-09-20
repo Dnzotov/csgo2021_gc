@@ -29,6 +29,10 @@ struct SearchInfo
     std::string gameMode;       // MM::GameMode::serverGameMode, e.g. "scrimcomp2v2"
     std::vector<std::string> maps; // decoded map selection, empty if the mode has none
 
+    // The other members of the lobby (MatchmakingStart.account_ids without our own): only the leader's client sends a search,
+    // the backend keeps one for every member and their GCs find it (WatchAccount), RESEARCH_FINDINGS.md #65
+    std::vector<uint32_t> partyAccountIds;
+
     // Skirmish (War Games) only: the client selects modes, not maps. One entry per selected mode with the maps of its
     // group; the backend serves each by the category that fits (armsrace / demolition / skirmish), RESEARCH_FINDINGS.md #54
     struct Variant
@@ -49,6 +53,12 @@ struct Assignment
     std::string map;
     bool acceptRequired{};
     uint32_t requiredPlayers{};
+
+    // Who is in the match (RESEARCH_FINDINGS.md #66): the real accounts, the same list the srcds arms as its roster. Every one
+    // of them has to get its own Match Found (its own GC's 9107) and accept; nobody connects before all of them did.
+    std::vector<uint32_t> realAccounts;
+    uint32_t realPlayers{};
+    uint32_t fakePlayers{};
 };
 
 struct SearchResult
@@ -60,8 +70,16 @@ struct SearchResult
     std::string status;
     uint32_t matchPlayers{};    // MATCHED: players gathered so far
     uint32_t matchRequired{};
+    uint32_t matchRealPlayers{};     // the real players of the match that have to accept ...
+    uint32_t matchAcceptedPlayers{}; // ... and how many of them did (READY_TO_CONNECT = all of them)
     bool hasAssignment{};
     Assignment assignment;
+
+    // ---- a search of a party MEMBER (the leader's client sent it): what the GC needs to follow it like its own search ----
+    std::string mode;           // "competitive", ...
+    uint32_t gameType{};        // the leader's MatchmakingStart.game_type
+    bool partyMember{};         // the backend's search of this account belongs to a party (party_leader_id)
+    bool discovered{};          // not a poll result: WatchAccount found the search and now tracks it (delivered first)
 
     bool IsAssigned() const { return hasAssignment && (status == "WAITING_ACCEPT" || status == "READY_TO_CONNECT"); }
     bool IsEnded() const
@@ -92,9 +110,19 @@ void SearchCancelled();
 std::string ActiveRequestId();
 
 // The game server reported that everybody accepted (reservation stage 2, awaiting 0): tell the backend so it moves the match
-// from ACCEPTING to ACCEPTED (RESEARCH_FINDINGS.md #63). Also ends the polling of the search: from here the backend no longer
-// withdraws the assignment. Retried a few times, the backend answer is only logged. Does nothing without a tracked search.
+// from ACCEPTING to ACCEPTED (RESEARCH_FINDINGS.md #63). Retried a few times, the backend answer is only logged. The search
+// keeps being polled: the backend, not the game server, decides when EVERY real player accepted - the search turning
+// READY_TO_CONNECT is the signal to connect (#65). Does nothing without a tracked search.
 void ReportAccepted();
+
+// the client connects now: no need to watch the search any more
+void StopPolling();
+
+// A party member's client never sends a search: the leader's does. From now on the worker asks the backend once a second
+// whether this account has a search (GET /matchmaking/account/<id>) whenever it tracks none of its own; a search that belongs
+// to a party is adopted: it is tracked like a search this client started, and the result handler gets it first with
+// `discovered` set (mode / game_type inside) so the GC can set up the search state.
+void WatchAccount(uint32_t accountId);
 
 // ---- srcds side: the roster of the match on this game server (RESEARCH_FINDINGS.md #55) ----
 // The backend is the source of truth for who takes part in a test match: the real players and the virtual (fake)

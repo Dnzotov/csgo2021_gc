@@ -104,3 +104,4 @@ input.narrow { width: 90px; }
 .chips button { padding: 2px 10px; font-size: 13px; border-radius: 12px; }
 .chips button.on { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
 td.maps { max-width: 320px; overflow-wrap: anywhere; }
+td.used { max-width: 380px; white-space: pre-line; overflow-wrap: anywhere; }

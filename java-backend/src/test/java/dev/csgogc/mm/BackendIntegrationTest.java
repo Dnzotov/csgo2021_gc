@@ -240,7 +240,6 @@ class BackendIntegrationTest {
                 "{\"game_type\":520}",                                  // no account
                 search(5, 99, ""),                                      // eGame 99 is not a category
                 search(5, 9, ""),                                       // cooperative is not an MVP category
-                search(5, 11, ""),                                      // scrimcomp5v5 is not an MVP category
                 search(5, 520, "\"mode\":\"wingman\""),                 // mode does not match game_type
                 search(5, 520, "\"mode\":\"nonsense\""),
                 search(5, 520, "\"maps\":[\"de dust2; drop\"]"),
@@ -365,7 +364,6 @@ class BackendIntegrationTest {
                 "{\"host\":\"a b\",\"port\":27016,\"category\":\"casual\"}",
                 "{\"host\":\"h\",\"port\":0,\"category\":\"casual\"}",
                 "{\"host\":\"h\",\"port\":70000,\"category\":\"casual\"}",
-                "{\"host\":\"h\",\"port\":27016,\"category\":\"scrimcomp5v5\"}",
                 "{\"host\":\"h\",\"port\":27016,\"category\":\"cooperative\"}",
                 "{\"host\":\"h\",\"port\":27016,\"category\":\"casual\",\"map\":\"../x\"}"
         };
@@ -411,8 +409,8 @@ class BackendIntegrationTest {
     void categoriesAreTheMvpSet() throws Exception {
         mvc.perform(get("/admin/api/categories").with(user("tester").roles("ADMIN")))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$", hasSize(8)))
-                .andExpect(jsonPath("$[?(@.key=='scrimcomp5v5')]", hasSize(0)))
+                .andExpect(jsonPath("$", hasSize(9)))
+                .andExpect(jsonPath("$[?(@.key=='scrimcomp5v5')]", hasSize(1)))   // an Accept mode like Competitive (#65)
                 .andExpect(jsonPath("$[?(@.key=='cooperative')]", hasSize(0)))
                 .andExpect(jsonPath("$[?(@.key=='dangerzone')].required_players").value(org.hamcrest.Matchers.contains(16)))
                 .andExpect(jsonPath("$[?(@.key=='wingman')].required_players").value(org.hamcrest.Matchers.contains(4)))

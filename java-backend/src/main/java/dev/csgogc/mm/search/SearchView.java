@@ -31,7 +31,9 @@ public record SearchView(
         /** progress of the match this search was placed in (forming or complete) */
         MatchProgress match,
         /** the server the player has to connect to; only when the match is complete (WAITING_ACCEPT / READY_TO_CONNECT) */
-        Assignment assignment) {
+        Assignment assignment,
+        /** set for a member of a party (the search row of the leader): the member's own GC picks such a search up by account id */
+        Long partyLeaderId) {
 
     /** players = real + virtual (fake) participants gathered so far; serverId 0 = no server reserved yet */
     public record MatchProgress(String matchId, String status, int players, int fakePlayers, int requiredPlayers, String map,
@@ -39,7 +41,9 @@ public record SearchView(
                                 /** complete, but no server yet / the game server has not confirmed its roster yet: no assignment for now */
                                 boolean awaitingServer,
                                 /** ACCEPTING: until when the players have to accept (the backend cancels the match after it) */
-                                Instant acceptDeadlineAt) {
+                                Instant acceptDeadlineAt,
+                                /** the real players of the match that have to accept, and how many of them did (accepted < real = nobody connects) */
+                                int realPlayers, int acceptedPlayers) {
     }
 
     /** MatchAssignment: everything the GC needs to run the existing 9107 / Accept / QueueConnect flow */

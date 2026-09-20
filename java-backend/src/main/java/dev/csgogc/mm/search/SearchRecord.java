@@ -22,5 +22,13 @@ public record SearchRecord(
         String matchId,
         Instant matchedAt,
         /** Accept modes: when this player accepted (the GC reports it once the game server says everybody accepted) */
-        Instant acceptedAt) {
+        Instant acceptedAt,
+        /** a member of a party: the id of the search row of the party leader, null for the leader and for solo searches */
+        Long partyLeaderId,
+        /** when this player's GC first fetched the assignment (server data = its Match Found), null = it has not (yet) */
+        Instant assignmentSeenAt) {
+
+    public boolean isPartyMember() {
+        return partyLeaderId != null;
+    }
 }

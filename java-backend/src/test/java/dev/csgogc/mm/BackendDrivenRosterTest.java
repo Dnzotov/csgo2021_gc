@@ -88,8 +88,8 @@ class BackendDrivenRosterTest extends BackendTestBase {
         JsonNode real = search(REAL, COMPETITIVE, "\"de_dust2\"", "r");
         assertThat(real.get("status").asText()).isEqualTo("MATCHED");
         assertThat(real.get("match").get("players").asInt()).isEqualTo(1);
-        assertThat(fake(wingmanFake).get("status").asText()).isEqualTo("SEARCHING");
-        assertThat(fake(dangerFake).get("status").asText()).isEqualTo("SEARCHING");
+        assertThat(fake(wingmanFake).get("matches").size()).isZero();
+        assertThat(fake(dangerFake).get("matches").size()).isZero();
     }
 
     @Test
@@ -99,17 +99,19 @@ class BackendDrivenRosterTest extends BackendTestBase {
         JsonNode real = search(REAL, COMPETITIVE, "\"de_dust2\"", "r");
         assertThat(real.get("status").asText()).isEqualTo("MATCHED");
         assertThat(real.get("match").get("players").asInt()).isEqualTo(1);
-        assertThat(fake(fakeId).get("status").asText()).isEqualTo("SEARCHING");
+        assertThat(fake(fakeId).get("matches").size()).isZero();
     }
 
+    /** the profiles are not added up to the capacity: the one with the highest priority (the oldest of them on a tie) is the match's */
     @Test
-    void severalFakeSearchesAddUpToTheRequiredPlayers() throws Exception {
+    void severalProfilesOfTheSamePriorityTheOldestWins() throws Exception {
         addServer("10.0.0.5", 27017, "competitive", "de_dust2");
         addFake("competitive", 4, "\"de_dust2\"");
         addFake("competitive", 3, null);
         addFake("competitive", 2, "\"de_dust2\",\"de_mirage\"");
         JsonNode real = search(REAL, COMPETITIVE, "\"de_dust2\"", "r");
-        assertRoster(real.get("assignment"), 10, 1, 9);
+        assertRoster(real.get("assignment"), 5, 1, 4);          // 1 real + the 4 of the oldest profile, not topped up to 10
+        assertThat(real.get("match").get("required_players").asInt()).isEqualTo(10);
         assertThat(matches().size()).isEqualTo(1);
     }
 
@@ -120,16 +122,16 @@ class BackendDrivenRosterTest extends BackendTestBase {
         JsonNode real = search(REAL, WINGMAN, "\"de_lake\"", "r");
         assertThat(real.get("status").asText()).isEqualTo("MATCHED");
         assertThat(real.get("match").get("players").asInt()).isEqualTo(1);
-        assertThat(fake(off).get("status").asText()).isEqualTo("STOPPED");
+        assertThat(fake(off).get("status").asText()).isEqualTo("OFF");
 
-        fakeEnabled(off, true);                                            // switched on: it joins and the match is complete
+        fakeEnabled(off, true);                                            // switched on: it is applied and the match is complete
         assertRoster(poll("r").get("assignment"), 4, 1, 3);
     }
 
     @Test
     void fakePlayersNeverCreateAMatchWithoutASuitableRealSearch() throws Exception {
         long server = addServer("10.0.0.5", 27017, "competitive", "de_dust2");
-        long fakeId = addFake("competitive", 5, "\"de_dust2\"");          // 1 real + 5 fake stay a forming match of 10
+        long fakeId = addFake("competitive", 5, "\"de_dust2\"");          // a profile alone starts nothing
         assertThat(matches().size()).isZero();
         assertThat(server(server).get("state").asText()).isEqualTo("AVAILABLE");
 
@@ -137,13 +139,14 @@ class BackendDrivenRosterTest extends BackendTestBase {
         search(1, WINGMAN, null, "w");
         search(2, COMPETITIVE, "\"de_mirage\"", "m");
         assertThat(matches().size()).isZero();
-        assertThat(fake(fakeId).get("status").asText()).isEqualTo("SEARCHING");
+        assertThat(fake(fakeId).get("matches").size()).isZero();
 
         // and when the only real player leaves, the match falls apart and nothing is left running
         search(REAL, COMPETITIVE, "\"de_dust2\"", "r");
-        assertThat(fake(fakeId).get("status").asText()).isEqualTo("MATCHED");
+        assertThat(fake(fakeId).get("matches").size()).isEqualTo(1);
         cancel(REAL, "r");
-        assertThat(fake(fakeId).get("status").asText()).isEqualTo("SEARCHING");
+        assertThat(fake(fakeId).get("matches").size()).isZero();
+        assertThat(fake(fakeId).get("status").asText()).isEqualTo("ON");
         assertThat(server(server).get("state").asText()).isEqualTo("AVAILABLE");
         for (JsonNode m : matches()) {
             assertThat(m.get("status").asText()).isEqualTo("CANCELLED");
@@ -286,7 +289,7 @@ class BackendDrivenRosterTest extends BackendTestBase {
         // the player starts over (Accept failed): the old match is cancelled and the fake players are searching again on their
         // own. Its server is not handed out for the cooldown: srcds sees no match on it (and drops its old reservation)
         search(REAL, COMPETITIVE, "\"de_dust2\"", "b");
-        assertThat(fake(fakeId).get("status").asText()).isEqualTo("MATCHED");
+        assertThat(fake(fakeId).get("matches").size()).isEqualTo(1);       // the profile serves the new match, nobody presses Start
         pollRoster().andExpect(status().isNotFound());
         clock.advance(Duration.ofSeconds(16));                                // server-release-cooldown is PT15S
         pollRoster().andExpect(status().isNotFound());                        // srcds keeps asking: it reads its roster from here

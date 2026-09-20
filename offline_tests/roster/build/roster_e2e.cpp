@@ -6,6 +6,21 @@
 //
 //   roster_e2e.exe <account> <roster size> <wait ms>            the happy path: assignment, stage 1, stage 2
 //   roster_e2e.exe <account> <roster size> <wait ms> legacy     the srcds-local roster
+//   roster_e2e.exe <account> <roster size> <wait ms> party      RESEARCH_FINDINGS.md #65: this process is the GC of a party MEMBER
+//        (BackendClient::WatchAccount): the lobby leader's search (sent with curl, account <account>, party [<account>+1]) is found
+//        for it, both real players are in the srcds roster, one player accepting early must NOT connect anybody, the connect
+//        (READY_TO_CONNECT) comes only after both reported. Needs a backend with a fake search of <roster size> - 2 players.
+//   roster_e2e.exe <account> <roster size> <wait ms> gather     RESEARCH_FINDINGS.md #66: two real players who search one after the
+//        other (A with curl, at once; this process is the GC of B, 1.5 s later, its own search) must end up in ONE match with the
+//        fake players filling only the 8 that are missing (gather window: run the backend with backend.fake-players.gather-window=PT3S
+//        and a fake search of <roster size> - 1 players). Both are in the srcds roster, each gets its own Match Found, the one who
+//        accepts first is not sent on, the connect (READY_TO_CONNECT) comes when both reported.
+//   roster_e2e.exe <account> <roster size> <wait ms> three      RESEARCH_FINDINGS.md #67: THREE real players (A and C search with curl,
+//        this process is the GC of B) and the Fake Players profile of the backend (set in its admin API; the profile count is the
+//        number of virtual players, NOT derived from the capacity: 7 -> a roster of 10, 2 -> a roster of 5, 0 -> a roster of 3;
+//        <roster size> is that total). One match, every real player is in the srcds roster, the popup needs all three at stage 1,
+//        one and two Accepts connect nobody, the third one does (READY_TO_CONNECT). Backend: --backend.fake-players.gather-window=PT3S
+//        and --backend.accept-timeout=PT30S.
 //   roster_e2e.exe <account> <roster size> <wait ms> timeout    RESEARCH_FINDINGS.md #63: the player does not accept, the
 //        backend cancels the match at its deadline (run it against a backend with backend.accept-timeout=PT6S and
 //        backend.server-release-cooldown=PT4S): the client hears about it (the search is SEARCHING / MATCHED again), srcds
@@ -218,12 +233,44 @@ static std::mutex g_resultMutex;
 static std::vector<BackendClient::SearchResult> g_results;
 static void OnResult(void *, const BackendClient::SearchResult &r)
 {
-    printf("%7.3f   [client] search status=%s players=%u/%u assigned=%d %s:%u match=%s\n", Now(), r.status.c_str(), r.matchPlayers,
-        r.matchRequired, r.IsAssigned() ? 1 : 0, r.assignment.serverAddress.c_str(), r.assignment.serverPort, r.assignment.matchId.c_str());
+    printf("%7.3f   [client] search %s status=%s players=%u/%u accepted=%u/%u assigned=%d %s:%u match=%s%s\n", Now(), r.requestId.c_str(), r.status.c_str(),
+        r.matchPlayers, r.matchRequired, r.matchAcceptedPlayers, r.matchRealPlayers, r.IsAssigned() ? 1 : 0, r.assignment.serverAddress.c_str(), r.assignment.serverPort,
+        r.assignment.matchId.c_str(), r.discovered ? "   <== DISCOVERED (party member: mode " : "");
+    if (r.discovered) { printf("%s game_type=%u)\n", r.mode.c_str(), r.gameType); }
     fflush(stdout);
     std::lock_guard l{ g_resultMutex };
     g_results.push_back(r);
 }
+// runs curl.exe against the test backend, returns its output (the harness plays the parts of the party that are not the tracked GC)
+static std::string Curl(const std::string &args)
+{
+    const std::string out = "e2e_curl_out.txt";
+    const std::string cmd = "curl.exe -s -m 5 --noproxy * -H \"X-Api-Key: test-api\" -H \"Content-Type: application/json\" " + args + " > " + out;
+    (void)system(cmd.c_str());
+    FILE *f = fopen(out.c_str(), "rb");
+    std::string text;
+    if (f) { char buf[4096]; size_t n; while ((n = fread(buf, 1, sizeof(buf), f)) > 0) text.append(buf, n); fclose(f); }
+    return text;
+}
+
+static bool WaitStatus(const std::string &status, int ms)
+{
+    auto end = Clock::now() + std::chrono::milliseconds(ms);
+    while (Clock::now() < end)
+    {
+        { std::lock_guard l{ g_resultMutex }; for (auto &r : g_results) if (r.status == status && !r.discovered) return true; }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return false;
+}
+
+static bool SeenStatus(const std::string &status)
+{
+    std::lock_guard l{ g_resultMutex };
+    for (auto &r : g_results) if (r.status == status && !r.discovered) return true;
+    return false;
+}
+
 static double AssignedAt()
 {
     std::lock_guard l{ g_resultMutex };
@@ -313,6 +360,274 @@ int main(int argc, char **argv)
     std::this_thread::sleep_for(std::chrono::milliseconds(1500));   // srcds polls for a while: the backend learns it reads rosters
 
     const bool timeoutScenario = argc > 4 && std::string(argv[4]) == "timeout";
+    const bool partyScenario = argc > 4 && std::string(argv[4]) == "party";
+    const bool gatherScenario = argc > 4 && std::string(argv[4]) == "gather";
+    const bool threeScenario = argc > 4 && std::string(argv[4]) == "three";
+
+    if (threeScenario)
+    {
+        bool ok = true;
+        auto verdict = [&](bool cond, const char *what) { printf("%7.3f [check] %-4s %s\n", Now(), cond ? "OK" : "FAIL", what); ok = ok && cond; };
+        const uint32_t a = real, b = real + 1, c = real + 2;   // A and C search from other machines (curl), this process is the GC of B
+        const uint32_t fakeCount = (uint32_t)required - 3;
+
+        auto searchWithCurl = [&](uint32_t account, const char *requestId)
+        {
+            char body[512];
+            snprintf(body, sizeof(body),
+                "-d \"{\\\"account_id\\\":%u,\\\"game_type\\\":520,\\\"mode\\\":\\\"competitive\\\",\\\"maps\\\":[\\\"de_dust2\\\"],"
+                "\\\"request_id\\\":\\\"%s\\\"}\" http://127.0.0.1:18090/api/v1/matchmaking/search", account, requestId);
+            Curl(body);
+        };
+        auto reportWithCurl = [&](uint32_t account, const char *requestId)
+        {
+            char report[256];
+            snprintf(report, sizeof(report), "-d \"{\\\"account_id\\\":%u,\\\"request_id\\\":\\\"%s\\\"}\" http://127.0.0.1:18090/api/v1/matchmaking/accepted", account, requestId);
+            return Curl(report);
+        };
+
+        printf("%7.3f [A's client] Competitive search (account %u)\n", Now(), a);
+        searchWithCurl(a, "thr-a");
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        printf("%7.3f [B's client] Competitive search (account %u)\n", Now(), b);
+        BackendClient::SearchInfo info;
+        info.accountId = b; info.gameType = 520; info.mode = "competitive"; info.gameMode = "competitive"; info.maps = { "de_dust2" };
+        BackendClient::SearchStarted(info, 76561197960265728ull + b);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        printf("%7.3f [C's client] Competitive search (account %u)\n", Now(), c);
+        searchWithCurl(c, "thr-c");
+
+        verdict(WaitStatus("MATCHED", 4000), "B is placed in a gathering match: no server, no Match Found yet");
+        {
+            bool three = false;
+            for (int i = 0; i < 200 && !three; i++)   // C joins a second after B: B's next poll reports it
+            {
+                { std::lock_guard l{ g_resultMutex }; for (auto &r : g_results) three = three || (r.status == "MATCHED" && r.matchPlayers == 3); }
+                if (!three) std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+            verdict(three, "the gathering match has 3 players: A, B and C (real players only, the virtual ones are not decided yet)");
+        }
+
+        const bool assignedB = WaitAssigned(waitMs);
+        verdict(assignedB, "B got its OWN Match Found (assignment) after the gather window");
+        if (!assignedB) { printf("RESULT: FAILED\n"); return 3; }
+        {
+            std::lock_guard l{ g_resultMutex };
+            bool all = false, counts = false;
+            for (auto &r : g_results)
+            {
+                if (!r.IsAssigned()) continue;
+                bool hasA = false, hasB = false, hasC = false;
+                for (uint32_t id : r.assignment.realAccounts) { hasA = hasA || id == a; hasB = hasB || id == b; hasC = hasC || id == c; }
+                all = all || (hasA && hasB && hasC);
+                counts = counts || (r.assignment.realPlayers == 3 && r.assignment.fakePlayers == fakeCount
+                    && r.assignment.requiredPlayers == (uint32_t)required);
+            }
+            verdict(all, "the assignment lists all THREE real accounts (the roster the game server arms)");
+            verdict(counts, "3 real + exactly the configured fake players = the roster (no topping up to the capacity of 10)");
+        }
+
+        // the popup needs all three real players at stage 1
+        PlayerCheck a1 = Check(a, 1);
+        verdict(a1.got && a1.awaiting == 2 && a1.total == (uint32_t)required, "A stage 1: awaiting=2 (B and C are not there): NO popup for one player");
+        PlayerCheck b1 = Check(b, 1);
+        verdict(b1.got && b1.awaiting == 1, "B stage 1: awaiting=1 (C is not there): still no popup");
+        PlayerCheck c1 = Check(c, 1);
+        verdict(c1.got && c1.awaiting == 0, "C stage 1: awaiting=0 (all three): the popup is up");
+        std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+        verdict(Check(a, 1).awaiting == 0 && Check(b, 1).awaiting == 0, "and for A and B too: everybody has its Confirm Match");
+
+        // Accepts one by one
+        PlayerCheck a2 = Check(a, 2);
+        verdict(a2.got && a2.awaiting >= 1, "ONE Accept (A): the server does not let anybody on");
+        std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+        PlayerCheck b2 = Check(b, 2);
+        verdict(b2.got && b2.awaiting == 1, "TWO Accepts (A, B): still awaiting=1 (C): nobody connects");
+        std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+        verdict(Check(a, 2).awaiting == 1, "... also for A after the virtual players accepted (they have no popup of their own)");
+
+        PlayerCheck c2 = Check(c, 2);
+        verdict(c2.got && c2.awaiting == 0, "THREE Accepts: stage 2 awaiting=0");
+
+        // the GCs report; the backend lets B connect only when all three have reported
+        printf("%7.3f [B's GC] reports the Accept\n", Now());
+        BackendClient::ReportAccepted();
+        std::this_thread::sleep_for(std::chrono::milliseconds(2500));
+        verdict(!SeenStatus("READY_TO_CONNECT"), "B is NOT sent on: A and C have not reported");
+        printf("%7.3f [A's GC] reports the Accept\n", Now());
+        std::string first = reportWithCurl(a, "thr-a");
+        verdict(first.find("\"match_accepted\":false") != std::string::npos, "the backend: 2 of 3 reported, not accepted yet");
+        std::this_thread::sleep_for(std::chrono::milliseconds(2500));
+        verdict(!SeenStatus("READY_TO_CONNECT"), "B is still NOT sent on");
+        {
+            std::lock_guard l{ g_resultMutex };
+            bool progress = false;
+            for (auto &r : g_results) progress = progress || (r.IsAssigned() && r.matchRealPlayers == 3 && r.matchAcceptedPlayers == 2);
+            verdict(progress, "B's poll says: 2 of 3 real players accepted");
+        }
+        printf("%7.3f [C's GC] reports the Accept\n", Now());
+        std::string last = reportWithCurl(c, "thr-c");
+        verdict(last.find("\"match_accepted\":true") != std::string::npos, "the backend: every real player accepted");
+        verdict(WaitStatus("READY_TO_CONNECT", 6000), "B's GC hears READY_TO_CONNECT -> connect (QueueConnect)");
+
+        BackendClient::StopPolling();
+        BackendClient::SearchCancelled();
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        printf("RESULT: %s\n", ok ? "OK" : "FAILED");
+        return ok ? 0 : 3;
+    }
+
+    if (gatherScenario)
+    {
+        bool ok = true;
+        auto verdict = [&](bool cond, const char *what) { printf("%7.3f [check] %-4s %s\n", Now(), cond ? "OK" : "FAIL", what); ok = ok && cond; };
+        const uint32_t a = real, b = real + 1;      // A searches from another machine (curl), this process is the GC of B
+
+        char body[512];
+        snprintf(body, sizeof(body),
+            "-d \"{\\\"account_id\\\":%u,\\\"game_type\\\":520,\\\"mode\\\":\\\"competitive\\\",\\\"maps\\\":[\\\"de_dust2\\\"],"
+            "\\\"request_id\\\":\\\"gat-a\\\"}\" http://127.0.0.1:18090/api/v1/matchmaking/search", a);
+        printf("%7.3f [A's client] starts a Competitive search (account %u)\n", Now(), a);
+        Curl(body);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+
+        BackendClient::SearchInfo info;
+        info.accountId = b; info.gameType = 520; info.mode = "competitive"; info.gameMode = "competitive"; info.maps = { "de_dust2" };
+        printf("%7.3f [B's client] starts a Competitive search 1.5 s later (account %u)\n", Now(), b);
+        BackendClient::SearchStarted(info, 76561197960265728ull + b);
+
+        verdict(WaitStatus("MATCHED", 4000), "B is placed in a gathering match (no server, no Match Found for one player)");
+        {
+            std::lock_guard l{ g_resultMutex };
+            bool two = false;
+            for (auto &r : g_results) two = two || (r.status == "MATCHED" && r.matchPlayers == 2);
+            verdict(two, "B's match has 2 players: it is A's match, the fake players have not filled it up yet");
+        }
+
+        const bool assignedB = WaitAssigned(waitMs);
+        verdict(assignedB, "B got its OWN Match Found (assignment) once the gather window was over");
+        if (!assignedB) { printf("RESULT: FAILED\n"); return 3; }
+        {
+            std::lock_guard l{ g_resultMutex };
+            bool both = false, counts = false;
+            for (auto &r : g_results)
+            {
+                if (!r.IsAssigned()) continue;
+                bool hasA = false, hasB = false;
+                for (uint32_t id : r.assignment.realAccounts) { hasA = hasA || id == a; hasB = hasB || id == b; }
+                both = both || (hasA && hasB);
+                counts = counts || (r.assignment.realPlayers == 2 && r.assignment.fakePlayers == (uint32_t)required - 2);
+            }
+            verdict(both, "the assignment lists BOTH real accounts (the roster the game server arms)");
+            verdict(counts, "2 real + the fake players that were missing (pool of 9 gave 8)");
+        }
+
+        // srcds armed both: the popup needs BOTH players at stage 1
+        PlayerCheck a1 = Check(a, 1);
+        verdict(a1.got && a1.awaiting == 1 && a1.total == (uint32_t)required, "A stage 1: awaiting=1 (B has not got there): NO popup for one player");
+        PlayerCheck b1 = Check(b, 1);
+        verdict(b1.got && b1.awaiting == 0, "B stage 1: awaiting=0 (both are in): the popup is up");
+        std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+        PlayerCheck a1b = Check(a, 1);
+        verdict(a1b.got && a1b.awaiting == 0, "and for A too");
+
+        // A accepts first: he is not sent on
+        PlayerCheck a2 = Check(a, 2);
+        verdict(a2.got && a2.awaiting >= 1, "A accepts first: stage 2 awaiting>0 -> the server does NOT let him on alone");
+        std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+        a2 = Check(a, 2);
+        verdict(a2.got && a2.awaiting == 1, "... still not after the fake players accepted (B has not)");
+
+        PlayerCheck b2 = Check(b, 2);
+        verdict(b2.got && b2.awaiting == 0, "B accepts: stage 2 awaiting=0");
+        printf("%7.3f [B's GC] reports the Accept (BackendClient::ReportAccepted)\n", Now());
+        BackendClient::ReportAccepted();
+        std::this_thread::sleep_for(std::chrono::milliseconds(3000));
+        verdict(!SeenStatus("READY_TO_CONNECT"), "B is NOT sent on: A has not reported, the backend says not everybody accepted");
+        {
+            std::lock_guard l{ g_resultMutex };
+            bool progress = false;
+            for (auto &r : g_results) progress = progress || (r.IsAssigned() && r.matchRealPlayers == 2 && r.matchAcceptedPlayers == 1);
+            verdict(progress, "B's poll says: 1 of 2 real players accepted");
+        }
+
+        char report[256];
+        snprintf(report, sizeof(report), "-d \"{\\\"account_id\\\":%u,\\\"request_id\\\":\\\"gat-a\\\"}\" http://127.0.0.1:18090/api/v1/matchmaking/accepted", a);
+        printf("%7.3f [A's GC] reports the Accept\n", Now());
+        std::string answer = Curl(report);
+        verdict(answer.find("\"match_accepted\":true") != std::string::npos, "the backend: every real player accepted (match_accepted)");
+        verdict(WaitStatus("READY_TO_CONNECT", 6000), "B's GC now hears READY_TO_CONNECT -> connect (QueueConnect)");
+
+        BackendClient::StopPolling();
+        BackendClient::SearchCancelled();
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        printf("RESULT: %s\n", ok ? "OK" : "FAILED");
+        return ok ? 0 : 3;
+    }
+
+    if (partyScenario)
+    {
+        bool ok = true;
+        auto verdict = [&](bool cond, const char *what) { printf("%7.3f [check] %-4s %s\n", Now(), cond ? "OK" : "FAIL", what); ok = ok && cond; };
+        const uint32_t leader = real, member = real + 1;    // this process is the GC of the MEMBER
+
+        BackendClient::WatchAccount(member);
+        char body[512];
+        snprintf(body, sizeof(body),
+            "-d \"{\\\"account_id\\\":%u,\\\"game_type\\\":520,\\\"mode\\\":\\\"competitive\\\",\\\"maps\\\":[\\\"de_dust2\\\"],"
+            "\\\"party_account_ids\\\":[%u,%u],\\\"request_id\\\":\\\"lead-e2e\\\"}\" http://127.0.0.1:18090/api/v1/matchmaking/search",
+            leader, leader, member);
+        printf("%7.3f [leader's client] starts a Competitive search for the lobby [%u, %u]\n", Now(), leader, member);
+        Curl(body);
+
+        // the member's GC finds it on its own and is assigned the server
+        bool assignedB = WaitAssigned(waitMs);
+        verdict(assignedB, "the party MEMBER's GC found the leader's search and was assigned the server (it got its own Match Found)");
+        { std::lock_guard l{ g_resultMutex }; bool disc = false; for (auto &r : g_results) disc = disc || (r.discovered && r.partyMember && r.mode == "competitive"); verdict(disc, "the search was reported as discovered for a party member (mode competitive)"); }
+        if (!assignedB) { printf("RESULT: FAILED\n"); return 3; }
+
+        // both real players are in the srcds roster: the leader alone is NOT enough for the popup
+        PlayerCheck a1 = Check(leader, 1);
+        verdict(a1.got && a1.awaiting == 1 && a1.total == (uint32_t)required, "leader stage 1: awaiting=1 (the member is still to arrive): the popup is NOT up for one player");
+        PlayerCheck b1 = Check(member, 1);
+        verdict(b1.got && b1.awaiting == 0, "member stage 1: awaiting=0 (both are in): the popup is up for the member");
+        std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+        PlayerCheck a1b = Check(leader, 1);
+        verdict(a1b.got && a1b.awaiting == 0, "and for the leader too (everybody Match Found)");
+
+        // the leader accepts FIRST
+        PlayerCheck a2 = Check(leader, 2);
+        verdict(a2.got && a2.awaiting >= 1, "leader accepts first: stage 2 awaiting>0 (the member and the fakes have not) -> the server does NOT let him on alone");
+        std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+        a2 = Check(leader, 2);
+        verdict(a2.got && a2.awaiting == 1, "... and still not after the fake players accepted (the member has not)");
+
+        // the member accepts: the game server now says stage 2 awaiting 0. Its GC reports it - the leader has not reported yet
+        PlayerCheck b2 = Check(member, 2);
+        verdict(b2.got && b2.awaiting == 0, "member accepts: stage 2 awaiting=0");
+        printf("%7.3f [member's GC] reports the Accept (BackendClient::ReportAccepted)\n", Now());
+        BackendClient::ReportAccepted();
+        std::this_thread::sleep_for(std::chrono::milliseconds(3000));
+        verdict(!SeenStatus("READY_TO_CONNECT"), "the member is NOT sent on: the leader has not reported, the backend says not everybody accepted");
+
+        // the leader's GC reports (its 0x25 awaiting 0 arrives after the member's accept)
+        PlayerCheck a2c = Check(leader, 2);
+        verdict(a2c.got && a2c.awaiting == 0, "leader: stage 2 awaiting=0 now");
+        std::string leaderRequest = "lead-e2e";
+        char report[256];
+        snprintf(report, sizeof(report), "-d \"{\\\"account_id\\\":%u,\\\"request_id\\\":\\\"%s\\\"}\" http://127.0.0.1:18090/api/v1/matchmaking/accepted",
+            leader, leaderRequest.c_str());
+        printf("%7.3f [leader's GC] reports the Accept\n", Now());
+        std::string answer = Curl(report);
+        verdict(answer.find("\"match_accepted\":true") != std::string::npos, "the backend: every real player accepted (match_accepted)");
+        verdict(WaitStatus("READY_TO_CONNECT", 6000), "the member's GC now hears READY_TO_CONNECT -> connect (QueueConnect)");
+
+        BackendClient::StopPolling();
+        BackendClient::SearchCancelled();
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        printf("RESULT: %s\n", ok ? "OK" : "FAILED");
+        return ok ? 0 : 3;
+    }
 
     BackendClient::SearchInfo info;
     info.accountId = real; info.gameType = 520; info.mode = "competitive"; info.gameMode = "competitive"; info.maps = { "de_dust2" };
@@ -359,7 +674,7 @@ int main(int argc, char **argv)
 
         printf("%7.3f [client] reports the Accept to the backend (BackendClient::ReportAccepted)\n", Now());
         BackendClient::ReportAccepted();
-        std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+        verdict(WaitStatus("READY_TO_CONNECT", 6000), "the backend answers: everybody accepted (the search is READY_TO_CONNECT) -> connect");
         BackendClient::SearchCancelled();                                    // the client's stop when it connects
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
         printf("[engine] reservations=%d roster=%zu\n", engine.Reservations(), engine.RosterSize());

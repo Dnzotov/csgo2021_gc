@@ -329,6 +329,8 @@
   }, 3000);
 
   // ---------------------------------------------------------------- fake players (TEST tool)
+  // A profile per mode: how many virtual players a match of the mode gets (RESEARCH_FINDINGS.md #67). Everything here is stored
+  // by the backend and applies to the NEXT match that is decided; a match that has its players keeps them.
   var fakeBody = document.querySelector('#fakeTable tbody');
   var fakeEnabledOnBackend = true;
 
@@ -336,14 +338,20 @@
     return categories.filter(function (c) { return c.accept_required; });
   }
 
-  function fakeLabel(status) {
-    return { SEARCHING: 'Searching', MATCHED: 'Matched', STOPPED: 'Stopped', COMPLETED: 'Completed' }[status] || status;
+  function serversOfMode(mode) {
+    return serversCache.filter(function (s) { return s.category === mode; });
   }
 
   function loadFake() {
     return api('GET', '/admin/api/fake-searches').then(function (data) {
       fakeEnabledOnBackend = data.enabled;
       document.getElementById('fakeOff').hidden = data.enabled;
+      var master = document.getElementById('fakeMaster');
+      if (document.activeElement !== master) master.checked = data.master;
+      var win = document.getElementById('fakeWindow');
+      if (document.activeElement !== win) win.value = String(data.gather_window_seconds);
+      document.getElementById('fakeMasterState').textContent = data.master ? 'ON: matches get the virtual players of their mode profile'
+        : 'OFF: matches wait for real players only, like without the tool';
       renderFake(data.fake_searches);
     }).catch(fail);
   }
@@ -353,35 +361,46 @@
     list.forEach(function (f) {
       fakeBody.appendChild(f.id === editingFakeId ? fakeEditRow(f) : fakeViewRow(f));
     });
-    document.getElementById('fakeCount').textContent = String(list.filter(function (f) {
-      return f.status === 'SEARCHING' || f.status === 'MATCHED';
-    }).length);
+    document.getElementById('fakeCount').textContent = String(list.filter(function (f) { return f.enabled; }).length);
     document.getElementById('fakeEmpty').hidden = list.length > 0;
     document.getElementById('fakeTable').hidden = list.length === 0;
   }
 
-  function fakeMatchText(f) {
-    if (!f.match) return '—';
-    var m = f.match;
-    return m.match_id + (m.server_address ? ' on ' + m.server_address + ':' + m.server_port + ' ' + (m.map || '') : ' (no server yet)') + '  (' + m.players + '/'
-      + m.required_players + ', ' + m.match_status.toLowerCase() + ')';
+  function fakeUsedText(f) {
+    if (!f.matches.length) return '—';
+    return f.matches.map(function (m) {
+      var players = m.real_players + ' real + ' + m.fake_players + ' fake' + (m.configured !== m.fake_players ? ' (' + m.configured + ' configured)' : '');
+      return m.match_id + ' ' + m.match_status.toLowerCase() + ': ' + players + (m.server_address ? ' on ' + m.server_address + ':' + m.server_port : '');
+    }).join('\n');
   }
 
   function fakeViewRow(f) {
-    var inMatch = f.status === 'MATCHED';
-    var toggle = f.status === 'SEARCHING' || f.status === 'MATCHED'
-      ? el('button', { class: 'small', text: 'Stop search', onclick: function () { setFakeEnabled(f, false); } })
-      : el('button', { class: 'small primary', text: 'Start', onclick: function () { setFakeEnabled(f, true); } });
-    var editBtn = el('button', { class: 'small', text: 'Edit', onclick: function () { editingFakeId = f.id; loadFake(); } });
-    if (inMatch) { editBtn.disabled = true; editBtn.title = 'Stop the search first'; }
-    return el('tr', { class: f.status === 'SEARCHING' || f.status === 'MATCHED' ? '' : 'ended' },
-      el('td', null, el('span', { class: 'pill ' + f.status.toLowerCase(), text: fakeLabel(f.status) })),
-      el('td', { class: 'num' }, String(f.players)),
+    var toggle = f.enabled
+      ? el('button', { class: 'small', text: 'Switch off', onclick: function () { setFakeEnabled(f, false); } })
+      : el('button', { class: 'small primary', text: 'Switch on', onclick: function () { setFakeEnabled(f, true); } });
+    var count = f.players === 0 ? '0 (real players only)' : String(f.players);
+    return el('tr', { class: f.enabled ? '' : 'ended' },
+      el('td', null, el('span', { class: 'pill ' + (f.enabled ? 'enabled' : 'disabled'), text: f.status })),
       el('td', null, f.mode_label),
+      el('td', { class: 'num' }, count),
       el('td', { class: 'maps' }, f.maps.length ? f.maps.join(', ') : 'any map'),
-      el('td', { class: 'small' }, fakeMatchText(f)),
-      el('td', { class: 'actions' }, toggle, editBtn,
+      el('td', { class: 'small' }, f.server_label || 'any server'),
+      el('td', { class: 'num' }, String(f.priority)),
+      el('td', { class: 'small used' }, fakeUsedText(f)),
+      el('td', { class: 'actions' }, toggle,
+        el('button', { class: 'small', text: 'Edit', onclick: function () { editingFakeId = f.id; loadFake(); } }),
         el('button', { class: 'small danger', text: 'Delete', onclick: function () { deleteFake(f); } })));
+  }
+
+  function serverSelect(mode, current) {
+    var select = el('select');
+    select.appendChild(el('option', { value: '', text: 'any server' }));
+    serversOfMode(mode).forEach(function (s) {
+      var o = el('option', { value: String(s.id), text: s.host + ':' + s.port + (s.map ? ' ' + s.map : '') });
+      if (current === s.id) o.selected = true;
+      select.appendChild(o);
+    });
+    return select;
   }
 
   function fakeEditRow(f) {
@@ -391,16 +410,25 @@
       if (c.key === f.mode) o.selected = true;
       mode.appendChild(o);
     });
-    var players = el('input', { type: 'number', min: '1', max: '63', value: String(f.players), class: 'narrow' });
+    var players = el('input', { type: 'number', min: '0', max: String(f.max_players), value: String(f.players), class: 'narrow' });
     var maps = el('input', { value: f.maps.join(', '), placeholder: 'any map', pattern: '[A-Za-z0-9_, ]*' });
+    var server = serverSelect(f.mode, f.server_id);
+    mode.addEventListener('change', function () {
+      var fresh = serverSelect(mode.value, null);
+      server.parentNode.replaceChild(fresh, server);
+      server = fresh;
+    });
+    var priority = el('input', { type: 'number', min: '-1000', max: '1000', value: String(f.priority), class: 'narrow' });
     return el('tr', null,
-      el('td', null, el('span', { class: 'pill ' + f.status.toLowerCase(), text: fakeLabel(f.status) })),
-      el('td', null, players), el('td', null, mode), el('td', null, maps), el('td', { class: 'small' }, fakeMatchText(f)),
+      el('td', null, el('span', { class: 'pill ' + (f.enabled ? 'enabled' : 'disabled'), text: f.status })),
+      el('td', null, mode), el('td', null, players), el('td', null, maps), el('td', null, server), el('td', null, priority),
+      el('td', { class: 'small used' }, fakeUsedText(f)),
       el('td', { class: 'actions' },
         el('button', { class: 'small primary', text: 'Save', onclick: function () {
-          api('PUT', '/admin/api/fake-searches/' + f.id,
-            { mode: mode.value, players: Number(players.value), maps: parseMaps(maps.value) })
-            .then(function () { editingFakeId = null; return loadFake(); }).catch(fail);
+          api('PUT', '/admin/api/fake-searches/' + f.id, {
+            mode: mode.value, players: Number(players.value), maps: parseMaps(maps.value),
+            priority: Number(priority.value), server_id: server.value ? Number(server.value) : null
+          }).then(function () { editingFakeId = null; return loadFake(); }).catch(fail);
         } }),
         el('button', { class: 'small', text: 'Cancel', onclick: function () { editingFakeId = null; loadFake(); } })));
   }
@@ -410,7 +438,7 @@
   }
 
   function deleteFake(f) {
-    if (!confirm('Delete this fake search (' + f.players + ' ' + f.mode_label + ' players)?')) return;
+    if (!confirm('Delete this profile (' + f.players + ' fake players, ' + f.mode_label + ')?')) return;
     api('DELETE', '/admin/api/fake-searches/' + f.id).then(loadFake).catch(fail);
   }
 
@@ -445,9 +473,21 @@
     var c = categories.filter(function (x) { return x.key === mode; })[0];
     var max = c ? c.required_players - 1 : 1;
     document.getElementById('fakePlayers').max = String(max);
+    var select = document.getElementById('fakeServer');
+    var keep = select.value;
+    select.textContent = '';
+    select.appendChild(el('option', { value: '', text: 'any server' }));
+    serversOfMode(mode).forEach(function (s) {
+      var o = el('option', { value: String(s.id), text: s.host + ':' + s.port + (s.map ? ' ' + s.map : '') });
+      if (String(s.id) === keep) o.selected = true;
+      select.appendChild(o);
+    });
     document.getElementById('fakeHint').textContent = c
-      ? c.label + ' takes ' + c.required_players + ' players: with the real player up to ' + max + ' fake players in one search'
-        + (maps.length ? '; the buttons above are the maps of your ' + c.label + ' servers.' : '; no ' + c.label + ' server is registered yet.')
+      ? c.label + ' takes ' + c.required_players + ' players. A match gets min(count, ' + c.required_players + ' - real players) virtual players: '
+        + 'the capacity is never changed or topped up to. Count 0 = the match starts with its real players only (after the gather window). '
+        + 'No enabled profile / switch OFF = matches wait for real players like without the tool.'
+        + (maps.length ? ' The buttons above are the maps of your ' + c.label + ' servers; a match is only played on a server whose map is ticked (empty = any).'
+          : ' No ' + c.label + ' server is registered yet.')
       : '';
   }
 
@@ -458,8 +498,20 @@
     ev.preventDefault();
     var f = ev.target;
     api('POST', '/admin/api/fake-searches', {
-      mode: f.mode.value, players: Number(f.players.value), maps: parseMaps(f.maps.value), enabled: f.enabled.checked
+      mode: f.mode.value, players: Number(f.players.value), maps: parseMaps(f.maps.value), enabled: f.enabled.checked,
+      priority: Number(f.priority.value || 0), server_id: f.server.value ? Number(f.server.value) : null
     }).then(function () { f.maps.value = ''; renderChips(); return loadFake(); }).catch(fail);
+  });
+
+  document.getElementById('fakeSettingsForm').addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    api('PUT', '/admin/api/fake-settings', {
+      master: document.getElementById('fakeMaster').checked,
+      gather_window_seconds: Number(document.getElementById('fakeWindow').value)
+    }).then(loadFake).catch(fail);
+  });
+  document.getElementById('fakeMaster').addEventListener('change', function () {
+    api('PUT', '/admin/api/fake-settings', { master: this.checked }).then(loadFake).catch(fail);
   });
 
   // ---------------------------------------------------------------- start

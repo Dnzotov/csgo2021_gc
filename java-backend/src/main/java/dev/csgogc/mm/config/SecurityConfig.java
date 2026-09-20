@@ -68,7 +68,8 @@ public class SecurityConfig {
                                 "/api/v1/matchmaking/accepted")
                         .permitAll();
             }
-            auth.requestMatchers(HttpMethod.GET, "/api/v1/matchmaking/searches", "/api/v1/matchmaking/search/*").hasAnyRole("API", "ADMIN");
+            auth.requestMatchers(HttpMethod.GET, "/api/v1/matchmaking/searches", "/api/v1/matchmaking/search/*",
+                    "/api/v1/matchmaking/account/*").hasAnyRole("API", "ADMIN");
             // a game server (or a script) reporting its state: same key as the GC
             auth.requestMatchers(HttpMethod.POST, "/api/v1/servers/state").hasAnyRole("API", "ADMIN");
             // the srcds side asking for the roster of the match on its server (RESEARCH_FINDINGS.md #54)

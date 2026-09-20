@@ -59,6 +59,11 @@ public:
     // (-ip on the command line, else loopback): where its fake participants send their reservation checks to
     uint16_t DedicatedServerPort() const;
     std::string DedicatedServerAddress() const;
+    // TEST ONLY, srcds: how the Java backend knows this game server (game_server.host/port of its registry), used ONLY to
+    // identify the server in GET /api/v1/servers/roster and POST /api/v1/servers/roster/ready: -backend_ip / -backend_port on
+    // the command line, each of them falling back on -ip / -port. The game server itself never listens there (launch_args.h).
+    std::string BackendServerAddress() const;
+    uint16_t BackendServerPort() const;
     // TEST ONLY, srcds: how long after the Accept popup is up before the first fake participant accepts
     uint32_t TestFakeAcceptDelayMs() const { return 2500; }
     // srcds without -gc_mode (RESEARCH_FINDINGS.md #60, reservation_keepalive.h): the plain reservation of the server is

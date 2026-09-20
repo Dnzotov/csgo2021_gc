@@ -15,7 +15,7 @@ import org.springframework.stereotype.Repository;
 public class SearchRepository {
 
     private static final String COLUMNS = "id, account_id, game_type, category, game_mode, maps, variants, request_id, status, source, "
-            + "started_at, last_seen_at, ended_at, match_id, matched_at, accepted_at";
+            + "started_at, last_seen_at, ended_at, match_id, matched_at, accepted_at, party_leader_id, assignment_seen_at";
 
     private final JdbcClient jdbc;
 
@@ -56,11 +56,37 @@ public class SearchRepository {
         return keys.getKey().longValue();
     }
 
+    /** a member of a party (RESEARCH_FINDINGS.md #65): a search of the same kind as the leader's, placed together with it */
+    public long insertPartyMember(long accountId, long gameType, String category, String gameMode, List<String> maps,
+                                  List<SearchVariant> variants, String requestId, String source, long leaderId, Instant now) {
+        KeyHolder keys = new GeneratedKeyHolder();
+        jdbc.sql("INSERT INTO matchmaking_search (account_id, game_type, category, game_mode, maps, variants, request_id, "
+                        + "status, source, started_at, last_seen_at, party_leader_id) VALUES (?, ?, ?, ?, ?, ?, ?, 'SEARCHING', ?, ?, ?, ?)")
+                .params(accountId, gameType, category, gameMode, String.join(",", maps), SearchVariant.encode(variants),
+                        requestId, source, now.toEpochMilli(), now.toEpochMilli(), leaderId)
+                .update(keys);
+        return keys.getKey().longValue();
+    }
+
+    /** a party member's request id is derived from its own row id: unique, and short enough for the API (64 chars) */
+    public void setRequestId(long id, String requestId) {
+        jdbc.sql("UPDATE matchmaking_search SET request_id = ? WHERE id = ?").params(requestId, id).update();
+    }
+
+    /** the live searches of the members of a party */
+    public List<SearchRecord> findLiveMembers(long leaderId) {
+        return jdbc.sql("SELECT " + COLUMNS + " FROM matchmaking_search WHERE party_leader_id = ? AND status IN " + SearchStatus.LIVE_SQL
+                        + " ORDER BY id")
+                .param(leaderId)
+                .query(SearchRepository::map)
+                .list();
+    }
+
     /** the search changed (new mode/maps/request): rewrite it in place, back to plain SEARCHING, and restart the clock */
     public void replaceLive(long id, long gameType, String category, String gameMode, List<String> maps,
                             List<SearchVariant> variants, String requestId, String source, Instant now) {
         jdbc.sql("UPDATE matchmaking_search SET game_type = ?, category = ?, game_mode = ?, maps = ?, variants = ?, "
-                        + "request_id = ?, source = ?, status = 'SEARCHING', match_id = NULL, matched_at = NULL, accepted_at = NULL, "
+                        + "request_id = ?, source = ?, status = 'SEARCHING', match_id = NULL, matched_at = NULL, accepted_at = NULL, assignment_seen_at = NULL, "
                         + "started_at = ?, last_seen_at = ? WHERE id = ?")
                 .params(gameType, category, gameMode, String.join(",", maps), SearchVariant.encode(variants), requestId,
                         source, now.toEpochMilli(), now.toEpochMilli(), id)
@@ -80,16 +106,22 @@ public class SearchRepository {
 
     /** places a search in a match (MATCHED while forming, WAITING_ACCEPT / READY_TO_CONNECT when complete) */
     public void place(long id, String matchId, SearchStatus status, Instant now) {
-        jdbc.sql("UPDATE matchmaking_search SET match_id = ?, status = ?, matched_at = ?, accepted_at = NULL WHERE id = ? AND status IN " + SearchStatus.LIVE_SQL)
+        jdbc.sql("UPDATE matchmaking_search SET match_id = ?, status = ?, matched_at = ?, accepted_at = NULL, assignment_seen_at = NULL WHERE id = ? AND status IN " + SearchStatus.LIVE_SQL)
                 .params(matchId, status.name(), now.toEpochMilli(), id)
                 .update();
     }
 
     /** back into the queue (the match it was in fell apart) */
     public void unplace(long id) {
-        jdbc.sql("UPDATE matchmaking_search SET match_id = NULL, matched_at = NULL, accepted_at = NULL, status = 'SEARCHING' WHERE id = ? AND status IN " + SearchStatus.LIVE_SQL)
+        jdbc.sql("UPDATE matchmaking_search SET match_id = NULL, matched_at = NULL, accepted_at = NULL, assignment_seen_at = NULL, status = 'SEARCHING' WHERE id = ? AND status IN " + SearchStatus.LIVE_SQL)
                 .param(id)
                 .update();
+    }
+
+    /** the player's GC fetched the assignment of a match that is waiting for the Accept (the first time only) */
+    public void markAssignmentSeen(long id, Instant now) {
+        jdbc.sql("UPDATE matchmaking_search SET assignment_seen_at = ? WHERE id = ? AND assignment_seen_at IS NULL")
+                .params(now.toEpochMilli(), id).update();
     }
 
     /** the game server said everybody accepted and this player's GC reported it (only while the assignment is out) */
@@ -109,7 +141,7 @@ public class SearchRepository {
     /** waiting for a server, oldest first */
     public List<SearchRecord> listUnplaced() {
         return jdbc.sql("SELECT " + COLUMNS + " FROM matchmaking_search WHERE status = 'SEARCHING' AND match_id IS NULL "
-                        + "ORDER BY started_at, id")
+                        + "AND party_leader_id IS NULL ORDER BY started_at, id")
                 .query(SearchRepository::map)
                 .list();
     }
@@ -179,6 +211,10 @@ public class SearchRepository {
         boolean matchedIsNull = rs.wasNull();
         long accepted = rs.getLong("accepted_at");
         boolean acceptedIsNull = rs.wasNull();
+        long partyLeader = rs.getLong("party_leader_id");
+        boolean partyLeaderIsNull = rs.wasNull();
+        long seen = rs.getLong("assignment_seen_at");
+        boolean seenIsNull = rs.wasNull();
         return new SearchRecord(
                 rs.getLong("id"),
                 rs.getLong("account_id"),
@@ -195,6 +231,8 @@ public class SearchRepository {
                 endedIsNull ? null : Instant.ofEpochMilli(ended),
                 matchId,
                 matchedIsNull ? null : Instant.ofEpochMilli(matched),
-                acceptedIsNull ? null : Instant.ofEpochMilli(accepted));
+                acceptedIsNull ? null : Instant.ofEpochMilli(accepted),
+                partyLeaderIsNull ? null : partyLeader,
+                seenIsNull ? null : Instant.ofEpochMilli(seen));
     }
 }

@@ -54,6 +54,8 @@ private:
     const MM::GameMode *m_testMode{};
     bool m_testWaitingForPlayer{}; // roster is armed as soon as the real player's first 0x21 is seen
     uint32_t m_testRealAccountId{};
+    // a real player's first 0x21 arrived before the backend answered the first roster poll: it is decided when the answer is there
+    uint32_t m_testPendingSniff{};
 
     // what the backend says the match on this server consists of: the poller asks, the controller decides (GC thread)
     std::unique_ptr<RosterFeed::Poller> m_rosterPoller;

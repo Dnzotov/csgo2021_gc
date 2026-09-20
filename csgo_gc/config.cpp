@@ -1,39 +1,13 @@
 #include "stdafx.h"
 #include "config.h"
 #include "keyvalue.h"
+#include "launch_args.h"
 #include "random.h"
 
 // "-name value" from the process command line
 static std::string CommandLineValue(std::string_view name)
 {
-    std::string commandLine = Platform::CommandLine();
-
-    size_t position = 0;
-    std::string previous;
-    while (position < commandLine.size())
-    {
-        while (position < commandLine.size() && commandLine[position] == ' ')
-        {
-            position++;
-        }
-
-        size_t end = commandLine.find(' ', position);
-        if (end == std::string::npos)
-        {
-            end = commandLine.size();
-        }
-
-        std::string token = commandLine.substr(position, end - position);
-        if (previous == name)
-        {
-            return token;
-        }
-
-        previous = token;
-        position = end;
-    }
-
-    return {};
+    return LaunchArgs::Value(Platform::CommandLine(), name);
 }
 
 constexpr const char *ConfigFilePath = "csgo_gc/config.txt";
@@ -121,19 +95,22 @@ GCConfig::GCConfig()
 
 uint16_t GCConfig::DedicatedServerPort() const
 {
-    std::string port = CommandLineValue("-port");
-    if (!port.empty())
-    {
-        return FromString<uint16_t>(port);
-    }
-
-    return 27015; // srcds' default
+    return LaunchArgs::ResolveServerEndpoints(Platform::CommandLine()).gamePort; // -port, srcds' default 27015
 }
 
 std::string GCConfig::DedicatedServerAddress() const
 {
-    std::string address = CommandLineValue("-ip");
-    return address.empty() ? "127.0.0.1" : address;
+    return LaunchArgs::ResolveServerEndpoints(Platform::CommandLine()).gameAddress; // -ip, else loopback
+}
+
+std::string GCConfig::BackendServerAddress() const
+{
+    return LaunchArgs::ResolveServerEndpoints(Platform::CommandLine()).backendAddress; // -backend_ip, else -ip
+}
+
+uint16_t GCConfig::BackendServerPort() const
+{
+    return LaunchArgs::ResolveServerEndpoints(Platform::CommandLine()).backendPort; // -backend_port, else -port
 }
 
 float GCConfig::GetRarityWeight(uint32_t rarity) const

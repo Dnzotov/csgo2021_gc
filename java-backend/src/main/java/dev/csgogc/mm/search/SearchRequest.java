@@ -23,7 +23,15 @@ public record SearchRequest(
         @Pattern(regexp = "[A-Za-z0-9_]{1,32}", message = "must be a srcds game_mode name") String gameMode,
         @Size(max = 32) List<@Pattern(regexp = "[A-Za-z0-9_]{1,64}", message = "must be a map name") String> maps,
         @Pattern(regexp = "[A-Za-z0-9_.:-]{1,64}", message = "must be 1-64 chars of [A-Za-z0-9_.:-]") String requestId,
-        @Size(max = 16) List<@Valid @NotNull Variant> variants) {
+        @Size(max = 16) List<@Valid @NotNull Variant> variants,
+        /**
+         * The other members of the party: the lobby leader's MatchmakingStart carries every member of the lobby in
+         * {@code account_ids}, the members' own clients send nothing. The backend gives each of them a search of their own
+         * (they find it through GET /matchmaking/account/{id}) and keeps the whole party in ONE match, so every real player
+         * gets the assignment, is in the srcds roster and has to accept (RESEARCH_FINDINGS.md #65). The leader itself may be
+         * listed, it is ignored.
+         */
+        @Size(max = 15) List<@NotNull @Min(1) @Max(0xFFFFFFFFL) Long> partyAccountIds) {
 
     /** a skirmish mode the player selected */
     public record Variant(

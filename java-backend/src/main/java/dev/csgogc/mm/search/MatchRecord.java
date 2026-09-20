@@ -23,7 +23,13 @@ public record MatchRecord(
         /** ACCEPTING: when the players have to be done accepting, null before / for the classic modes */
         Instant acceptDeadlineAt,
         /** ACCEPTED: when the last real player accepted */
-        Instant acceptedAt) {
+        Instant acceptedAt,
+        /** the Fake Players profile that gave this match its virtual players (null: none / a match of an older version) */
+        Long fakeSearchId,
+        /** how many virtual players the match got: min(the profile's count, capacity - real players); 0 = none */
+        int fakeCount,
+        /** what the profile asked for, before the capacity cut it (the panel shows "7 configured, 5 used") */
+        Integer fakeConfigured) {
 
     public static final long NO_SERVER = 0L;
 

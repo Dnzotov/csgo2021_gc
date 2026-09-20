@@ -5635,3 +5635,405 @@ SEARCHING → FORMING (набор, сервера нет) → FULL → READY (se
 | srcds снимает резервацию и не держит keep-alive после отмены | **CONFIRMED** на реальных `Controller`/`FakeRoster`/`Poller` (e2e), реальный `engine.dll` — ожидает |
 | Клиентский popup закрывается по 9104 `matchmaking=3` | **HIGH CONFIDENCE** (декомпиляция), live — **UNRESOLVED** |
 | Возврат принявших игроков в очередь как в retail | **UNRESOLVED** |
+
+---
+
+## §65. ACCEPT FLOW С НЕСКОЛЬКИМИ РЕАЛЬНЫМИ ИГРОКАМИ: Match Found только у одного, его Accept пускает дальше (найдено → исправлено → протестировано → собрано)
+
+Симптом (live): в матче с несколькими участниками Match Found / Accept появляется только у одного игрока; если он нажимает Accept, его отправляет дальше, хотя остальные не приняли. Воспроизводится: party из нескольких реальных игроков, Wingman и Competitive с fake. Разбирался весь путь от 9101 до connect; правки — общий механизм, ни одного `if (mode)`.
+
+### 65.1 НАШЁЛ — фактическая причина (общая для всех Accept-режимов)
+
+**Причина №1 (CONFIRMED по коду, воспроизведено на реальном backend в e2e): party-поиск репортился backend'у одним аккаунтом.** В CS:GO `MatchmakingStart.account_ids` заполняется из лобби (`members/machine*/player0/xuid`, §36/§37: `sub_103F6240`) и **отправляет только клиент лидера лобби**; клиенты остальных участников 9101 не шлют. `ClientGC::OnMatchmakingStart` брал только свой аккаунт (`info.accountId = AccountId()`, `account_ids` «только сверялись»). Следствия цепочки:
+1. backend создаёт матч с **одним** реальным игроком (лидер) + fake;
+2. остальные участники party не в матче: ни assignment, ни 9107, ни popup — «Accept не появляется»;
+3. ростер srcds (`GET /servers/roster`) = лидер + fake, второго реального игрока в нём **нет**; поэтому на Accept лидера `awaiting` = 0 (остальные — fake, они принимают сами) → 0x25 stage 2 awaiting 0 → GC лидера сразу шлёт 9107 #2 и подключает его — «сразу отправляет дальше»;
+4. у второго игрока (если бы он искал отдельно) 0x21 приходил бы с аккаунтом вне ростера → `awaiting=127` → `AOS_FAILED`.
+
+**Причина №2 (CONFIRMED по коду): решение «все приняли» принадлежало только srcds.** `OnReservationFullyAccepted` (0x25 stage 2 awaiting 0) сразу слал второй 9107 (connect); backend получал `accepted` лишь «для сведения», а его знание всех реальных участников не участвовало. Любая неполнота ростра на srcds (legacy-ростер с одним реальным игроком, рассинхрон, отставший участник) = преждевременный connect. Требование «accepted_count < required_count → никакого QueueConnect» ничем не гарантировалось.
+
+**Связанные находки того же прохода (исправлены):**
+- backend не знал о категории ScrimComp5v5 (eGame 11), хотя GC его обслуживает (`mm_modes.cpp: supported=true`): поиск получал `400 unsupported_game_type` и молча терялся;
+- `ReportAccepted()` останавливал опрос: клиент не мог узнать, что backend всё ещё ждёт остальных (или отозвал матч);
+- Casual/Deathmatch/... в party: остальные участники не получали сервер (тот же корень №1).
+
+**Что проверено и оказалось корректным** (не менялось): один матч на всех *независимых* реальных игроков (Java-тесты), состав ростера из `listByMatch`, счёт `required` = real + fake, Accept-таймаут/отмена/возврат fake (§63), fake принимают сами после popup (FakeRoster: `popupSeen` только когда ВСЕ ростерные записи на stage ≥ 1), 9107 handler клиента не проверяет `reservation.account_ids` (декомпиляция `sub_103DC4B0`: гейт только `game/mmqueue`), ростер и `awaiting` в движке считаются по всем записям.
+
+### 65.2 ИСПРАВИЛ
+
+**Backend (общий механизм для всех Accept и classic режимов):**
+- `POST /matchmaking/search` принимает `party_account_ids` (остальные участники лобби). Для каждого backend создаёт поиск участника (`matchmaking_search.party_leader_id`, request id `pt<row id>`), **партия размещается в ОДИН матч целиком** (`place`/`join`: нужно место на всех; `listUnplaced` берёт только лидеров). Все участники получают assignment, попадают в ростер srcds и обязаны принять; fake добирают остаток.
+- Отмена лидера до его Accept снимает всю партию; после его Accept (клиент шлёт Stop при подключении) участников не трогает. Участник со своим прежним поиском переходит в партию; повтор/изменение поиска пересобирает партию.
+- Новый `GET /api/v1/matchmaking/account/{id}` — GC участника находит по нему поиск, созданный лидером (`party_leader_id`, `request_id`, `mode`, `game_type` в ответе; продлевает поиск).
+- `ACCEPTED` по-прежнему только когда приняли **все** реальные игроки матча (§63); accept-состояние хранится по каждому поиску (`accepted_at`).
+- Категория `scrimcomp5v5` (eGame 11, Accept, 10 игроков) добавлена; Cooperative (9) остаётся неподдерживаемым (в GC `supported=false`) — теперь это явный `400`, а не молчаливая очередь.
+
+**C++ GC (`csgo_gc.dll`):**
+- `OnMatchmakingStart` репортит `party_account_ids` (все `account_ids` лобби, кроме своего).
+- `BackendClient::WatchAccount`: клиент раз в секунду (пока нет своего поиска) спрашивает backend о поиске своего аккаунта; найденный поиск участника party «усыновляется» (`discovered` → `ClientGC::OnPartySearchDiscovered` ставит состояние поиска: режим, game_type, карту) и дальше идёт обычным путём: опрос по request id → assignment → 9107 → Match Found → Accept → отчёт `accepted`. У каждого участника **свой** 9107 и свой popup.
+- **Подключение — только когда выполнены ОБА условия:** (а) srcds говорит `0x25 stage 2, awaiting 0` и (б) backend говорит, что приняли все реальные игроки (поиск стал `READY_TO_CONNECT`). Только тогда `TryConnectAfterAccept` шлёт второй 9107 (единственное место). `ReportAccepted()` больше не останавливает опрос (немедленно опрашивает), `StopPolling()` — после connect. Один игрок, нажавший Accept раньше остальных, подключиться сам не может независимо от того, что скажет srcds.
+- Участник party не отменяет чужой поиск: `MatchmakingStop` от его клиента во время Accept игнорируется с явным логом (клиент шлёт его сам, если для лобби у него пуст `game/mmqueue`).
+
+### 65.3 Изменённые файлы
+
+- Java: `search/SearchRequest.java`, `SearchRecord.java`, `SearchView.java`, `SearchRepository.java`, `SearchService.java`, `SearchApiController.java`, `config/SecurityConfig.java`, `config/SchemaInitializer.java` (колонка `party_leader_id`), `admin/AdminApiController.java`, `mode/ModeCategory.java`.
+- Java тесты: `PartyAcceptTest.java` (новый, 15), `BackendIntegrationTest.java` (3 ожидания про ScrimComp5v5).
+- C++: `csgo_gc/backend_client.h/.cpp`, `csgo_gc/gc_client.h/.cpp`.
+- Offline: `offline_tests/roster/roster_e2e.cpp` (сценарий `party`, финал `timeout`), `offline_tests/reservation/client_flow_test.cpp` + `build.bat` (проверка гейтинга).
+- Доки: `RESEARCH_FINDINGS.md` (§65), `java-backend/README.md`, `offline_tests/roster/README.md`, `README.md`.
+
+### 65.4 ПРОТЕСТИРОВАЛ
+
+| Требование | Как проверено | Результат |
+|---|---|---|
+| 1–3. 1 real + fake fill: Competitive / Wingman / Danger Zone (+ ScrimComp5v5) | `PartyAcceptTest.oneRealPlayerAndFakeFillWorksInEveryAcceptMode`, `AcceptLifecycleTest` | OK: `required_players` 10/4/16/10, fake считаются принявшими |
+| 4. Несколько real в party | `aPartyIsOneMatchAndEveryMemberGetsTheAssignment` (Wingman 2+2 fake), `aDangerZonePartyIsTreated…` (2+14), 3 игрока в Competitive | OK: один матч, у каждого своё assignment, оба в ростре |
+| 5. Несколько real + fake fill | party 3 + 7 fake; два независимых игрока + fake | OK |
+| 6. Один принимает раньше остальных | `oneMemberAcceptingDoesNotStartTheConnect` + e2e `party` | OK: матч не `ACCEPTED`, поиски `WAITING_ACCEPT`, srcds-модель даёт лидеру `awaiting>0`, участника backend не отпускает без отчёта лидера |
+| 7. Все принимают | те же + e2e | OK: `match_accepted:true`, `READY_TO_CONNECT`, connect |
+| 8. Один отменяет | `theLeaderCancellingTakesThePartyAlong`, `theLeaderStopAfterAccepting…`, `aPlayerWhoLeavesAfterAccepting…` | OK: до Accept — матч `CANCELLED`, партия ушла; после Accept — остальные подключаются |
+| 9. Accept timeout | `theTimeoutSendsThePartyBack…`, `AcceptLifecycleTest`, e2e `timeout` | OK: партия вместе в новом матче, fake сами, сервер после cooldown |
+| 10. Повторный matchmaking | те же + новый Accept после timeout | OK |
+| 11. Casual/Deathmatch/Arms Race/Demolition/Skirmish без Accept | `classicModesNeverWaitForAccept` (+ party в Casual) | OK: `READY_TO_CONNECT` сразу, без резервации и дедлайна |
+| 12. Training после Casual | `client_flow_test` (§61) | OK |
+| Гейтинг connect | `client_flow_test` (40 проверок; мутация «connect по слову srcds» ловится) | OK |
+
+**Итоги прогона:** Java `mvnw test` — **124 tests, 0 failures** (было 109); `controller_test` ALL PASSED; `keepalive_test` 78/78; `client_flow_test` 40/40; `war_games_test.js` 53/53; **e2e против реального jar**: `party` **RESULT: OK** (клиент-участник сам нашёл поиск лидера и получил свой Match Found; при одном игроке popup не появляется — `awaiting=1`; лидер, принявший первым, получает `awaiting>0`; участника не отправляет дальше отчёт без отчёта лидера; после отчётов обоих — `READY_TO_CONNECT`), `timeout` **RESULT: OK** (теперь connect только после `READY_TO_CONNECT`), `happy` OK.
+
+### 65.5 СОБРАЛ
+
+- `Build\release\csgo_gc\csgo_gc.dll` SHA-256 `E66CB88E7EBE7341B99822E7D8616E1573B4B2F514A9A7BC42D2185E30AD48F2` (0 errors, 0 warnings); `csgo.exe` / `srcds.exe` без изменений в этом раунде (`build_local.bat` exit 0).
+- `java-backend\target\matchmaking-backend.jar` SHA-256 `D0B03FF874880AE20FB4D1FA193C129B80B8109CAFF7145C986CC04FF0BF04A5`. БД мигрирует при старте (`party_leader_id`).
+- Ставить DLL и jar **вместе**, DLL — у всех игроков и на srcds.
+
+### 65.6 UNRESOLVED / что проверить live
+
+- **Клиент участника party получает 9107 только если у него для лобби непуст `game/mmqueue`** (гейт `sub_103DC4B0`: иначе клиент сам шлёт Stop и роняет Match Found). Мы предполагаем (HIGH CONFIDENCE, не доказано), что `mmqueue` лидера реплицируется участникам вместе с session settings лобби (`Update{system{lock mmqueue}…}`). Если у участника popup не появился — в его `gc_log.txt`: `party: the lobby leader searches …` (поиск найден) и/или `party member: MatchmakingStop … ignored` (клиент отказался). Тогда нужен следующий шаг: 9104 `matchmaking≠0,≠4` для выставления `mmqueue` (сам обработчик 9104 тоже за этим гейтом — потребуется RE репликации).
+- Fake-заявка имеет фиксированный размер: для `2 real` в Competitive нужна fake-заявка на 8 (не 9), иначе первый реальный игрок сразу заполняет матч, второй остаётся без матча. Это поведение не менялось; при игре людьми fake-заявки отключать (README).
+- Cooperative (9) не поддерживается ни GC, ни backend (явный 400); ScrimComp5v5 проверен на backend-уровне, живьём нет.
+- Участник party опрашивает backend раз в секунду, пока у него нет своего поиска (нагрузка ничтожна в LAN); при недоступном backend лог раз в 10 ошибок, повтор раз в 5 с.
+- Не проверялось живьём: реальный `engine.dll`/Panorama, 10 живых клиентов, Wingman.
+
+---
+
+## §66. ACCEPT FLOW, ВТОРОЙ РАУНД: Match Found только у одного игрока, его Accept пускает его одного (найдено → исправлено → протестировано → собрано)
+
+Симптом (live, после §65): несколько реальных игроков ищут матч → Confirm Match появляется у одного (A), у остальных (B, C) окна нет; A нажимает Accept и подключается, хотя B/C не принимали. Первый матч после запуска «Confirming Match» не появляется нормально, после выхода всех и освобождения сервера второй матч работает. Требование: `accepted < required → никакого QueueConnect`, каждый реальный игрок получает свой Match Found.
+
+### 66.0 Чем это установлено (и чем нет)
+
+Логов живого матча в репозитории нет: `java-backend/data/backend-out.log` от 19.09 (один игрок), `matchmaking.db` пустая, `gc_log.txt` на машинах игроков недоступен. Поэтому причина найдена **по коду и воспроизведена на реальной логике backend** (тест `FakePlayersIntegrationTest.withoutAGatherWindowTheSecondRealPlayerIsLeftBehind` — поведение до §66 — и e2e `gather` против настоящего jar), а не по живому логу. Следующий живой лог (строки в 66.2 «диагностика») покажет таблицу «backend / ростер / 9107 / accepted» прямо в консоли.
+
+### 66.1 НАШЁЛ
+
+**Как 9107 реально уходит игрокам (по коду, не «как должно быть»).**
+
+- 9107 создаётся **только** в `ClientGC::StartServerFlow` (`gc_client.cpp`), в процессе `csgo.exe` того игрока, чей GC получил assignment. GC каждого игрока — это DLL внутри его собственного `csgo.exe`; **никакой GC→GC передачи нет**, лидер не может отправить 9107 участнику.
+- Assignment клиентский GC берёт из **своего** опроса backend: по `request_id` собственного поиска (`BackendClient` `GET /matchmaking/search/{request_id}`) либо, для участника party, по аккаунту (`GET /matchmaking/account/{id}`, §65). У кого нет строки поиска в матче или чей GC её не опрашивает — 9107 не получит.
+- В самом 9107 нет ни `account_ids`, ни `real_players`: только `direct_udp_ip/port`, `map`, константный `reservationid` (`GameServerCookieId`) и (Accept) `reservation.game_type`. Состав матча клиент не проверяет (`sub_103DC4B0` смотрит только `game/mmqueue`, §18/§37). Роль ростера играет **srcds** (`Q<cookie>,<match>,1:[acct]…`, из `GET /servers/roster`), т.е. тот же состав, что у backend-матча.
+- Получатели 9107 = клиенты, чей поиск лежит в матче в статусе `WAITING_ACCEPT`. Popup появляется, когда сервер отвечает `0x25 stage 1 awaiting 0`, т.е. когда **все** реальные записи ростера дошли до stage 1: то есть у одного игрока popup не может появиться, пока в ростере есть другой, кто 9107 не получил.
+
+Отсюда следует: **A получил popup ⇒ в ростре srcds A был единственным реальным игроком.** Значит, B/C не были в матче A.
+
+**Таблица расхождения (Competitive, fake-поиск 9, A нажал Play, B через 2 секунды; до §66, воспроизведено):**
+
+| | backend-матч m1 | ростер srcds | получил 9107 | accepted |
+|---|---|---|---|---|
+| A | да (1 + 9 = 10, FULL сразу) | да | да | да |
+| B | **нет** (матч m1 полон и с занятым сервером → свой матч m2, 1/10) | **нет** | **нет** | — |
+| C | **нет** (m2, 2/10 или свой) | **нет** | **нет** | — |
+| Fake 1–9 | m1 | да | — | сами |
+
+Первая строка расхождения — B: он **не в матче**. Дальше всё «правильно» относительно ростера «A + 9 fake»: popup у A (awaiting = 0), после Accept A `0x25 stage 2 awaiting 0` + backend `READY_TO_CONNECT` (принял единственный реальный игрок матча) ⇒ A подключается один. Оба условия §65 (srcds + backend) считаются от **одного и того же состава**, поэтому истинными они стали не «до того, как B/C получили окно», а потому что B/C вообще не входили в состав.
+
+**Причина №1 (CONFIRMED тестом): fake-заявка заполняла матч сразу и целиком.** `fillFormingMatches` при первом же реальном игроке (`1 + 9 = 10`) завершал матч, резервировал сервер и раздавал assignment; fake-заявка имела фиксированный размер (9) и «не влезала» ни в какой другой матч. Второй игрок, нажавший Play через секунды, находил матч `FULL/READY` без места и без свободного сервера, создавал собственный `FORMING` (1/10), где ждал недостающих, которых уже нет. Это и есть «Match Found у одного». Для party (§65) то же: 2 реальных + fake 9 = 11 > 10 — fake не влезала вообще (поэтому и оговорка «нужна fake на 8»).
+
+**Первый матч ≠ второй (HIGH CONFIDENCE, тем же механизмом):** в первом цикле «якорем» матча становился тот, кто первым дошёл до backend (A), остальные — в отдельных `FORMING`; после того как все вышли, fake-заявка вернулась в `SEARCHING` и достаётся тому, чей `FORMING`-матч встретился первым — в следующем цикле это уже другой игрок или другой состав, и «нормальный» popup виден на другой машине. Плюс реальный, но менее вероятный гонка-дефект srcds (причина №3).
+
+**Причина №2 (CONFIRMED по коду): при рассинхроне размера ростера srcds откатывался на legacy-ростер с ОДНИМ реальным игроком.** `RosterFeed::Controller::Apply`: если backend-ростер по размеру не совпадает с режимом srcds (`participants.size() != m_requiredPlayers`) — «legacy roster, players not held»: ростер = `[первый сниффнутый 0x21] + fake`. Любой матч с ≥2 реальными игроками и нестандартным размером (`backend.required-players.*` для теста, ручная fake-заявка, party) терял всех, кроме первого: у остальных `awaiting = 127`, popup нет, а первый по Accept получал `awaiting 0` (остались только fake).
+
+**Причина №3 (по коду, MEDIUM-HIGH, вероятно «первый матч на свежем srcds»):** `ServerGC::OnTestRealPlayerSeen` взводил legacy-ростер по первому 0x21 **до того, как** backend ответил на первый опрос ростера; backend-ростер потом заменял его с unreserve и паузой 12 с (`Cooldown`) — в первый матч popup появлялся с большим опозданием или после «Failed to connect», во второй (ростер уже backend-овый) — сразу.
+
+**Что проверено и оказалось корректным:** отсутствие GC→GC передачи не является дефектом (9107 строится локально из своего assignment); ростер srcds = состав backend-матча (`listByMatch`), fake принимают сами после popup, `accept()` считает всех реальных игроков матча (`mustAccept`), Accept-таймаут/отмена возвращают партию и fake (§63), `accepted < real` не даёт `ACCEPTED` (Java-тесты §65).
+
+### 66.2 ИСПРАВИЛ
+
+Общий механизм, без `if (mode)`:
+
+1. **Fake-заявка — пул, а не блок** (`SearchService.fillFormingMatches`, `FakeSearch.taken`): матчу отдаётся ровно столько виртуальных игроков, сколько ему не хватает (`take = min(размер пула, недостающее)`; пул 9 при 2 реальных даёт 8, при 4 реальных — 6; несколько заявок складываются). В роль ростера попадает `taken` (`FakeSearch.placed()`), не размер заявки. Колонка `fake_search.taken` (миграция в `SchemaInitializer`).
+2. **Окно сбора реальных игроков** (`backend.fake-players.gather-window`, по умолчанию `PT10S`, `PT0S` = как раньше): fake добирают матч только через это время **после входа последнего** реального игрока (или партии). Пока идёт окно, все, кто ищет тот же режим/карты, вступают в **тот же** матч (`place`/`join`), а не в новый. В логе: `the fake players fill the rest at <время> (gather window PT10S): real players who search until then join this match`.
+3. **`READY_TO_CONNECT` считается по всем реальным игрокам** (как в §65) и теперь **виден**: `match.real_players` / `match.accepted_players` в ответе поиска; GC пишет в лог `match X: 1 of 3 real players accepted - nobody connects before all of them did`. Логи backend: кто вошёл, кто получил Match Found (`fetched the server data`, новая колонка `assignment_seen_at`), кто принял; при таймауте Accept: `accepted 1/3: account 7 accepted, account 8 got Match Found but did not accept, account 9 never fetched the server data`.
+4. **srcds никогда не режет ростер с несколькими реальными игроками до одного** (`Controller::Apply`): ростер другого размера армируется как есть, если в нём ≥2 реальных игрока (режим и Accept совпадают). Ровно один реальный игрок другого размера остаётся на legacy-ростере (однопользовательский тест, как раньше). Лог при отказе теперь называет число реальных.
+5. **srcds на свежем запуске** не взводит legacy-ростер по первому 0x21, пока backend не ответил на первый опрос (`Controller::HasSnapshot`, `m_testPendingSniff`, разрешается в `OnBackendRoster`): первый матч сразу идёт по backend-ростеру, без unreserve и 12 с паузы.
+6. **Диагностика на каждой стороне** (то, чего не хватало для таблицы): клиентский GC при Match Found пишет `Match Found for account N: match M has R real player(s) [..] + F fake = T; this account is in the roster / NOT IN THE ROSTER`; `client.dll 9107 handler ENTER (#n): game/mmqueue=…` (`test_diag`, включён по умолчанию) показывает, принял ли клиент 9107 (CASE B из §18).
+7. Мелочи: `application-example.properties`, README (`java-backend`), подсказка панели (`admin.js`), `build.bat` reservation-тестов (в нём осталась строка с управляющим символом от §65 — удалена).
+
+### 66.3 Изменённые файлы
+
+- Java: `config/BackendProperties.java` (`fake-players.gather-window`), `config/SchemaInitializer.java` (`fake_search.taken`, `matchmaking_search.assignment_seen_at`), `fake/FakeSearch.java`, `fake/FakeSearchRepository.java`, `search/SearchRecord.java`, `search/SearchRepository.java`, `search/SearchView.java` (`real_players`, `accepted_players`), `search/SearchService.java` (пул + окно, `noteAssignmentSeen`, `acceptState`, счётчики), `static/admin/assets/admin.js` (подсказка), `config/application-example.properties`.
+- Java тесты: `GatherWindowTest.java` (новый, 9), `FakePlayersIntegrationTest.java` (тест fixed-size заменён тестом пула + тест «без окна второй остаётся без матча»), `BackendTestBase.java` (`gather-window=PT0S` для старых тестов), `SchemaMigrationTest.java`.
+- C++ (DLL): `csgo_gc/backend_client.h/.cpp` (`real_players`, `accepted_players`, `real_accounts`), `csgo_gc/gc_client.cpp` (таблица Match Found, прогресс Accept), `csgo_gc/server_roster.h/.cpp` (`armAnyway`, `HasSnapshot`), `csgo_gc/gc_server.h/.cpp` (`m_testPendingSniff`).
+- Offline: `offline_tests/roster/controller_test.cpp` (+9 проверок «ростер с несколькими реальными»), `offline_tests/roster/roster_e2e.cpp` (сценарий `gather`), `offline_tests/reservation/client_flow_test.cpp` (+13 проверок), `offline_tests/reservation/build.bat`.
+- Доки: `RESEARCH_FINDINGS.md` (§66), `java-backend/README.md`, `offline_tests/roster/README.md`.
+
+### 66.4 ПРОТЕСТИРОВАЛ
+
+| Сценарий | Как | Результат |
+|---|---|---|
+| 2 real + fake, Competitive (второй ищет через 4 с) | `GatherWindowTest.theSecondRealPlayerJoinsTheMatchOfTheFirstOne`, e2e `gather` | OK: один матч, 2 real + 8 fake = 10, у обоих свой Match Found, оба в ростре srcds |
+| A принял, B нет | те же | OK: `accepted_players 1/2`, `READY_TO_CONNECT` нет ни у кого, srcds A: `awaiting ≥ 1` |
+| B принял | те же | OK: `match_accepted`, `READY_TO_CONNECT` у обоих |
+| 3 real + fake, Competitive | `threeRealPlayersAndFakePlayersAreOneMatch` | OK: 3 + 7, принявшие 2 из 3 — никто не подключается |
+| 2 real + fake, Wingman | `twoRealPlayersAndFakePlayersInWingman` | OK: 2 + 2 fake (пул 3), B принимает первым — никто не подключается |
+| 3 real + fake, Danger Zone | `twoRealPlayersAndFakePlayersInDangerZone` | OK: 3 + 13 fake (пул 15), ростер 16 |
+| Окно перезапускается каждым реальным игроком | `everyRealPlayerRestartsTheWindow` | OK |
+| Реальных хватает — fake не нужны | `enoughRealPlayersNeedNoFakePlayers` | OK |
+| Один реальный + fake после окна | `aLoneRealPlayerIsServedAfterTheWindow` | OK |
+| Второй поиск после отмены первого матча | `aLatePlayerAndTheReturnedPlayersMeetInOneMatchAfterTheFirstIsCancelled`, e2e `timeout` | OK: поздний и вернувшийся игроки → ОДИН новый матч |
+| Свежий srcds → первый матч (popup с первой попытки) | e2e `happy`/`timeout` (srcds стартует с нуля), `client_flow_test` (сниф ждёт первого ответа) | OK (`FIRST ATTEMPT OK`) |
+| После полного release → второй матч | e2e `timeout` | OK |
+| Party (§65) | `PartyAcceptTest` (15), e2e `party` | OK, теперь и с пулом 9 (2 real + 8) |
+| Воспроизведение прежнего дефекта | `withoutAGatherWindowTheSecondRealPlayerIsLeftBehind` (`gather-window=0`) | подтверждён: B в отдельном матче, без assignment |
+| Ростер с несколькими реальными не режется | `controller_test` (+9) | OK |
+
+Итоги: Java `mvnw test` — **134 tests, 0 failures** (было 124); `controller_test` ALL PASSED; `keepalive_test` 78/78; `client_flow_test` 53/53; `war_games_test.js` 45/45 (только пропатченный pbin); e2e против реального jar: `gather`, `party`, `timeout`, `happy` — RESULT OK.
+
+### 66.5 СОБРАЛ
+
+- `Build\release\csgo_gc\csgo_gc.dll` SHA-256 `48D500A5BC809C40D7C80C36532A274EBDE10116B0254D74198C97A6720C9508` (0 errors, 0 warnings); `csgo.exe` / `srcds.exe` без изменений.
+- `java-backend\target\matchmaking-backend.jar` SHA-256 `9844D3F2527CC7A070BC50B7AF0EC81C59AEB99581F0263B25B9B0CEA807A6C9`. БД мигрирует при старте (`fake_search.taken`, `matchmaking_search.assignment_seen_at`).
+- Jar собран из копии исходников: обычная сборка не смогла заменить `target\matchmaking-backend.jar`, пока запущен `java -jar matchmaking-backend.jar` (Windows держит файл). Перед заменой остановите backend.
+- Ставить DLL и jar **вместе** (клиенты и srcds — одна и та же DLL).
+
+### 66.6 UNRESOLVED / что проверить live
+
+- **Участник party: 9107 принимается только при непустом `game/mmqueue`** (§18/§65). Не доказано и этим раундом; теперь видно по логу клиента: `client.dll 9107 handler ENTER … game/mmqueue=<значение>`; пусто = CASE B из постановки, нужен RE репликации `mmqueue` в лобби. Для игроков, которые ищут **порознь** (каждый сам нажал Play), это не относится — у каждого `mmqueue` выставляет его собственный клик Play.
+- Игроки должны нажать Play в пределах `gather-window` (10 с) друг от друга; кто пришёл позже, ждёт следующего матча (fake-пул занят первым). Окно настраивается; для одного игрока с fake ставьте `PT0S`–`PT3S`.
+- Причины №2/№3 (`Controller::Apply` / гонка первого 0x21) найдены по коду; воспроизведены только в offline-тестах и e2e, не на живом srcds.
+- Не проверялось живьём: реальный `engine.dll`/Panorama, ≥3 живых клиента, Wingman/Danger Zone на настоящих srcds.
+
+---
+
+## §67. FAKE PLAYERS КАК УПРАВЛЯЕМЫЙ ИЗ ПАНЕЛИ ИНСТРУМЕНТ: число fake задаёт профиль, а не «capacity − real» (аудит → реализация → тесты → сборка)
+
+Требование: панель Java Admin Panel → Fake Players реально управляет наполнением подбора. Для режима задаётся профиль (вкл/выкл, число fake, карты, при необходимости сервер, приоритет); «3 real + 7 fake = 10», «3 real + 2 fake = 5», «0 fake — без fake», «OFF — обычный matchmaking». Число fake — настройка, а не автоматический пересчёт `requiredPlayers − real`; capacity режима не меняется; переполнение исключено `effectiveFake = min(configured, capacity − real)`. `gather-window` остаётся и отвечает за «кого собрать», профиль — за «сколько fake». Accept ждёт только реальных.
+
+### 67.1 Аудит (что было)
+
+```
+CURRENT
+Admin Panel Fake Players (index.html + admin.js)
+   -> POST/PUT/DELETE /admin/api/fake-searches, /{id}/enabled   (AdminApiController)
+   -> SearchService.add/update/setFakeEnabled -> fake_search (category, players, maps, enabled, status, match_id, taken)
+      = «пул», который РАСХОДУЕТ ОДИН матч (status MATCHED/COMPLETED, несколько пулов складываются)
+   -> матч: place() -> FORMING -> gather-window -> fillFormingMatches(): taken = min(pool, required - real);
+      матч завершается ТОЛЬКО когда real + fake == required (иначе ждёт добора)
+   -> roster(): fake-id из строк fake_search.match_id -> GET /servers/roster -> srcds Controller.Apply
+      (размер ростера не равен режиму srcds и один реальный игрок -> legacy-ростер размером с режим: число из панели теряется)
+```
+
+Что не соответствовало требованию: «3 real + 2 fake = 5» невозможно (матч ждал добора до 10); пул расходовался одним матчем; приоритета и привязки к серверу нет; выключателя Fake Players из панели нет (только `backend.fake-players.enabled` в файле); для одного реального игрока srcds игнорировал число fake backend'а.
+
+**Переиспользовано** (второй системы нет): таблица `fake_search` (теперь = профиль), эндпоинты `/admin/api/fake-searches*`, `FakeSearchRequest/View`, вкладка панели, `mapPool/joinable/serverFits/anyServerCanServe` (карты и серверы), `roster()`, gather-window (§66), srcds `Controller`/`FakeRoster`.
+
+```
+TARGET
+Admin Panel (профиль: режим, ON/OFF, count, maps, server?, priority; выключатель Fake Players; Gather window)
+   -> SQLite: fake_search(+priority, +server_id), backend_setting(fake.master, fake.gather_window_seconds)
+   -> матч собирает real (gather-window) -> выбирается профиль режима (enabled, карты/сервер совместимы, max priority)
+   -> effectiveFake = min(count, capacity - real); capacity не меняется
+   -> matchmaking_match(fake_search_id, fake_count, fake_configured) -> roster = real + effectiveFake -> srcds (любой размер)
+```
+
+### 67.2 Что изменено
+
+**Модель.**
+- `fake_search` — профиль: `players` = число fake (0…capacity−1), `maps`, `enabled`, `priority`, `server_id` (необязательно). Старые колонки `status/match_id/matched_at/taken` остаются в файле БД и игнорируются; профиль **не расходуется** матчем.
+- `matchmaking_match`: `fake_search_id`, `fake_count` (эффективное число), `fake_configured` (что просил профиль). Миграция переносит fake старых матчей в `fake_count`.
+- `backend_setting(key, value)`: `fake.master` (ON/OFF) и `fake.gather_window_seconds`; значение из панели важнее свойства.
+
+**Логика (`SearchService.applyFakeProfiles`, общая для всех Accept-режимов, `if` по режимам нет).** Для каждого `FORMING` матча с реальными игроками: пока идёт окно (от входа последнего реального игрока) ничего; после — `pickFakeProfile`: включённые профили режима по приоритету (при равенстве старейший), первый, у которого `mapPool ∩ maps` не пусто, есть сервер этих карт и (если задан) привязанный сервер существует. `effectiveFake = min(count, capacity − real)`; `capacity` (`match.required_players`) не трогается; матч завершается (`FULL` → сервер) с `real + effectiveFake` игроками, в том числе меньше capacity. Count 0 → матч стартует только с реальными. Выключатель OFF / профиль выключен / профиля режима нет / ни один не подходит по картам → матч продолжает ждать реальных игроков (обычный matchmaking). Реальных хватает — fake не нужны. Карты профиля ограничивают пул карт матча (сервер должен играть карту из пересечения); привязанный сервер — единственный кандидат при резервировании. Игрок ушёл из `FULL` матча — он снова `FORMING`, fake решаются заново. `assignment.required_players` и `GET /servers/roster` `required_players` = размер ростера (real + fake), ёмкость режима — в `match.required_players` поиска.
+
+**Панель.** Выключатель «Fake Players» и «Gather window», таблица профилей (ON/OFF, режим, count, карты, сервер, приоритет, «используют живые матчи» с `real + fake (configured)`), форма добавления (режим, count, карты кнопками, сервер, приоритет), редактирование/удаление. API: `GET /admin/api/fake-searches` (+`master`, `gather_window_seconds`, `matches[]`), `PUT /admin/api/fake-settings`, `POST/PUT` с `priority`/`server_id`; валидация: только Accept-режимы, count 0…capacity−1, сервер должен быть сервером режима, карта сервера — из карт профиля.
+
+**srcds / GC (C++).** `Controller::Apply` армирует backend-ростер любого размера (режим srcds совпадает, Accept, есть реальный игрок); legacy-ростер только для не-Accept матча / другого режима / без реальных. Раньше для одного реального игрока и размера ≠ режим срабатывал legacy-ростер размером с режим (число из панели терялось). Клиентский GC ожидает от srcds `0x25 total` = размер ростера матча (`assignment.requiredPlayers`), а не capacity.
+
+### 67.3 Изменённые файлы
+
+- Java: `search/SearchService.java`, `search/MatchRecord.java`, `search/MatchRepository.java`, `fake/FakeSearch.java`, `fake/FakeSearchRepository.java`, `fake/FakeSearchRequest.java`, `fake/FakeSearchView.java`, `fake/FakeSettingsRepository.java` (новый), `fake/FakeSettingsRequest.java` (новый), `fake/FakeStatus.java` (удалён), `admin/AdminApiController.java`, `config/SchemaInitializer.java`, `resources/schema.sql`, `resources/admin/index.html`, `static/admin/assets/admin.js`, `admin.css`, `config/application-example.properties`.
+- Java тесты: `FakeProfileConfigTest.java` (новый, 33 теста), `FakePlayersIntegrationTest.java` (переписан под профили), обновлены `AcceptLifecycleTest`, `BackendDrivenRosterTest`, `PartyAcceptTest`, `GatherWindowTest`, `BackendTestBase`, `SchemaMigrationTest` (прежние проверки «пул расходуется / fake-поиск MATCHED / добор до 10» заменены сознательно).
+- C++: `csgo_gc/server_roster.h/.cpp`, `csgo_gc/gc_client.cpp`.
+- Offline: `offline_tests/roster/controller_test.cpp`, `roster_e2e.cpp` (сценарий `three`), `offline_tests/reservation/client_flow_test.cpp`.
+- Доки: `RESEARCH_FINDINGS.md` (§67), `java-backend/README.md`, `offline_tests/roster/README.md`.
+
+### 67.4 ПРОТЕСТИРОВАЛ
+
+Java `mvnw test` — **159 tests, 0 failures** (было 134). Мутационная проверка: если заменить `min(count, capacity − real)` на «добор до capacity», `FakeProfileConfigTest` падает (16 проверок) — тесты видят различие.
+
+| Конфигурация / поведение | Тест | Результат |
+|---|---|---|
+| 3 real (0/3/6 с) + count 7 = 10, ордер Accept 1 → 2 → 3 | `threeRealPlayersAndSevenConfiguredFakePlayersAreOneMatchOfTen`, e2e `three` (7) | OK: один матч, у каждого свой assignment и fetch, после 1 и 2 Accept `READY_TO_CONNECT` нет ни у кого, после 3 — у всех |
+| 3 real + count 2 = 5 (capacity 10 не меняется) | `threeRealAndTwoConfiguredFakePlayersAreAMatchOfFive`, e2e `three` (2) | OK: ростер srcds из 5 (`0x25 total=5`) |
+| count 0 | `zeroFakePlayersStartTheMatchWithTheRealPlayersOnly`, e2e `three` (0) | OK: матч из 3 реальных, ростер 3 |
+| count > свободных мест (8 real + 7 → 2) | `theConfiguredCountIsCutToTheFreeSlots` | OK: 10, не 15 |
+| реальных хватает | `aMatchOfRealPlayersOnlyGetsNoFakePlayers` | OK: fake нет |
+| изменение count из панели | `changingTheCountInThePanelChangesTheNextMatchOnly` | OK: 2 → 6 → 0, решённый матч не меняется |
+| профиль выключен / выключатель OFF / профиль другого режима | `aDisabledProfile…`, `theMasterSwitchOff…`, `aProfileOfAnotherModeIsNotUsed` | OK: ждут реальных без fake; ON → применяется |
+| карты | `theProfileMapsChooseTheServer`, `theRealPlayersMapsAndTheProfileMapsHaveToOverlap`, `aProfileWithoutMaps…` | OK: сервер только из карт профиля |
+| привязка к серверу, приоритет, разные режимы | `aProfileBoundToAServerOnlyUsesThatServer`, `theProfileWithTheHigherPriorityWins`, `everyModeHasItsOwnCount` | OK |
+| Competitive / Wingman / Danger Zone × 1/2/3 real × разные count (16 сочетаний) | `everyRealPlayerGetsMatchFoundAndOnlyTheLastAcceptLetsThemConnect` | OK: один матч, ровно `min(count, capacity − real)`, каждый реальный fetched assignment, ростер srcds со всеми реальными, `READY_TO_CONNECT` только после последнего Accept |
+| Первый матч на свежем srcds / второй после release | `theFirstAndTheSecondMatchmakingOnTheSameServerBehaveTheSame` (srcds читает ростер: игроки удержаны до `roster/ready` оба раза), e2e `happy`, `timeout` | OK: fake-конфигурация hold не маскирует |
+| Игрок ушёл из матча без сервера | `aPlayerWhoLeavesBeforeTheServerIsFoundMakesTheVirtualPlayersBeDecidedAgain` | OK: fake решаются заново |
+| API/настройки | `FakePlayersIntegrationTest` (валидация, CSRF/админ, настройки в БД) | OK |
+| Сохранено | party (15), gather (9), lifecycle (26), roster (15), map groups (12), no-Accept режимы (21) | OK |
+
+Offline C++: `controller_test` (ростер 4 / 5 / 3, wingman-srcds/без Accept не армируются) ALL PASSED; `keepalive_test` 78/78; `client_flow_test` 55/55; `war_games_test.js` 45/45. e2e против реального jar: `three` (fake 7 → 10, 2 → 5, 0 → 3), `happy`, `timeout`, `party`, `gather` — RESULT OK.
+
+### 67.5 СОБРАЛ
+
+- `Build\release\csgo_gc\csgo_gc.dll` SHA-256 `B9B92A7BE1964D7C2E5462DB7B9DE0B577DF1061A866E7364EC7F9E863434700` (0 errors, 0 warnings); `csgo.exe` / `srcds.exe` без изменений.
+- `java-backend\target\matchmaking-backend.jar` SHA-256 `EE296633EE32CBD95795B9DA2C2BAFDC1061DB25372FC855BF6D3AE14CE73A69` (собран из копии исходников: пока backend запущен, Windows не даёт заменить jar обычной сборкой). БД мигрирует при старте.
+- Ставить DLL и jar вместе; перед заменой jar остановите backend.
+
+### 67.6 UNRESOLVED / что проверить live
+
+- Панель проверена синтаксисом (`node --check`) и контрактом API (тесты), но **не визуально в браузере** (вход в панель требует пароля; я его в браузер не вводил). Проверьте вкладку Fake Players глазами.
+- Профили — настройка: игрок, который нажал Play после решения матча, ждёт следующего (fake-состав фиксируется на матч). Игроки должны нажать Play в пределах gather-window.
+- Count меньше capacity даёт матч из `real + count` (например 5 на сервере с maxplayers 10): поведение живого srcds/клиента с ростером не по размеру режима проверено только моделью engine (`0x21/0x25`), не реальным `engine.dll`.
+- Старая настройка `backend.required-players.<mode>=1` теперь не нужна (профиль count 0 даёт то же без legacy-ростера); при ней матч из одного реального игрока армируется как ростер из 1.
+- Проблема «первый матч на свежем srcds» воспроизведена/закрыта в e2e и тестах; на живом srcds (гонка первого 0x21, §66) не подтверждена.
+- Участник party: `game/mmqueue` на клиенте (§65/§66) по-прежнему проверяется live.
+
+---
+
+## §68. READ-ONLY АУДИТ: srcds отвечает `0x25 awaiting=127 total=0` второму реальному игроку; почему друг один раз получил Confirm Match (логи, БД backend, Prefetch; код не менялся)
+
+Аудит по gc_log.txt (srcds + мой клиент), консольным логам друга (`drug.log`, затем `console.log`), копии БД backend и времени запуска процессов. Ничего не исправлялось (исправление — §69). Времена ниже — UTC, серверные (часы друга идут на ≈ +1,78 с вперёд: оценка по `assignment_seen_at` в БД; точность ≈ ±0,2 с).
+
+### 68.1 Симптом
+
+Два реальных игрока в одном Accept-матче с fake. У одного `0x25 stage=1 awaiting=0 total=10` (попап, Accept, подключение), у другого `0x25 stage=1 awaiting=127 total=0` (попап не открывается). Один раз в тот же день Confirm Match появился и у друга, потом снова перестал.
+
+### 68.2 ROOT CAUSE OF 127 (одна цепочка)
+
+```
+backend матч (roster: real + fake)
+ -> srcds запущен с -ip 192.168.1.150 -port 27016, а сервер записан в реестре backend как 146.158.123.140:27016
+ -> RosterFeed::Poller: GET /api/v1/servers/roster?address=192.168.1.150&port=27016   (config.DedicatedServerAddress()/Port() = -ip/-port)
+ -> SearchService.rosterForServer: GameServerRepository.findByHostPort (host = ? AND port = ?, точное совпадение) не находит сервер
+    -> 404, rosterPolls.put(...) не выполняется (только для найденного сервера)
+ -> серверу «не читает roster»: backend не удерживает игроков (assignment приходит < 0,6 с после READY), Controller видит NoMatch
+ -> srcds работает на legacy-ростере: [первый аккаунт, приславший 0x21 после старта процесса] + fake, cookie константа 0x293a206f6c6c6548;
+    m_testWaitingForPlayer = false, roster «липкий» до конца процесса (CreateTestRoster только при пустом m_testRoster)
+ -> 0x21 второго реального аккаунта (stage 1)
+ -> engine CBaseServer::ReplyReservationCheckRequest: cookie совпал, 'Q', аккаунта нет в m_arrReservationPlayers
+    (или резервации нет вовсе: первый 0x21 процесса, окно 12 с после unreserve)
+ -> awaiting остаётся 127, total остаётся 0 -> 0x25 awaiting=127 total=0 -> callback state=3, попап не открывается
+```
+
+`127/0` означает не «нет друга в roster», а одну из двух причин: (1) аккаунта нет в `m_arrReservationPlayers`; (2) резервации нет/истекла. Пакет их не различает, причину определяет окружение (см. 68.5).
+
+### 68.3 Первый 0x21 каждого процесса всегда получает 127/0
+
+Legacy roster взводится в ответ на первый 0x21 (`OnTestRealPlayerSeen` -> `CreateTestRoster` -> `FakeRoster` -> `PostToHost(ReserveServerForQueuedGame)` на главном потоке), а движок отвечает на тот же пакет раньше, чем резервация взведена. Владелец roster видит попап только на втором цикле. Наблюдалось в трёх из трёх процессах, где был первый 0x21 (17:22:43 мой, 17:55:44,7 друга, 18:00:30,6 мой).
+
+### 68.4 Четыре процесса srcds (времена старта — Windows Prefetch)
+
+`gc_log.txt` стирается при старте каждого процесса (`Platform::Initialize`), поэтому старты восстановлены из `C:\Windows\Prefetch\SRCDS.EXE-*.pf` (последние 8 запусков; распаковка MAM/XPRESS-Huffman через `RtlDecompressBufferEx`).
+
+| srcds стартовал | Первый 0x21 процесса | Владелец legacy-roster | Результат друга (1105408685) |
+|---|---|---|---|
+| 17:21:58 | мой (1050166997), 17:22:43 | `[я]+9 fake`, sticky | 4x 127/0 (`m-6a98dbd9`, `m-3fd3e8c4`, `m-49a01df2`, `m-9a6dd21e`) |
+| 17:51:06 | нет 0x21 вообще | нет | нет циклов (backend был недоступен друге) |
+| 17:55:03 | друга, 17:55:44,7 (`m-dbb587a1`) | `[друг]+9 fake` | 127/0 (первый 0x21 процесса), затем **0/10** (`m-bab06f14`, 17:56:30,5) |
+| 17:58:32 | мой, 18:00:30,6, на ≈ 0,4 с раньше друга | `[я]+9 fake`, sticky | 4x 127/0 (`m-db82488f`, `m-bfe48451`, `m-482da600`, `m-dbb971d6`) |
+
+`csgo.exe` (мой клиент) стартовал 17:26:35 и 17:58:27. Между 17:30:28 и 18:00:30 в БД нет ни одного поиска моего аккаунта, поэтому в процессе 17:55:03 первым 0x21 мог быть только 0x21 друга.
+
+### 68.5 Попытки друга (10 матчей + 2 без цикла)
+
+| # | Время (сервер) | Match | Режим | 0x25 | Причина 127/0 |
+|---|---|---|---|---|---|
+| 1 | 17:27:09,6 | `m-6a98dbd9` | Competitive | 127/0 | резервации нет (окно 12 с после idle unreserve) + друга нет в roster (прежний лог) |
+| 2-4 | 17:27:50,5 / 17:29:17,6 / 17:29:48,6 | `m-3fd3e8c4`, `m-49a01df2`, `m-9a6dd21e` | Competitive | 127/0 | друга нет в `m_arrReservationPlayers` (roster `[я]`, резервация активна: мои 0/10 в том же процессе) |
+| — | 17:51:34, 17:52:20 | нет | Competitive | нет 9107 | backend отвечал таймаутом |
+| 5 | 17:55:44,7 | `m-dbb587a1` | Competitive | 127/0 | резервации нет: это первый 0x21 процесса, roster взводится в ответ |
+| **6** | **17:56:30,5** | `m-bab06f14` | Competitive | **stage1 awaiting=0 total=10** | -- **SUCCESS**: попап, Accept (0x21 stage 2 через 5,2 с, 0x25 stage 2 awaiting=0), backend `READY_TO_CONNECT`, второй 9107, QueueConnect, друг подключился к 146.158.123.140:27016 |
+| 7 | 18:00:30,97 | `m-db82488f` | Danger Zone | 127/0 | 0x21 на ≈ 0,4 с позже моего (arm выполняется на главном потоке в следующем кадре) + друга нет в roster |
+| 8, 9 | 18:01:08,2 / 18:02:01,9 | `m-bfe48451`, `m-482da600` | Danger Zone | 127/0 | друга нет в roster: в том же матче в тот же момент мой 0x25 = 0/10 (резервация точно активна). В 9-м 0x21 друга пришёл раньше моего, но roster `[я]` уже существовал и был проигнорирован |
+| 10 | 18:02:50,7 | `m-dbb971d6` | Danger Zone | 127/0 | окно cooldown (нет резервации; порядок строк `nobody connected for 90 s` -> `unreserving` -> `another real player ... ignored` -> `arming Q`) + друга нет в roster |
+
+Во всех 10 циклах клиентская часть (9101 -> MATCHED -> WAITING_ACCEPT -> 9107 -> callback stage=1 -> 0x21 с тем же cookie и account) идентична; расходится только ответ 0x25. Единственный попап и единственный QueueConnect — цикл 6. Кода 9112 в логах друга нет; 9104 приходит при отзыве матча по accept-timeout (~25 с) и закрывает попап `RaiseReadyUp(bool=0)`.
+
+### 68.6 Почему друг получил Confirm Match один раз
+
+После старта srcds в 17:55:03 первым 0x21 за жизнь процесса прислал друг (127/0, roster `[1105408685]+9 fake` взведён в 17:55:44,7). Через 45,8 с, без unreserve/re-arm (rearm на 90 с запускается только из фазы `Done`, т.е. после fake-accept, а попапа ещё не было; шёл только keepalive раз в 8 с), его следующий 0x21 попал в armed roster: `awaiting=0 total=10`. В 17:58:32 srcds перезапустили, в гонке за первый 0x21 выиграл мой аккаунт, roster стал `[я]` до конца процесса. Конфигурация (`-ip` не совпадает с реестром, roster с backend недоступен) не менялась.
+
+Уточнение гипотезы «кто первый»: важен первый 0x21 **за жизнь процесса**, а не первый в цикле.
+
+### 68.7 Обратная проверка: было ли когда-нибудь 200 на `GET /servers/roster`
+
+Нет. (1) В процессе 18:00 poller печатает только `backend roster: no match on this server (no forming or ready match on 192.168.1.150:27016)`, ни одной смены состояния за 4 матча. (2) Во всех матчах разница `ready_at` -> `assignment_seen_at` ≤ 0,51 с (успешный `m-bab06f14` — 0,076 с): hold (`serverReadsRoster`) ни разу не сработал. Успех цикла 6 прошёл через legacy-путь.
+
+### 68.8 CONFIRMED / HIGH CONFIDENCE / HYPOTHESIS / UNRESOLVED
+
+**CONFIRMED:** времена старта srcds/csgo (Prefetch); poller спрашивает `192.168.1.150:27016`, backend знает `146.158.123.140:27016`, ответ — 404; в логе процесса 18:00 roster создан от моего первого 0x21, друг проигнорирован; cookie константа во всех 9107; ни один матч не удерживался до ack srcds; единственный 0/10 у друга — цикл 6, после его 127/0 в цикле 5 и без других 0x21 в БД между ними; друг подключился (лог клиента).
+**HIGH CONFIDENCE:** roster `[друг]` в процессе 17:55:03 возник от его же 0x21 в цикле 5 (лог этого процесса стёрт; следует из кода: roster не меняется в процессе и не переносится между процессами); между циклами 5 и 6 не было unreserve/re-arm; процесс 17:55:03 запущен с теми же `-ip/-port`, что и процесс 18:00 (командной строки нет).
+**HYPOTHESIS:** рестарты srcds в 17:51/17:55/17:58 сделаны вручную при переключении режимов.
+**UNRESOLVED:** внутренний лог srcds процесса 17:55:03 (Reserve/Unreserve/keepalive/cooldown); ответ движка на 0x21 не логируется; порядок 0x21 ±0,2 с (сдвиг часов друга оценён). Что логировать в будущем: метка времени в каждой строке `Platform::Print`, запись «первый 0x21 процесса от аккаунта X», не удалять `gc_log.txt` при старте (или вести файл на процесс).
+
+### 68.9 Замеченные, но не исправленные дефекты
+
+- Отменённый поиск друга остаётся в `roster(m)` для не собирающихся матчей (`listByMatch` включает CANCELLED), тогда как Accept считает только живых (m-9b44ab9f).
+- Legacy roster «липкий» на всё время процесса и берёт первого отправителя 0x21.
+- `FakeRoster` через 90 с после fake-accept делает unreserve и через 12 с заново взводит тот же roster, даже когда матч ещё жив на backend (наблюдается и в §69 после подключения-теста).
+
+---
+
+## §69. ИСПРАВЛЕНИЕ §68: параметры запуска srcds `-backend_ip` / `-backend_port` (реализация -> офлайн-тесты -> сборка -> live подтверждено)
+
+### 69.1 Что сделано
+
+Минимальный изолированный фикс: launch args -> config -> `RosterFeed::Poller`. Адрес, под которым backend знает игровой сервер, теперь задаётся отдельно от адреса, на котором srcds слушает:
+
+- `-ip` / `-port` — как раньше: bind/listen srcds/engine и адрес, куда fake-участники шлют 0x21 (`FakeRoster` params).
+- `-backend_ip` / `-backend_port` — **только** идентификация сервера в `GET /api/v1/servers/roster` и `POST /api/v1/servers/roster/ready`. До движка и игрового сокета не доходят.
+- Fallback (совместимость): без `-backend_ip` — значение `-ip`, без `-backend_port` — значение `-port`; каждый параметр откатывается отдельно. Некорректный `-backend_port` (не число, `0`, > 65535) откатывается на `-port`.
+
+Файлы: новый `csgo_gc/launch_args.h` (header-only, `LaunchArgs::Value`, `ParsePort`, `ResolveServerEndpoints`; разбор `-ip`/`-port` перенесён туда с теми же значениями, `-port` читается по ведущим цифрам, как раньше); `config.h/.cpp` — отдельные геттеры `BackendServerAddress()` / `BackendServerPort()` (не алиас `DedicatedServer*`); `gc_server.cpp` — Poller получает `BackendServer*`, при отличии от игрового адреса печатается строка `game server listens on ..., the backend roster is asked for ... (-backend_ip/-backend_port)`; комментарий в `server_roster.h`. Legacy first-0x21 fallback **не удалён**. Не менялись: capacity, число fake, Fake Players в панели, Accept lifecycle, 9107, протокол 0x21/0x25, keepalive, QueueConnect, bind/listen.
+
+### 69.2 Тесты
+
+- `offline_tests/roster/launch_args_test.exe` (сборка `offline_tests/roster/build.bat`): настоящие `launch_args.h`, `RosterFeed::Poller`, `backend_client` против захватывающего HTTP-сервера на 127.0.0.1:18093. Case 1 (`-ip 192.168.1.150 -port 27016 -backend_ip 146.158.123.140 -backend_port 27016`): запрос `address=146.158.123.140&port=27016`, игровой адрес остаётся `192.168.1.150:27016`. Case 2 (без `-backend_*`): `192.168.1.150:27016`. Case 3 (`-backend_port 27099`): ровно `146.158.123.140:27099`, игровой порт в запросе отсутствует. `POST roster/ready` идёт с тем же адресом. Дополнительно: только один из параметров, порядок аргументов, `-backend_ip` без значения, мусор/0/70000 в `-backend_port`. `RESULT: OK`.
+- `offline_tests/reservation/client_flow_test.exe`: проверка исходника `gc_server.cpp` — Poller получает `BackendServerAddress()/BackendServerPort()`, `FakeRoster` остаётся на `DedicatedServer*` (63 проверки, 0 failed). `keepalive_test` 78/0, `controller_test` 0 failed. `roster_e2e` не перезапускался (нужен настоящий backend, путь Poller не менялся).
+
+### 69.3 Параметры запуска по режимам
+
+Только srcds с `-gc_mode` спрашивают roster у backend; обычные (casual, deathmatch и т.д.) не меняются. Записи в панели Game Servers должны совпадать с `-backend_ip:-backend_port` и категорией режима (иначе 404 и legacy).
+
+| Режим (roster) | Команда | Запись в Game Servers |
+|---|---|---|
+| Competitive (10) | `srcds.exe -game csgo -console -usercon -insecure -ip 192.168.1.150 -port 27016 -backend_ip 146.158.123.140 -backend_port 27016 -gc_mode competitive +game_type 0 +game_mode 1 +map de_overpass` | `146.158.123.140:27016`, `competitive`, `de_overpass` |
+| Wingman (4) | `srcds.exe -game csgo -console -usercon -insecure -ip 192.168.1.150 -port 27017 -backend_ip 146.158.123.140 -backend_port 27017 -gc_mode wingman +game_type 0 +game_mode 2 +map de_lake` | `146.158.123.140:27017`, `wingman`, `de_lake` |
+| Danger Zone (16) | `srcds.exe -game csgo -console -usercon -insecure -ip 192.168.1.150 -port 27018 -backend_ip 146.158.123.140 -backend_port 27018 -gc_mode dangerzone +game_type 6 +game_mode 0 +map dz_sirocco` | `146.158.123.140:27018`, `dangerzone`, `dz_sirocco` |
+
+Порты 27017/27018 — предложение (одновременная работа трёх серверов; раньше LAN-порты были 27017/27018/27019). Если роутер пробрасывает внешний порт на другой внутренний, `-backend_port` — внешний (как в записи панели), `-port` — внутренний.
+
+### 69.4 Сборка
+
+- `Build\release\csgo_gc\csgo_gc.dll` собран из этих исходников (мой билд 22:36 — SHA-256 `33AD578E5C6F1ED2D329C026ADEFDA407FE7BC3A3D9DE4950F972CF44282E562`); в игровой папке `csgo_gc\csgo_gc.dll` и `Build\release` — пересборка 22:43 из тех же исходников (более новых файлов нет), SHA-256 `6D2D5F905B3A981548F3B34B61EACDF80FE32CAAD72C66E3D0C659464F5C5557`. Java backend не менялся.
+
+### 69.5 Live-подтверждение (gc_log.txt srcds+клиент, srcds `-gc_mode dangerzone -port 27016 -backend_ip 146.158.123.140 -backend_port 27016`)
+
+По журналу srcds (метки времени в нём нет, порядок строк):
+1. `game server listens on 192.168.1.150:27016, the backend roster is asked for 146.158.123.140:27016 (-backend_ip/-backend_port)`; `backend roster: asking the backend for the roster of 146.158.123.140:27016 once a second`; в простое `no match on this server (no forming or ready match on 146.158.123.140:27016)` — теперь с правильным адресом.
+2. Матч `m-0adf1e2e`: `backend roster: match m-0adf1e2e READY dangerzone: 16 participants (2 real + 14 fake) of 16` -> `arming the roster of backend match m-0adf1e2e (16 participants)` -> `roster ... is armed and every fake participant is at stage 1: telling the backend` -> `armed -> confirmed ({"match_id":"m-0adf1e2e","promoted":2})`. Строк legacy (`real player detected from its 0x21`, `another real player ... ignored`) нет.
+3. Мой клиент: 9107 приходит только после подтверждения roster (hold работает), первый же `0x25 stage=1 awaiting=0 total=16` (без MISMATCH), `popup_accept_match_found`, Accept: `0x25 stage=2 awaiting=0 total=16`, `1 of 2 real players accepted - nobody connects before all of them did`, затем backend `every player of match m-0adf1e2e accepted (2/2): connecting is allowed`, второй 9107, `popup_accept_match_confirmed`, `QueueConnectToServer RAISED`.
+4. Оба реальных игрока (1105408685 и 1050166997) в roster матча и оба приняты backend'ом (`promoted: 2`, accepted 2/2). Логов друга за этот матч у меня нет; по сообщению пользователя, подбор работает корректно.
+5. После завершения матча: `backend match m-0adf1e2e is gone ... releasing its reservation` -> `unreserving, nothing is kept alive or armed again`.
+
+### 69.6 UNRESOLVED / замечания
+
+- Успех подтверждён на Danger Zone (2 real + 14 fake = 16). Competitive/Wingman с `-backend_*` live не прогонялись отдельно.
+- Пока матч жив на backend, но никто не подключился, `FakeRoster` каждые ~108 с (90 с + 12 с) делает unreserve и заново взводит тот же roster (в логе идут повторные `nobody connected for 90 s ... re-arming` до `match ... is gone`); на исход подбора не влияет, см. 68.9.
+- Legacy first-0x21 fallback оставлен как страховка (нет backend, нет матча, roster не по режиму); его удаление — отдельная задача после подтверждения backend-пути на остальных режимах.

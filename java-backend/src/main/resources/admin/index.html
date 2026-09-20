@@ -98,27 +98,37 @@
 
   <!-- ================================ Fake Players ================================ -->
   <section id="tab-fake" class="panel" hidden>
-    <p class="muted intro">TEST tool. A fake search is a group of virtual players that fills a Competitive / Wingman / Danger Zone
-      match a <b>real</b> player has started (they never start a match or take a server on their own). The real player searches
-      as usual; when the server of the match is on one of the fake search's maps, the virtual players join it and the match is
-      complete. With no enabled fake search nothing changes. Retail sizes: Competitive 10, Wingman 4, Danger Zone 16, so the
-      real player + fake players have to add up to that (the backend setting <code>backend.required-players.*</code> lowers
-      the number for a test setup that does not use fake searches).</p>
+    <p class="muted intro">TEST tool. A profile says how many <b>virtual players</b> a Competitive / Wingman / Danger Zone match gets.
+      Real players who search the same mode within the <b>gather window</b> end up in one match (that answers "who is in the match");
+      then the enabled profile of the mode with the highest priority whose maps (and server) fit the match is applied
+      (that answers "how many fake"): the match gets <code>min(count, capacity - real players)</code> virtual players. The capacity
+      of the mode (Competitive 10, Wingman 4, Danger Zone 16) is never changed and the count is never topped up to it: 3 real + count 2 = a
+      match of 5. Count 0 starts the match with its real players only. Virtual players have no Accept: the match waits for every
+      <b>real</b> player. With the switch OFF, a disabled profile or no profile for the mode, matches wait for real players like
+      without the tool. Changes apply to the next match that is decided.</p>
     <div id="fakeOff" class="banner-inline" hidden>The fake players tool is switched off on this backend (backend.fake-players.enabled=false).</div>
+    <form id="fakeSettingsForm" class="row">
+      <label class="check"><input type="checkbox" id="fakeMaster"> <b>Fake Players</b></label>
+      <span class="muted" id="fakeMasterState"></span>
+      <label>Gather window, s <input id="fakeWindow" type="number" min="0" max="600" value="10" class="narrow"></label>
+      <button type="submit">Save window</button>
+    </form>
     <table id="fakeTable">
       <thead>
-        <tr><th>Status</th><th>Players</th><th>Mode</th><th>Maps</th><th>Match / server</th><th></th></tr>
+        <tr><th>Profile</th><th>Mode</th><th>Fake count</th><th>Maps</th><th>Server</th><th>Priority</th><th>Used by (live matches)</th><th></th></tr>
       </thead>
       <tbody></tbody>
     </table>
-    <p id="fakeEmpty" class="empty" hidden>No fake searches. Add one below.</p>
+    <p id="fakeEmpty" class="empty" hidden>No profiles. Add one below.</p>
 
-    <h3>Add fake search</h3>
+    <h3>Add profile</h3>
     <form id="fakeForm" class="row">
       <label>Mode <select name="mode" id="fakeMode"></select></label>
-      <label>Players <input name="players" id="fakePlayers" type="number" min="1" max="15" value="3" required class="narrow"></label>
+      <label>Fake count <input name="players" id="fakePlayers" type="number" min="0" max="15" value="7" required class="narrow"></label>
       <label class="grow">Maps <input name="maps" id="fakeMaps" placeholder="empty = any map, or de_dust2, de_mirage" pattern="[A-Za-z0-9_, ]*"></label>
-      <label class="check"><input name="enabled" type="checkbox" checked> start searching</label>
+      <label>Server <select name="server" id="fakeServer"><option value="">any server</option></select></label>
+      <label>Priority <input name="priority" type="number" min="-1000" max="1000" value="0" class="narrow"></label>
+      <label class="check"><input name="enabled" type="checkbox" checked> on</label>
       <button type="submit" class="primary">Add</button>
     </form>
     <div id="fakeChips" class="chips"></div>

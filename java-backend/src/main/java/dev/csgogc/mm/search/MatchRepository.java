@@ -12,7 +12,8 @@ import org.springframework.stereotype.Repository;
 public class MatchRepository {
 
     private static final String COLUMNS = "id, category, server_id, server_host, server_port, map, required_players, "
-            + "accept_required, status, created_at, ready_at, ended_at, accept_deadline_at, accepted_at";
+            + "accept_required, status, created_at, ready_at, ended_at, accept_deadline_at, accepted_at, "
+            + "fake_search_id, fake_count, fake_configured";
 
     private final JdbcClient jdbc;
 
@@ -117,9 +118,27 @@ public class MatchRepository {
         jdbc.sql("UPDATE matchmaking_match SET status = 'FULL' WHERE id = ? AND status = 'FORMING'").param(id).update();
     }
 
-    /** a player left a full match: it gathers again */
+    /** a player left a full match: it gathers again, and its virtual players are decided afresh once the window is over */
     public void revertToForming(String id) {
-        jdbc.sql("UPDATE matchmaking_match SET status = 'FORMING' WHERE id = ? AND status = 'FULL'").param(id).update();
+        jdbc.sql("UPDATE matchmaking_match SET status = 'FORMING', fake_search_id = NULL, fake_count = 0, fake_configured = NULL "
+                        + "WHERE id = ? AND status = 'FULL'").param(id).update();
+    }
+
+    /** the Fake Players profile chosen for the match and the number of virtual players it gets (only while it is gathering) */
+    public boolean setFake(String id, long profileId, int configured, int count) {
+        return jdbc.sql("UPDATE matchmaking_match SET fake_search_id = ?, fake_configured = ?, fake_count = ? "
+                        + "WHERE id = ? AND status = 'FORMING'")
+                .params(profileId, configured, count, id)
+                .update() > 0;
+    }
+
+    /** the live matches that used a profile (for the panel) */
+    public List<MatchRecord> findLiveByFakeProfile(long profileId) {
+        return jdbc.sql("SELECT " + COLUMNS + " FROM matchmaking_match WHERE fake_search_id = ? AND status IN " + MatchStatus.LIVE_SQL
+                        + " ORDER BY created_at DESC, id DESC")
+                .param(profileId)
+                .query(MatchRepository::map)
+                .list();
     }
 
     /** FULL -> READY: the server that was reserved for the match (same transaction as GameServerRepository.reserve) */
@@ -162,6 +181,10 @@ public class MatchRepository {
     }
 
     private static MatchRecord map(ResultSet rs, int row) throws SQLException {
+        long profile = rs.getLong("fake_search_id");
+        Long fakeSearchId = rs.wasNull() ? null : profile;
+        int fakeConfigured = rs.getInt("fake_configured");
+        boolean fakeConfiguredNull = rs.wasNull();
         return new MatchRecord(
                 rs.getString("id"),
                 rs.getString("category"),
@@ -176,6 +199,9 @@ public class MatchRepository {
                 instantOrNull(rs, "ready_at"),
                 instantOrNull(rs, "ended_at"),
                 instantOrNull(rs, "accept_deadline_at"),
-                instantOrNull(rs, "accepted_at"));
+                instantOrNull(rs, "accepted_at"),
+                fakeSearchId,
+                rs.getInt("fake_count"),
+                fakeConfiguredNull ? null : fakeConfigured);
     }
 }

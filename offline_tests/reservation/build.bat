@@ -13,6 +13,7 @@ copy /y "%HERE%client_flow_test.cpp" "%OUT%\" >nul
 copy /y "%SRC%\reservation_keepalive.h" "%OUT%\" >nul
 copy /y "%SRC%\gc_client.cpp" "%OUT%\gc_client.cpp.src" >nul
 copy /y "%SRC%\gc_server.cpp" "%OUT%\gc_server.cpp.src" >nul
+copy /y "%SRC%\backend_client.cpp" "%OUT%\backend_client.cpp.src" >nul
 call "%HERE%..\..\tools\msvc\VC\Auxiliary\Build\vcvarsamd64_x86.bat" >nul 2>&1
 cd /d "%OUT%"
 cl /nologo /std:c++17 /EHsc /W3 /D_CRT_SECURE_NO_WARNINGS /I. /Fe:keepalive_test.exe keepalive_test.cpp || exit /b 1

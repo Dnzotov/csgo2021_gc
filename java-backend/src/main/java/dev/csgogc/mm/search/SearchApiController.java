@@ -79,6 +79,20 @@ public class SearchApiController {
      * The GC polls this while a search runs: it keeps the search alive (timeout), and answers with its state. Once the
      * match is complete the search has status WAITING_ACCEPT / READY_TO_CONNECT and an "assignment" (the server).
      */
+    /**
+     * The GC of a player asks whether its account has a live search. A party member's client never sends a search: the
+     * leader's does, and the backend keeps a search for every member (RESEARCH_FINDINGS.md #65). Its GC polls this to find
+     * it (the answer carries party_leader_id, request_id, mode and game_type), then follows it like any search. 404 = none.
+     */
+    @GetMapping("/matchmaking/account/{accountId}")
+    public Map<String, Object> accountSearch(@PathVariable @Min(1) @Max(0xFFFFFFFFL) long accountId) {
+        SearchView view = searches.pollAccount(accountId)
+                .orElseThrow(() -> ApiException.notFound("no live search for account " + accountId));
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("search", view);
+        return body;
+    }
+
     @GetMapping("/matchmaking/search/{requestId}")
     public Map<String, Object> state(@PathVariable @Pattern(regexp = "[A-Za-z0-9_.:-]{1,64}") String requestId) {
         SearchView view = searches.poll(requestId)

@@ -82,28 +82,33 @@ class AcceptLifecycleTest extends BackendTestBase {
         assertThat(matches().get(0).get("server_address").asText()).isEmpty();
     }
 
-    /** 2. 9/10: still not */
+    /** 2. the match is still gathering (the window of the Fake Players is running): no server is reserved */
     @Test
-    void nineOfTenDoesNotReserveAServer() throws Exception {
+    void aGatheringMatchDoesNotReserveAServer() throws Exception {
         long serverId = addServer("192.168.1.150", 27017, "competitive", "de_dust2");
         addFake("competitive", 8, DUST2);
+        gatherWindow(10);
         JsonNode real = search(REAL, COMPETITIVE, DUST2, "r");
-        assertThat(real.get("match").get("players").asInt()).isEqualTo(9);
+        assertThat(real.get("match").get("players").asInt()).isEqualTo(1);
         assertThat(matchStatus(real)).isEqualTo("FORMING");
         assertThat(statusOf(real)).isEqualTo("MATCHED");
+        pass(9);
+        assertThat(matchStatus(poll("r"))).isEqualTo("FORMING");
         assertThat(state(serverId)).isEqualTo("AVAILABLE");
     }
 
-    /** 3. 10/10: the server is RESERVED, by that very match */
+    /** 3. the match is complete (real + configured virtual players): the server is RESERVED, by that very match */
     @Test
-    void tenOfTenReservesTheServer() throws Exception {
+    void aCompleteMatchReservesTheServer() throws Exception {
         long serverId = addServer("192.168.1.150", 27017, "competitive", "de_dust2");
         addFake("competitive", 8, DUST2);
+        gatherWindow(10);
         JsonNode real = search(REAL, COMPETITIVE, DUST2, "r");
         assertThat(state(serverId)).isEqualTo("AVAILABLE");
 
-        addFake("competitive", 1, DUST2);                                  // the tenth participant arrives
+        pass(11);                                                          // the window is over: 1 real + 8 fake
         JsonNode full = poll("r");
+        assertThat(full.get("match").get("players").asInt()).isEqualTo(9);
         assertThat(state(serverId)).isEqualTo("RESERVED");
         assertThat(server(serverId).get("reserved_match_id").asText()).isEqualTo(matchIdOf(full));
         assertThat(matchIdOf(full)).isEqualTo(matchIdOf(real));
@@ -153,8 +158,11 @@ class AcceptLifecycleTest extends BackendTestBase {
     void theMatchNeedsTheReportOfEveryRealPlayerAndOnlyMembersCanReport() throws Exception {
         addServer("192.168.1.150", 27018, "wingman", "de_lake");
         addFake("wingman", 2, null);
+        gatherWindow(10);
         search(1, WINGMAN, "\"de_lake\"", "a");
-        JsonNode second = search(2, WINGMAN, "\"de_lake\"", "b");            // 2 real + 2 fake = 4: the Accept starts
+        search(2, WINGMAN, "\"de_lake\"", "b");
+        pass(11);
+        JsonNode second = poll("b");                                        // 2 real + 2 fake = 4: the Accept starts
         String matchId = matchIdOf(second);
         assertThat(matchStatus(second)).isEqualTo("ACCEPTING");
 
@@ -232,25 +240,27 @@ class AcceptLifecycleTest extends BackendTestBase {
         assertThat(freed.has("available_after")).isTrue();                  // not handed out before the cooldown is over
     }
 
-    /** 8. ... the fake players are SEARCHING again: on their own, they are in the next match, nobody presses Start */
+    /** 8. ... the profile stays: the next match of the same player gets its virtual players from it again, nobody presses Start */
     @Test
-    void theAcceptTimeoutQueuesTheFakePlayersAgain() throws Exception {
+    void theAcceptTimeoutKeepsTheProfileForTheNextMatch() throws Exception {
         addServer("192.168.1.150", 27017, "competitive", "de_dust2");
         long fakeId = addFake("competitive", 9, DUST2);
         String first = matchIdOf(search(REAL, COMPETITIVE, DUST2, "r"));
-        assertThat(fake(fakeId).get("status").asText()).isEqualTo("MATCHED");
+        assertThat(fake(fakeId).get("matches").get(0).get("match_id").asText()).isEqualTo(first);
 
         clock.advance(Duration.ofSeconds(26));
         tick();
-        JsonNode fakeAgain = fake(fakeId);
-        assertThat(fakeAgain.get("status").asText()).isEqualTo("MATCHED");            // searching again -> in the next match
-        assertThat(fakeAgain.get("match").get("match_id").asText()).isNotEqualTo(first);
-        assertThat(fakeAgain.get("match").get("match_status").asText()).isEqualTo("FULL");
+        JsonNode again = fake(fakeId);
+        assertThat(again.get("status").asText()).isEqualTo("ON");
+        assertThat(again.get("matches").size()).isEqualTo(1);                          // only the live match: the new one
+        assertThat(again.get("matches").get(0).get("match_id").asText()).isNotEqualTo(first);
+        assertThat(again.get("matches").get(0).get("match_status").asText()).isEqualTo("FULL");
+        assertThat(again.get("matches").get(0).get("fake_players").asInt()).isEqualTo(9);
     }
 
-    /** 8b. the same without a real player to gather with: SEARCHING is exactly where they are left */
+    /** 8b. the real player leaves during the Accept: the match is gone, the profile is untouched and used by nobody */
     @Test
-    void theFakePlayersAreSearchingWhenTheRealPlayerLeavesDuringTheAccept() throws Exception {
+    void theProfileIsUntouchedWhenTheRealPlayerLeavesDuringTheAccept() throws Exception {
         addServer("192.168.1.150", 27017, "competitive", "de_dust2");
         long fakeId = addFake("competitive", 9, DUST2);
         String matchId = matchIdOf(search(REAL, COMPETITIVE, DUST2, "r"));
@@ -258,8 +268,8 @@ class AcceptLifecycleTest extends BackendTestBase {
         cancel(REAL, "r");                                                  // the player pressed Cancel instead of Accept
         assertThat(match(matchId).get("status").asText()).isEqualTo("CANCELLED");
         JsonNode f = fake(fakeId);
-        assertThat(f.get("status").asText()).isEqualTo("SEARCHING");
-        assertThat(f.hasNonNull("match")).isFalse();
+        assertThat(f.get("status").asText()).isEqualTo("ON");
+        assertThat(f.get("matches").size()).isZero();
     }
 
     /** 9. a search after the timeout is gathered normally: a NEW match, the same server once it is free again */
@@ -298,8 +308,11 @@ class AcceptLifecycleTest extends BackendTestBase {
     void theTimeoutSendsEveryPlayerBackToTheQueueEvenTheOneWhoAccepted() throws Exception {
         addServer("192.168.1.150", 27018, "wingman", "de_lake");
         addFake("wingman", 2, null);
+        gatherWindow(10);
         search(1, WINGMAN, "\"de_lake\"", "a");
-        String matchId = matchIdOf(search(2, WINGMAN, "\"de_lake\"", "b"));
+        search(2, WINGMAN, "\"de_lake\"", "b");
+        pass(11);
+        String matchId = matchIdOf(poll("b"));
         assertThat(accepted(1, "a").get("match_accepted").asBoolean()).isFalse();   // b never accepts
 
         clock.advance(Duration.ofSeconds(26));
@@ -375,8 +388,11 @@ class AcceptLifecycleTest extends BackendTestBase {
     void aPlayerWhoLeavesAfterAcceptingDoesNotCancelTheMatch() throws Exception {
         addServer("192.168.1.150", 27018, "wingman", "de_lake");
         addFake("wingman", 2, null);
+        gatherWindow(10);
         search(1, WINGMAN, "\"de_lake\"", "a");
-        String matchId = matchIdOf(search(2, WINGMAN, "\"de_lake\"", "b"));
+        search(2, WINGMAN, "\"de_lake\"", "b");
+        pass(11);
+        String matchId = matchIdOf(poll("b"));
         accepted(1, "a");
         cancel(1, "a");                                                     // connecting: the client sends its stop
         assertThat(match(matchId).get("status").asText()).isEqualTo("ACCEPTING");
@@ -390,15 +406,17 @@ class AcceptLifecycleTest extends BackendTestBase {
         addFake("wingman", 3, null);
         assertThat(matchStatus(search(1, WINGMAN, "\"de_lake\"", "a"))).isEqualTo("ACCEPTING");   // holds the only server
 
-        addFake("wingman", 2, null);
+        gatherWindow(10);
         search(2, WINGMAN, "\"de_lake\"", "c");
-        JsonNode d = search(3, WINGMAN, "\"de_lake\"", "d");               // c + d + 2 fake = 4: full, but no free server
-        assertThat(matchStatus(d)).isEqualTo("FULL");
+        search(3, WINGMAN, "\"de_lake\"", "d");
+        pass(11);                                                           // c + d + 2 fake = 4: full, but no free server
+        assertThat(matchStatus(poll("d"))).isEqualTo("FULL");
 
-        cancel(3, "d");
+        cancel(3, "d");                                                     // the match gathers again; its window is over: c + 3 fake
         JsonNode c = poll("c");
-        assertThat(matchStatus(c)).isEqualTo("FORMING");                    // 3/4: it gathers again
-        assertThat(c.get("match").get("players").asInt()).isEqualTo(3);
+        assertThat(matchStatus(c)).isEqualTo("FULL");
+        assertThat(c.get("match").get("players").asInt()).isEqualTo(4);
+        assertThat(c.get("match").get("fake_players").asInt()).isEqualTo(3);
     }
 
     // ------------------------------------------------------------------------------------------ two full matches, one server
@@ -526,12 +544,12 @@ class AcceptLifecycleTest extends BackendTestBase {
     @Test
     void anEmptyGatheringMatchIsDissolved() throws Exception {
         addServer("192.168.1.150", 27017, "competitive", "de_dust2");
-        long fakeId = addFake("competitive", 3, DUST2);
+        addFake("competitive", 3, DUST2);
+        gatherWindow(10);
         search(REAL, COMPETITIVE, DUST2, "r");
-        assertThat(fake(fakeId).get("status").asText()).isEqualTo("MATCHED");
+        assertThat(matches().get(0).get("status").asText()).isEqualTo("FORMING");
         jdbc.sql("UPDATE matchmaking_search SET status = 'CANCELLED', ended_at = 1 WHERE request_id = 'r'").update();   // vanished
         tick();
-        assertThat(fake(fakeId).get("status").asText()).isEqualTo("SEARCHING");
         assertThat(matches().get(0).get("status").asText()).isEqualTo("CANCELLED");
     }
 

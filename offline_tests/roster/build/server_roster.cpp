@@ -137,6 +137,7 @@ bool Controller::InArmedRoster(uint32_t accountId) const
 void Controller::OnSnapshot(const Snapshot &snapshot)
 {
     m_snapshot = snapshot;
+    m_hasSnapshot = true;
     Apply();
 }
 
@@ -197,13 +198,22 @@ void Controller::Apply()
     }
 
     const Snapshot &roster = m_snapshot;
-    const bool realPresent = std::any_of(roster.participants.begin(), roster.participants.end(),
-        [](uint32_t id) { return (id & 0xFFFF0000u) != 0xFA4E0000u; }); // AcceptTest::IsFakeAccountId
-    if (!roster.acceptRequired || roster.mode != m_modeName || roster.participants.size() != m_requiredPlayers || !realPresent)
+    const size_t realCount = static_cast<size_t>(std::count_if(roster.participants.begin(), roster.participants.end(),
+        [](uint32_t id) { return (id & 0xFFFF0000u) != 0xFA4E0000u; })); // AcceptTest::IsFakeAccountId
+    const bool realPresent = realCount > 0;
+    const bool sizeFits = roster.participants.size() == m_requiredPlayers;
+
+    // The backend is the source of truth for WHO is in the match, whatever the size: the Fake Players profile of the panel decides
+    // how many virtual players a match gets (3 real + 2 fake = a roster of 5 on a 10 player mode, RESEARCH_FINDINGS.md #67). The
+    // legacy roster (first sniffed 0x21 + the srcds' own fake ids up to the mode's size) holds ONE real player and would drop
+    // the others and the configured count, so it is only for a match that is not an Accept match of this srcds' mode / has no
+    // real player (RESEARCH_FINDINGS.md #66/#67).
+    const bool armAnyway = !sizeFits;
+    if (!roster.acceptRequired || roster.mode != m_modeName || !realPresent)
     {
-        Platform::Print("[MM-ACCEPT] backend roster of match %s (%s, %zu participants) does not fit this srcds (%s needs %u): "
+        Platform::Print("[MM-ACCEPT] backend roster of match %s (%s, %zu participants, %zu real) does not fit this srcds (%s needs %u): "
             "using the legacy roster, the players are not held\n",
-            roster.matchId.c_str(), roster.mode.c_str(), roster.participants.size(), m_modeName.c_str(), m_requiredPlayers);
+            roster.matchId.c_str(), roster.mode.c_str(), roster.participants.size(), realCount, m_modeName.c_str(), m_requiredPlayers);
         if (m_confirmedMatchId != roster.matchId)
         {
             m_confirmedMatchId = roster.matchId;
@@ -211,6 +221,14 @@ void Controller::Apply()
         }
 
         return;
+    }
+
+    if (armAnyway && m_lastSizeWarning != roster.matchId)
+    {
+        m_lastSizeWarning = roster.matchId;
+        Platform::Print("[MM-ACCEPT] backend roster of match %s has %zu participants (%zu real), the capacity of %s is %u: armed as it "
+            "is - the number of virtual players is the Fake Players setting of the backend, it is not topped up to the capacity\n",
+            roster.matchId.c_str(), roster.participants.size(), realCount, m_modeName.c_str(), m_requiredPlayers);
     }
 
     m_usable = true;

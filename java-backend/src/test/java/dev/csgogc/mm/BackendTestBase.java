@@ -52,7 +52,9 @@ import org.springframework.test.web.servlet.request.RequestPostProcessor;
         "backend.roster-ack-timeout=PT25S",
         "backend.roster-poll-window=PT10S",
         "backend.accept-timeout=PT25S",
-        "backend.server-release-cooldown=PT15S"
+        "backend.server-release-cooldown=PT15S",
+        // the tests fill a match with fake players at once; the gather window has its own test class (GatherWindowTest)
+        "backend.fake-players.gather-window=PT0S"
 })
 @AutoConfigureMockMvc
 @Import(BackendTestBase.ClockConfig.class)
@@ -111,6 +113,7 @@ abstract class BackendTestBase {
 
     @BeforeEach
     void cleanDatabase() {
+        jdbc.sql("DELETE FROM backend_setting").update();
         jdbc.sql("DELETE FROM fake_search").update();
         jdbc.sql("DELETE FROM matchmaking_search").update();
         jdbc.sql("DELETE FROM matchmaking_match").update();
@@ -183,10 +186,39 @@ abstract class BackendTestBase {
     }
 
     long addFake(String mode, int players, String maps, boolean enabled) throws Exception {
+        return addFake(mode, players, maps, enabled, 0, null);
+    }
+
+    /** a Fake Players profile: how many virtual players a match of the mode gets (players), on which maps, [server], [priority] */
+    long addFake(String mode, int players, String maps, boolean enabled, int priority, Long serverId) throws Exception {
         String request = "{\"mode\":\"" + mode + "\",\"players\":" + players
-                + (maps == null ? "" : ",\"maps\":[" + maps + "]") + ",\"enabled\":" + enabled + "}";
+                + (maps == null ? "" : ",\"maps\":[" + maps + "]") + ",\"enabled\":" + enabled + ",\"priority\":" + priority
+                + (serverId == null ? "" : ",\"server_id\":" + serverId) + "}";
         return body(mvc.perform(post("/admin/api/fake-searches").with(ADMIN).with(csrf())
                 .contentType(MediaType.APPLICATION_JSON).content(request)).andExpect(status().isCreated())).get("id").asLong();
+    }
+
+    /** the panel: the master switch Fake Players ON / OFF */
+    void fakeMaster(boolean on) throws Exception {
+        mvc.perform(put("/admin/api/fake-settings").with(ADMIN).with(csrf()).contentType(MediaType.APPLICATION_JSON)
+                .content("{\"master\":" + on + "}")).andExpect(status().isOk());
+    }
+
+    /** the panel: how long a gathering match waits for more real players before its virtual players are decided */
+    void gatherWindow(int seconds) throws Exception {
+        mvc.perform(put("/admin/api/fake-settings").with(ADMIN).with(csrf()).contentType(MediaType.APPLICATION_JSON)
+                .content("{\"gather_window_seconds\":" + seconds + "}")).andExpect(status().isOk());
+    }
+
+    /** GET /admin/api/fake-searches: enabled (tool), master, gather_window_seconds, fake_searches */
+    JsonNode fakeOverview() throws Exception {
+        return body(mvc.perform(get("/admin/api/fake-searches").with(ADMIN)).andExpect(status().isOk()));
+    }
+
+    /** time passes, the timers run */
+    void pass(int seconds) throws Exception {
+        clock.advance(Duration.ofSeconds(seconds));
+        tick();
     }
 
     JsonNode fake(long id) throws Exception {

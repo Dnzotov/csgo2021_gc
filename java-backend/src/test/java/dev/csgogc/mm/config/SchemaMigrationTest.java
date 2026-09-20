@@ -53,8 +53,10 @@ class SchemaMigrationTest {
 
             assertThat(columns(statement, "game_server")).contains("state", "reserved_match_id", "reserved_at",
                     "last_assigned_at", "last_heartbeat_at", "max_players", "available_after");
-            assertThat(columns(statement, "matchmaking_search")).contains("match_id", "matched_at", "variants", "accepted_at");
-            assertThat(columns(statement, "fake_search")).contains("category", "players", "maps", "enabled", "status", "match_id");
+            assertThat(columns(statement, "matchmaking_search")).contains("match_id", "matched_at", "variants", "accepted_at",
+                    "party_leader_id", "assignment_seen_at");   // #65 party, #66 who fetched the assignment
+            assertThat(columns(statement, "fake_search")).contains("category", "players", "maps", "enabled", "status", "match_id",
+                    "taken");   // #66: a fake search is a pool, it records how many players it gave its match
             assertThat(columns(statement, "matchmaking_match")).contains("server_id", "required_players", "status",
                     "accept_deadline_at", "accepted_at");   // the Accept lifecycle of #63
 

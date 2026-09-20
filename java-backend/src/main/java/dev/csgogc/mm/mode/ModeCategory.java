@@ -4,13 +4,15 @@ import java.util.Arrays;
 import java.util.Optional;
 
 /**
- * The MVP matchmaking categories. Values mirror csgo_gc/mm_modes.cpp (RESEARCH_FINDINGS.md #44/#45/#46.3):
- * {@code eGame} is {@code MatchmakingStart.game_type & 0xF}. ScrimComp5v5 and Cooperative are deliberately absent.
+ * The matchmaking categories. Values mirror csgo_gc/mm_modes.cpp (RESEARCH_FINDINGS.md #44/#45/#46.3):
+ * {@code eGame} is {@code MatchmakingStart.game_type & 0xF}. Cooperative (eGame 9) is not served by the GC (mm_modes.cpp: supported = false).
  */
 public enum ModeCategory {
     COMPETITIVE("competitive", "Competitive", 8, "classic", "competitive", 10),
     WINGMAN("wingman", "Wingman", 10, "classic", "scrimcomp2v2", 4),
     DANGERZONE("dangerzone", "Danger Zone", 13, "freeforall", "survival", 16),
+    /** eGame 11: the 5v5 scrimmage, an Accept mode like Competitive (the GC serves it: csgo_gc/mm_modes.cpp) */
+    SCRIMCOMP5V5("scrimcomp5v5", "Scrimmage 5v5", 11, "classic", "scrimcomp5v5", 10),
     CASUAL("casual", "Casual", 7, "classic", "casual", 0),
     DEATHMATCH("deathmatch", "Deathmatch", 6, "gungame", "deathmatch", 0),
     ARMSRACE("armsrace", "Arms Race", 4, "gungame", "gungameprogressive", 0),

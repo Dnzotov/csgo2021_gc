@@ -13,7 +13,8 @@
 //
 // The Java matchmaking backend is the source of truth for who takes part in a test match: the real players and the
 // virtual (fake) participants of its Fake Players tool. A dedicated server started with -gc_mode asks it once a second
-// (GET /api/v1/servers/roster for its own address:port), arms its reservation with exactly that roster and, when every
+// (GET /api/v1/servers/roster for the address:port the backend knows it by: -backend_ip/-backend_port, else -ip/-port, see
+// launch_args.h), arms its reservation with exactly that roster and, when every
 // fake participant is confirmed at reservation stage 1, tells the backend (POST /api/v1/servers/roster/ready). Only then
 // does the backend give the players their server, so the retail reservation check succeeds on the first try.
 //
@@ -53,9 +54,11 @@ bool Deserialize(const std::string &text, Snapshot &snapshot);
 // GC thread feeds it the poller's answers and the fake driver's readiness and it calls back what to do. It is a class of
 // its own so the whole decision table is tested offline (RESEARCH_FINDINGS.md #55).
 //
-//   * a COMPLETE match (READY) whose roster has the mode's size and a real player -> arm exactly that roster
+//   * a COMPLETE match (READY) of this srcds' mode with a real player -> arm exactly that roster, whatever its size (the
+//     Fake Players profile of the backend decides how many virtual players a match gets: 3 real + 2 fake = 5 on a 10 player mode;
+//     the legacy roster holds one real player, it would drop the rest, RESEARCH_FINDINGS.md #66/#67)
 //     (replacing another one first), and once every fake participant is at stage 1 tell the backend "armed";
-//   * anything else (no match, backend down, a roster of another size, e.g. required-players=1) -> the legacy roster
+//   * anything else (no match, backend down, another mode, a match that needs no Accept) -> the legacy roster
 //     (first sniffed 0x21) stays in charge, and the backend is told right away that there is nothing to wait for;
 //   * a roster change is postponed while a player is on the server;
 //   * an armed backend match that the backend no longer has (it answers "no match on this server": the Accept timed out or
@@ -84,6 +87,7 @@ public:
     void OnPlayersChanged();                             // a player left the server: a postponed roster may apply now
 
     bool UsingBackendRoster() const { return m_usable; } // a complete, fitting roster of the backend is (to be) armed
+    bool HasSnapshot() const { return m_hasSnapshot; }   // the backend has answered at least one poll
     bool Armed() const { return m_armed; }
     bool InArmedRoster(uint32_t accountId) const;
     const std::string &ArmedSource() const { return m_armedSource; }
@@ -99,12 +103,14 @@ private:
     const Host m_host;
 
     Snapshot m_snapshot;
+    bool m_hasSnapshot{};
     bool m_usable{};
     bool m_armed{};
     std::vector<uint32_t> m_armedParticipants;
     std::string m_armedSource;
     bool m_fakesReady{};
     std::string m_confirmedMatchId;
+    std::string m_lastSizeWarning;   // the match whose roster of another size was armed (logged once)
     std::string m_armedMatchId;      // the backend match the armed roster belongs to
     bool m_armedFromBackend{};       // the armed roster is a backend match's (not the legacy one)
 };

@@ -55,6 +55,9 @@ constexpr size_t MaxResponseBytes = 64 * 1024;
 constexpr const char *SearchPath = "/api/v1/matchmaking/search";
 constexpr const char *CancelPath = "/api/v1/matchmaking/cancel";
 constexpr const char *AcceptedPath = "/api/v1/matchmaking/accepted";
+constexpr const char *AccountPath = "/api/v1/matchmaking/account";
+constexpr int WatchIntervalMs = 1000;     // GET /account/<id> while this client has no search of its own (party members)
+constexpr int WatchFailureIntervalMs = 5000;
 constexpr int AcceptedAttempts = 3;       // a report that gets lost would let the backend cancel a match everybody accepted
 constexpr int AcceptedRetryMs = 400;
 
@@ -470,10 +473,16 @@ bool ParseSearchResponse(const std::string &body, SearchResult &result)
         return false;
     }
 
+    result.mode = search->String("mode");
+    result.gameType = static_cast<uint32_t>(search->Number("game_type"));
+    result.partyMember = search->Get("party_leader_id") != nullptr;
+
     if (const Json *match = search->Get("match"))
     {
         result.matchPlayers = static_cast<uint32_t>(match->Number("players"));
         result.matchRequired = static_cast<uint32_t>(match->Number("required_players"));
+        result.matchRealPlayers = static_cast<uint32_t>(match->Number("real_players"));
+        result.matchAcceptedPlayers = static_cast<uint32_t>(match->Number("accepted_players"));
     }
 
     if (const Json *assignment = search->Get("assignment"))
@@ -485,6 +494,19 @@ bool ParseSearchResponse(const std::string &body, SearchResult &result)
         a.map = assignment->String("map");
         a.acceptRequired = assignment->Bool("accept_required");
         a.requiredPlayers = static_cast<uint32_t>(assignment->Number("required_players"));
+        a.realPlayers = static_cast<uint32_t>(assignment->Number("real_players"));
+        a.fakePlayers = static_cast<uint32_t>(assignment->Number("fake_players"));
+        if (const Json *players = assignment->Get("players"))
+        {
+            for (const Json &player : players->array)
+            {
+                const double id = player.Number("account_id", -1);
+                if (!player.Bool("fake") && id >= 1 && id <= 4294967295.0)
+                {
+                    a.realAccounts.push_back(static_cast<uint32_t>(id));
+                }
+            }
+        }
         result.hasAssignment = !a.serverAddress.empty() && a.serverPort != 0;
     }
 
@@ -1288,6 +1310,15 @@ public:
                 }
                 body += ']';
             }
+            if (!info.partyAccountIds.empty())
+            {
+                body += ",\"party_account_ids\":[";
+                for (size_t i = 0; i < info.partyAccountIds.size(); i++)
+                {
+                    body += (i ? "," : "") + std::to_string(info.partyAccountIds[i]);
+                }
+                body += ']';
+            }
             if (!info.variants.empty())
             {
                 body += ",\"variants\":[";
@@ -1356,13 +1387,11 @@ public:
             accountId = m_activeAccountId;
             requestId = m_activeRequestId;
 
-            // the assignment cannot be withdrawn any more: no need to watch it (the request id stays: the client sends its
-            // MatchmakingStop when it connects and that cancel must still name the search)
-            if (m_session.active && m_session.requestId == requestId)
+            // The search stays tracked: the backend decides when EVERY real player accepted (the search turns
+            // READY_TO_CONNECT), and it can still withdraw the match while others have not. Poll right after the report.
+            if (m_session.active && m_session.requestId == requestId && m_session.phase == Phase::Poll)
             {
-                m_serial++;
-                m_session.serial = m_serial;
-                m_session.phase = Phase::Done;
+                m_session.nextAt = Clock::now();
             }
         }
 
@@ -1371,6 +1400,35 @@ public:
         body += '}';
 
         Enqueue({ "accepted", AcceptedPath, std::move(body), Clock::now() });
+    }
+
+    void StopPolling()
+    {
+        std::lock_guard lock{ m_mutex };
+        if (m_session.active && m_session.phase != Phase::Done)
+        {
+            m_session.phase = Phase::Done;
+        }
+    }
+
+    void WatchAccount(uint32_t accountId)
+    {
+        if (!m_enabled || accountId == 0)
+        {
+            return;
+        }
+
+        {
+            std::lock_guard lock{ m_mutex };
+            m_watch.active = true;
+            m_watch.accountId = accountId;
+            m_watch.nextAt = Clock::now() + std::chrono::milliseconds(WatchIntervalMs);
+        }
+
+        if (StartThread())
+        {
+            m_cv.notify_one();
+        }
     }
 
     void SearchCancelled()
@@ -1409,6 +1467,16 @@ public:
 private:
     enum class Phase { Register, Poll, Done };
 
+    // the account of this client: asks whether the leader of a party started a search for it
+    struct Watch
+    {
+        bool active{};
+        uint32_t accountId{};
+        Clock::time_point nextAt;
+        std::string lastAdopted;    // a search found once is not adopted again
+        uint32_t failures{};
+    };
+
     struct Session
     {
         bool active{};
@@ -1421,6 +1489,7 @@ private:
         uint32_t failures{};
         std::string lastStatus;
         uint32_t lastPlayers{};
+        uint32_t lastAccepted{};    // accepted players of the match: another player accepting is reported (log "accepted 1/3")
         std::string lastMatchId;    // the match of the assignment (a search that gets another match is reported again)
     };
 
@@ -1519,6 +1588,7 @@ private:
             bool haveJob = false;
             Session step;
             bool haveStep = false;
+            uint32_t watchAccount = 0;
             {
                 std::unique_lock lock{ m_mutex };
                 while (true)
@@ -1543,6 +1613,17 @@ private:
 
                         m_cv.wait_until(lock, m_session.nextAt);
                     }
+                    else if (m_watch.active)
+                    {
+                        // nothing of our own is tracked: see whether the leader of a party searches for this account
+                        if (Clock::now() >= m_watch.nextAt)
+                        {
+                            watchAccount = m_watch.accountId;
+                            break;
+                        }
+
+                        m_cv.wait_until(lock, m_watch.nextAt);
+                    }
                     else
                     {
                         m_cv.wait(lock);
@@ -1559,6 +1640,10 @@ private:
                 else if (haveStep)
                 {
                     RunSessionStep(step);
+                }
+                else if (watchAccount)
+                {
+                    RunWatchStep(watchAccount);
                 }
             }
             catch (...)
@@ -1705,9 +1790,10 @@ private:
 
             // a state to report: first answer, a status change, more players, the assignment, or another match
             const bool changed = parsed.status != session.lastStatus || parsed.matchPlayers != session.lastPlayers
-                || parsed.assignment.matchId != session.lastMatchId;
+                || parsed.matchAcceptedPlayers != session.lastAccepted || parsed.assignment.matchId != session.lastMatchId;
             session.lastStatus = parsed.status;
             session.lastPlayers = parsed.matchPlayers;
+            session.lastAccepted = parsed.matchAcceptedPlayers;
             session.lastMatchId = parsed.assignment.matchId;
 
             // A classic assignment ends the tracking. An Accept assignment does not: the backend owns the Accept deadline and
@@ -1735,6 +1821,71 @@ private:
                 + " map=" + parsed.assignment.map + " match=" + parsed.assignment.matchId).c_str() : "",
             static_cast<long long>(tookMs));
 
+        Deliver(parsed);
+    }
+
+    // GET /matchmaking/account/<id>: a search of this account that belongs to a party is adopted (RESEARCH_FINDINGS.md #65)
+    void RunWatchStep(uint32_t accountId)
+    {
+        const HttpResult result = HttpRequest(m_endpoint, m_apiKey, "GET", std::string(AccountPath) + "/" + std::to_string(accountId),
+            nullptr);
+
+        SearchResult parsed;
+        const bool found = result.status == 200 && ParseSearchResponse(result.body, parsed);
+        const bool idle = result.status == 404;
+
+        {
+            std::lock_guard lock{ m_mutex };
+            if (!m_watch.active)
+            {
+                return;
+            }
+
+            if (found || idle)
+            {
+                m_watch.failures = 0;
+                m_watch.nextAt = Clock::now() + std::chrono::milliseconds(WatchIntervalMs);
+            }
+            else
+            {
+                if (++m_watch.failures == 1 || m_watch.failures % LogEveryNthFailure == 0)
+                {
+                    Log("watching account %u: %s (attempt %u)", accountId,
+                        result.status ? ("HTTP " + std::to_string(result.status)).c_str() : result.error.c_str(), m_watch.failures);
+                }
+
+                m_watch.nextAt = Clock::now() + std::chrono::milliseconds(WatchFailureIntervalMs);
+                return;
+            }
+
+            if (!found || !parsed.partyMember || parsed.requestId.empty() || parsed.requestId == m_watch.lastAdopted)
+            {
+                return; // nothing, or the solo / leader search of this client (tracked through its own session), or seen already
+            }
+
+            if (m_session.active && m_session.phase != Phase::Done)
+            {
+                return; // busy with a search of our own
+            }
+
+            // adopt: from here on it is tracked like a search this client started (poll by request id, accepted report, cancel)
+            m_watch.lastAdopted = parsed.requestId;
+            m_activeAccountId = accountId;
+            m_activeRequestId = parsed.requestId;
+            m_serial++;
+            m_session = Session{};
+            m_session.active = true;
+            m_session.serial = m_serial;
+            m_session.requestId = parsed.requestId;
+            m_session.phase = Phase::Poll;
+            m_session.nextAt = Clock::now();
+            m_session.startedAt = Clock::now();
+        }
+
+        Log("the party leader's search %s (%s, %s) was found for account %u: tracking it", parsed.requestId.c_str(),
+            parsed.mode.c_str(), parsed.status.c_str(), accountId);
+
+        parsed.discovered = true;
         Deliver(parsed);
     }
 
@@ -1766,6 +1917,7 @@ private:
     bool m_threadStarted{};
 
     Session m_session;
+    Watch m_watch;
     uint64_t m_serial{};
 
     // the search being tracked (its request id lets the backend tell searches apart); cleared by SearchCancelled
@@ -1787,6 +1939,12 @@ std::string SerializeResult(const SearchResult &result)
     text += "status=" + result.status + "\n";
     text += "players=" + std::to_string(result.matchPlayers) + "\n";
     text += "required=" + std::to_string(result.matchRequired) + "\n";
+    text += "real=" + std::to_string(result.matchRealPlayers) + "\n";
+    text += "accepted=" + std::to_string(result.matchAcceptedPlayers) + "\n";
+    text += "mode=" + result.mode + "\n";
+    text += "game_type=" + std::to_string(result.gameType) + "\n";
+    text += std::string("party_member=") + (result.partyMember ? "1" : "0") + "\n";
+    text += std::string("discovered=") + (result.discovered ? "1" : "0") + "\n";
     if (result.hasAssignment)
     {
         const Assignment &a = result.assignment;
@@ -1796,6 +1954,14 @@ std::string SerializeResult(const SearchResult &result)
         text += "map=" + a.map + "\n";
         text += std::string("accept_required=") + (a.acceptRequired ? "1" : "0") + "\n";
         text += "required_players=" + std::to_string(a.requiredPlayers) + "\n";
+        text += "real_players=" + std::to_string(a.realPlayers) + "\n";
+        text += "fake_players=" + std::to_string(a.fakePlayers) + "\n";
+        std::string accounts;
+        for (uint32_t id : a.realAccounts)
+        {
+            accounts += (accounts.empty() ? "" : ",") + std::to_string(id);
+        }
+        text += "real_accounts=" + accounts + "\n";
     }
     return text;
 }
@@ -1824,12 +1990,34 @@ bool DeserializeResult(std::string_view text, SearchResult &result)
         else if (key == "status") { result.status = value; }
         else if (key == "players") { result.matchPlayers = static_cast<uint32_t>(strtoul(value.c_str(), nullptr, 10)); }
         else if (key == "required") { result.matchRequired = static_cast<uint32_t>(strtoul(value.c_str(), nullptr, 10)); }
+        else if (key == "real") { result.matchRealPlayers = static_cast<uint32_t>(strtoul(value.c_str(), nullptr, 10)); }
+        else if (key == "accepted") { result.matchAcceptedPlayers = static_cast<uint32_t>(strtoul(value.c_str(), nullptr, 10)); }
+        else if (key == "mode") { result.mode = value; }
+        else if (key == "game_type") { result.gameType = static_cast<uint32_t>(strtoul(value.c_str(), nullptr, 10)); }
+        else if (key == "party_member") { result.partyMember = value == "1"; }
+        else if (key == "discovered") { result.discovered = value == "1"; }
         else if (key == "match_id") { a.matchId = value; result.hasAssignment = true; }
         else if (key == "server_address") { a.serverAddress = value; }
         else if (key == "server_port") { a.serverPort = static_cast<uint16_t>(strtoul(value.c_str(), nullptr, 10)); }
         else if (key == "map") { a.map = value; }
         else if (key == "accept_required") { a.acceptRequired = value == "1"; }
         else if (key == "required_players") { a.requiredPlayers = static_cast<uint32_t>(strtoul(value.c_str(), nullptr, 10)); }
+        else if (key == "real_players") { a.realPlayers = static_cast<uint32_t>(strtoul(value.c_str(), nullptr, 10)); }
+        else if (key == "fake_players") { a.fakePlayers = static_cast<uint32_t>(strtoul(value.c_str(), nullptr, 10)); }
+        else if (key == "real_accounts")
+        {
+            for (size_t p = 0; p < value.size();)
+            {
+                const size_t comma = value.find(',', p);
+                const std::string token = value.substr(p, comma == std::string::npos ? std::string::npos : comma - p);
+                if (!token.empty())
+                {
+                    a.realAccounts.push_back(static_cast<uint32_t>(strtoul(token.c_str(), nullptr, 10)));
+                }
+
+                p = comma == std::string::npos ? value.size() : comma + 1;
+            }
+        }
     }
 
     return any && !result.status.empty();
@@ -1886,6 +2074,28 @@ void ReportAccepted()
     try
     {
         Client::Get().ReportAccepted();
+    }
+    catch (...)
+    {
+    }
+}
+
+void StopPolling()
+{
+    try
+    {
+        Client::Get().StopPolling();
+    }
+    catch (...)
+    {
+    }
+}
+
+void WatchAccount(uint32_t accountId)
+{
+    try
+    {
+        Client::Get().WatchAccount(accountId);
     }
     catch (...)
     {

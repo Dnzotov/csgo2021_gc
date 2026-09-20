@@ -1,6 +1,7 @@
 package dev.csgogc.mm.admin;
 
 import dev.csgogc.mm.fake.FakeSearchRequest;
+import dev.csgogc.mm.fake.FakeSettingsRequest;
 import dev.csgogc.mm.fake.FakeSearchView;
 import dev.csgogc.mm.mode.ModeCategory;
 import dev.csgogc.mm.search.SearchRequest;
@@ -110,9 +111,18 @@ public class AdminApiController {
     @GetMapping("/fake-searches")
     public Map<String, Object> fakeSearches() {
         Map<String, Object> body = new LinkedHashMap<>();
-        body.put("enabled", searches.fakePlayersEnabled());
+        SearchService.FakeSettings settings = searches.fakeSettings();
+        body.put("enabled", settings.available());
+        body.put("master", settings.master());
+        body.put("gather_window_seconds", settings.gatherWindowSeconds());
         body.put("fake_searches", searches.listFakeSearches());
         return body;
+    }
+
+    /** the master switch (Fake Players ON / OFF) and the gather window, stored in the database */
+    @PutMapping("/fake-settings")
+    public SearchService.FakeSettings updateFakeSettings(@Valid @RequestBody FakeSettingsRequest request) {
+        return searches.updateFakeSettings(request.master(), request.gatherWindowSeconds());
     }
 
     @PostMapping("/fake-searches")
@@ -153,7 +163,7 @@ public class AdminApiController {
         ModeCategory category = ModeCategory.fromKey(request.mode()).orElseThrow(() ->
                 dev.csgogc.mm.web.ApiException.badRequest("unsupported_mode", "unknown mode '" + request.mode() + "'"));
         List<String> maps = request.map() == null || request.map().isBlank() ? List.of() : List.of(request.map());
-        SearchRequest search = new SearchRequest(request.accountId(), (long) category.eGame(), category.key(), null, maps, null, null);
+        SearchRequest search = new SearchRequest(request.accountId(), (long) category.eGame(), category.key(), null, maps, null, null, null);
         return searches.start(search, "admin").search();
     }
 

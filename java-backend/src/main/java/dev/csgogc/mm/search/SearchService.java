@@ -5,7 +5,7 @@ import dev.csgogc.mm.fake.FakeSearch;
 import dev.csgogc.mm.fake.FakeSearchRepository;
 import dev.csgogc.mm.fake.FakeSearchRequest;
 import dev.csgogc.mm.fake.FakeSearchView;
-import dev.csgogc.mm.fake.FakeStatus;
+import dev.csgogc.mm.fake.FakeSettingsRepository;
 import dev.csgogc.mm.mode.ModeCategory;
 import dev.csgogc.mm.server.GameServer;
 import dev.csgogc.mm.server.GameServerRepository;
@@ -99,6 +99,7 @@ public class SearchService {
     private final MatchRepository matches;
     private final GameServerRepository servers;
     private final FakeSearchRepository fakes;
+    private final FakeSettingsRepository fakeSettings;
     private final BackendProperties props;
     private final Clock clock;
     private final TransactionTemplate tx;
@@ -110,10 +111,14 @@ public class SearchService {
     private final Map<Long, Instant> rosterPolls = new ConcurrentHashMap<>();
     /** matches whose game server confirmed that it armed the roster */
     private final Set<String> rosterAcks = ConcurrentHashMap.newKeySet();
+    /** "match@fill time" that already logged that its fake players wait for the gather window (once, not every second) */
+    private final Set<String> fillWaitLogged = ConcurrentHashMap.newKeySet();
 
     public SearchService(SearchRepository searches, MatchRepository matches, GameServerRepository servers,
-                         FakeSearchRepository fakes, BackendProperties props, Clock clock, TransactionTemplate tx) {
+                         FakeSearchRepository fakes, FakeSettingsRepository fakeSettings, BackendProperties props, Clock clock,
+                         TransactionTemplate tx) {
         this.tx = tx;
+        this.fakeSettings = fakeSettings;
         this.searches = searches;
         this.matches = matches;
         this.servers = servers;
@@ -133,6 +138,7 @@ public class SearchService {
 
         Outcome outcome;
         long id;
+        boolean partyToSync = false;
         Optional<SearchRecord> existing = searches.findLiveByAccount(request.accountId());
         boolean repeat = existing.isPresent() && (request.requestId() != null
                 ? request.requestId().equals(existing.get().requestId())
@@ -143,6 +149,7 @@ public class SearchService {
         if (existing.isEmpty()) {
             id = searches.insert(request.accountId(), request.gameType(), category.key(), gameMode, maps, variants,
                     request.requestId(), source, now);
+            partyToSync = true;
             log.info("search started: account={} mode={} maps={}{} game_type={} source={}",
                     request.accountId(), category.key(), maps, variants.isEmpty() ? "" : " variants=" + variants,
                     request.gameType(), source);
@@ -159,15 +166,94 @@ public class SearchService {
             } else {
                 searches.replaceLive(id, request.gameType(), category.key(), gameMode, maps, variants, request.requestId(),
                         source, now);
+                finishPartyMembers(current, SearchStatus.CANCELLED);   // another search: the members' searches are rewritten below
                 memberLeft(current);
+                partyToSync = true;
                 log.info("search replaced: account={} {} -> {} maps={}", request.accountId(), current.category(),
                         category.key(), maps);
                 outcome = Outcome.REPLACED;
             }
         }
 
+        // a repeated request (same request id) keeps the party it had, unless it names another one
+        if (partyToSync || request.partyAccountIds() != null) {
+            syncParty(id, request, category, gameMode, maps, variants, source, now);
+        }
+
         runMatcher();
         return new StartResult(outcome, view(searches.findById(id).orElseThrow()));
+    }
+
+    /**
+     * Gives every other member of the leader's party a search of its own (same mode, maps, kind), placed together with the
+     * leader's. A member's client never sends a search: its GC finds this one by account id (GET /matchmaking/account/{id}).
+     * A member that had a search of its own leaves it (a player is in one search only).
+     */
+    private void syncParty(long leaderId, SearchRequest request, ModeCategory category, String gameMode, List<String> maps,
+                           List<SearchVariant> variants, String source, Instant now) {
+        Set<Long> wanted = new LinkedHashSet<>();
+        if (request.partyAccountIds() != null) {
+            for (Long account : request.partyAccountIds()) {
+                if (account != null && !account.equals(request.accountId())) {
+                    wanted.add(account);
+                }
+            }
+        }
+
+        Set<Long> present = new LinkedHashSet<>();
+        for (SearchRecord member : searches.findLiveMembers(leaderId)) {
+            if (wanted.contains(member.accountId())) {
+                present.add(member.accountId());
+            } else {
+                searches.finish(member.id(), SearchStatus.CANCELLED, now);   // left the party
+                memberLeft(member);
+            }
+        }
+        for (Long account : wanted) {
+            if (present.contains(account)) {
+                continue;
+            }
+            Optional<SearchRecord> own = searches.findLiveByAccount(account);
+            if (own.isPresent()) {
+                searches.finish(own.get().id(), SearchStatus.CANCELLED, now);   // it is searched with the party from now on
+                finishPartyMembers(own.get(), SearchStatus.CANCELLED);
+                memberLeft(own.get());
+            }
+            long memberId = searches.insertPartyMember(account, request.gameType(), category.key(), gameMode, maps, variants,
+                    null, source, leaderId, now);
+            searches.setRequestId(memberId, "pt" + memberId);
+            log.info("party of search {}: account {} is searched together with account {} (search {})", leaderId, account,
+                    request.accountId(), memberId);
+        }
+    }
+
+    /** the members of a party that ends its search go with it, unless the leader already accepted (its stop is the connect) */
+    private void finishPartyMembers(SearchRecord leader, SearchStatus status) {
+        if (leader.acceptedAt() != null) {
+            return;
+        }
+        Instant now = clock.instant();
+        for (SearchRecord member : searches.findLiveMembers(leader.id())) {
+            searches.finish(member.id(), status, now);
+            memberLeft(member);
+        }
+    }
+
+    /**
+     * The GC of a player asks for the live search of its account. This is how a party member learns that its leader started
+     * a search: the member's client sends nothing itself. Refreshes the search like a poll by request id does.
+     */
+    public synchronized Optional<SearchView> pollAccount(long accountId) {
+        Optional<SearchRecord> found = searches.findLiveByAccount(accountId);
+        if (found.isEmpty()) {
+            return Optional.empty();
+        }
+        SearchRecord record = found.get();
+        if (record.status() == SearchStatus.SEARCHING || record.status() == SearchStatus.MATCHED) {
+            searches.touch(record.id(), clock.instant());
+            runMatcher();
+        }
+        return Optional.of(view(noteAssignmentSeen(searches.findById(record.id()).orElseThrow())));
     }
 
     /** the GC polls this: it refreshes the timeout of a live search and gives the current state / assignment */
@@ -181,7 +267,21 @@ public class SearchService {
             searches.touch(record.id(), clock.instant());
             runMatcher();
         }
-        return Optional.of(view(searches.findById(record.id()).orElseThrow()));
+        return Optional.of(view(noteAssignmentSeen(searches.findById(record.id()).orElseThrow())));
+    }
+
+    /**
+     * The first time a player's GC gets the server data of its match (= its own Match Found, 9107) is recorded and logged: with
+     * the accepts it is the answer to "who of the match has been told about it at all".
+     */
+    private SearchRecord noteAssignmentSeen(SearchRecord record) {
+        if (!record.status().isAssigned() || record.assignmentSeenAt() != null || record.matchId() == null) {
+            return record;
+        }
+        searches.markAssignmentSeen(record.id(), clock.instant());
+        log.info("match {}: account {} fetched the server data (Match Found on its client){}", record.matchId(), record.accountId(),
+                record.isPartyMember() ? " [party member]" : "");
+        return searches.findById(record.id()).orElse(record);
     }
 
     public synchronized CancelResult cancel(long accountId, String requestId) {
@@ -195,6 +295,7 @@ public class SearchService {
             return new CancelResult(false, "request_id_mismatch", view(current));
         }
         searches.finish(current.id(), SearchStatus.CANCELLED, clock.instant());
+        finishPartyMembers(current, SearchStatus.CANCELLED);
         memberLeft(current);
         log.info("search cancelled: account={}", accountId);
         runMatcher();
@@ -208,6 +309,7 @@ public class SearchService {
             throw ApiException.conflict("not_searching", "search " + id + " has already ended (" + record.status() + ")");
         }
         searches.finish(id, SearchStatus.REMOVED, clock.instant());
+        finishPartyMembers(record, SearchStatus.REMOVED);
         memberLeft(record);
         log.info("search removed by admin: id={} account={}", id, record.accountId());
         runMatcher();
@@ -262,13 +364,15 @@ public class SearchService {
 
         for (SearchRecord stale : searches.listStale(now.minus(props.staleSearchTimeout()))) {
             searches.finish(stale.id(), SearchStatus.EXPIRED, now);
+            finishPartyMembers(stale, SearchStatus.EXPIRED);
             memberLeft(stale);
             log.info("search of account {} expired after {}", stale.accountId(), props.staleSearchTimeout());
         }
 
         // The Accept deadline is owned here (RESEARCH_FINDINGS.md #63): nobody else ends an Accept that ran out of time
         for (MatchRecord due : matches.findAcceptingDue(now)) {
-            dissolve(due, "accept timeout, the players did not all accept within " + props.acceptTimeout());
+            dissolve(due, "accept timeout, the players did not all accept within " + props.acceptTimeout() + " - "
+                    + acceptState(due.id()));
         }
 
         // a match of an older version: FORMING with a server already reserved. Servers are only reserved for FULL matches now.
@@ -321,21 +425,17 @@ public class SearchService {
         for (SearchRecord search : searches.listUnplaced()) {
             place(search);
         }
-        fillFormingMatches();
+        applyFakeProfiles();
         reserveServersForFullMatches();
         promoteMatchesWaitingForTheirServer();
     }
 
-    /** a match ends: its virtual participants finish with it (a match that fell apart re-queues them) */
+    /** a match ends (its virtual players were only a number on the match, a Fake Players profile is a setting: nothing to give back) */
     private void endMatch(String matchId, MatchStatus status, Instant now) {
         matches.end(matchId, status, now);
         rosterAcks.remove(matchId);
         waitingForServerLogged.remove(matchId);
-        if (status == MatchStatus.CANCELLED) {
-            fakes.unplaceByMatch(matchId, now);
-        } else {
-            fakes.completeByMatch(matchId, now);
-        }
+        fillWaitLogged.removeIf(key -> key.startsWith(matchId + "@"));
     }
 
     private void place(SearchRecord search) {
@@ -345,9 +445,12 @@ public class SearchService {
         }
 
         if (category.acceptRequired()) {
-            // Accept modes: players gather first, no server is involved until the match is full
+            // Accept modes: players gather first, no server is involved until the match is full. A party goes into ONE match:
+            // it needs room for all of its members.
+            int partySize = 1 + searches.findLiveMembers(search.id()).size();
             for (MatchRecord forming : matches.findForming(category.key())) {
-                if (joinable(forming, category, search.maps())) {
+                if (playerCount(forming.id()) + partySize <= forming.requiredPlayers()
+                        && joinable(forming, category, search.maps())) {
                     join(search, forming);
                     return;
                 }
@@ -429,8 +532,10 @@ public class SearchService {
         for (SearchRecord member : searches.listLiveByMatch(matchId)) {
             pool = narrow(pool, member.maps());
         }
-        for (FakeSearch fake : fakes.listByMatch(matchId)) {
-            pool = narrow(pool, fake.maps());
+        // the Fake Players profile of the match limits the maps as well (the server has to run one of ITS maps too)
+        Optional<FakeSearch> profile = matches.findById(matchId).map(MatchRecord::fakeSearchId).flatMap(fakes::findById);
+        if (profile.isPresent()) {
+            pool = narrow(pool, profile.get().maps());
         }
         return pool;
     }
@@ -456,8 +561,14 @@ public class SearchService {
 
     /** some enabled server of the category runs one of the maps (free or not: only whether the match could ever be served) */
     private boolean anyServerCanServe(ModeCategory category, Optional<Set<String>> pool) {
+        return anyServerCanServe(category, pool, null);
+    }
+
+    /** {@code onlyServer} (a Fake Players profile bound to one game server) limits it to that server */
+    private boolean anyServerCanServe(ModeCategory category, Optional<Set<String>> pool, Long onlyServer) {
         return servers.list().stream()
-                .anyMatch(server -> server.enabled() && category.key().equals(server.category()) && serverFits(pool, server.map()));
+                .anyMatch(server -> server.enabled() && category.key().equals(server.category()) && serverFits(pool, server.map())
+                        && (onlyServer == null || onlyServer == server.id()));
     }
 
     private boolean joinable(MatchRecord forming, ModeCategory category, List<String> maps) {
@@ -470,7 +581,7 @@ public class SearchService {
         Instant now = clock.instant();
         String id = "m-" + String.format("%08x", RANDOM.nextInt());
         MatchRecord match = new MatchRecord(id, category.key(), MatchRecord.NO_SERVER, "", 0, "", requiredPlayers(category), true,
-                MatchStatus.FORMING, now, null, null, null, null);
+                MatchStatus.FORMING, now, null, null, null, null, null, 0, null);
         matches.insert(match);
         log.info("match {} created: {} gathering {} player(s), no server yet", id, category.key(), match.requiredPlayers());
         return match;
@@ -484,7 +595,7 @@ public class SearchService {
         servers.markAssigned(picked.server().id(), now);
 
         MatchRecord match = new MatchRecord(id, category.key(), picked.server().id(), picked.address(), picked.server().port(),
-                picked.server().map(), requiredPlayers(category), false, MatchStatus.FORMING, now, null, null, null, null);
+                picked.server().map(), requiredPlayers(category), false, MatchStatus.FORMING, now, null, null, null, null, null, 0, null);
         matches.insert(match);
         log.info("match {} created: {} on {}:{} map={} needs {} player(s), server {} is assigned (classic mode: no reservation)",
                 id, category.key(), picked.address(), picked.server().port(), picked.server().map(), match.requiredPlayers(),
@@ -493,7 +604,11 @@ public class SearchService {
     }
 
     private void join(SearchRecord search, MatchRecord match) {
-        searches.place(search.id(), match.id(), SearchStatus.MATCHED, clock.instant());
+        Instant now = clock.instant();
+        searches.place(search.id(), match.id(), SearchStatus.MATCHED, now);
+        for (SearchRecord member : searches.findLiveMembers(search.id())) {
+            searches.place(member.id(), match.id(), SearchStatus.MATCHED, now);   // the whole party, or nobody
+        }
         int players = playerCount(match.id());
         if (players < match.requiredPlayers()) {
             log.info("match {}: account {} joined ({}/{})", match.id(), search.accountId(), players, match.requiredPlayers());
@@ -517,7 +632,7 @@ public class SearchService {
         }
         matches.markFull(match.id());
         log.info("match {} is full ({}/{}, {} virtual): looking for a free {} server", match.id(), players, match.requiredPlayers(),
-                fakes.countPlayersInMatch(match.id()), match.category());
+                fakeCountOf(match.id()), match.category());
         matches.findById(match.id()).ifPresent(this::reserveServer);
     }
 
@@ -544,9 +659,10 @@ public class SearchService {
         }
         Instant now = clock.instant();
         Optional<Set<String>> pool = mapPool(match.id());
+        Long onlyServer = match.fakeSearchId() == null ? null : fakes.findById(match.fakeSearchId()).map(FakeSearch::serverId).orElse(null);
 
         for (GameServer server : servers.findFree(category.key(), now)) {
-            if (!serverFits(pool, server.map())) {
+            if (!serverFits(pool, server.map()) || (onlyServer != null && onlyServer != server.id())) {
                 continue;
             }
             Optional<String> address = resolveIpv4(server.host());
@@ -584,13 +700,13 @@ public class SearchService {
     private void serverReserved(MatchRecord match) {
         if (serverReadsRoster(match.serverId())) {
             log.info("match {} complete ({}/{}, {} virtual) on {}:{}: waiting for the game server to arm the roster", match.id(),
-                    match.requiredPlayers(), match.requiredPlayers(), fakes.countPlayersInMatch(match.id()), match.serverHost(),
+                    playerCount(match.id()), match.requiredPlayers(), fakeCountOf(match.id()), match.serverHost(),
                     match.serverPort());
             return;
         }
         assignMembers(match);
         log.info("match {} complete ({}/{}, {} virtual): {} -> {}:{} map={}", match.id(), match.requiredPlayers(),
-                match.requiredPlayers(), fakes.countPlayersInMatch(match.id()), SearchStatus.WAITING_ACCEPT, match.serverHost(),
+                playerCount(match.id()), match.requiredPlayers(), fakeCountOf(match.id()), SearchStatus.WAITING_ACCEPT, match.serverHost(),
                 match.serverPort(), match.map());
     }
 
@@ -628,6 +744,35 @@ public class SearchService {
         }
         log.info("match {} is ACCEPTING: {} player(s) have until {} ({})", match.id(), members.size(),
                 now.plus(props.acceptTimeout()), props.acceptTimeout());
+    }
+
+    /**
+     * "accepted 1/3: account 7 accepted, account 8 got Match Found but did not accept, account 9 never fetched the server data":
+     * the answer to "who of the match is missing" that the log of an Accept that did not complete needs.
+     */
+    private String acceptState(String matchId) {
+        List<SearchRecord> members = searches.listLiveByMatch(matchId).stream().filter(SearchService::mustAccept).toList();
+        long accepted = members.stream().filter(m -> m.acceptedAt() != null).count();
+        StringBuilder text = new StringBuilder("accepted ").append(accepted).append('/').append(members.size());
+        String separator = ": ";
+        for (SearchRecord member : members) {
+            text.append(separator).append("account ").append(member.accountId()).append(member.acceptedAt() != null
+                    ? " accepted" : member.assignmentSeenAt() != null ? " got Match Found but did not accept"
+                    : " never fetched the server data");
+            separator = ", ";
+        }
+        return text.toString();
+    }
+
+    /** the real players of the match that have to accept */
+    private int mustAcceptCount(String matchId) {
+        return (int) searches.listLiveByMatch(matchId).stream().filter(SearchService::mustAccept).count();
+    }
+
+    /** how many of them accepted (the match is ACCEPTED, and they connect, only when it is all of them) */
+    private int acceptedCount(String matchId) {
+        return (int) searches.listLiveByMatch(matchId).stream().filter(SearchService::mustAccept)
+                .filter(m -> m.acceptedAt() != null).count();
     }
 
     /** a search that comes from the GC accepts through it; one added from the admin panel has nobody to accept for it */
@@ -673,7 +818,8 @@ public class SearchService {
             searches.promoteAccepted(match.id(), now);
             log.info("match {}: everybody accepted, ACCEPTED (last: account {})", match.id(), accountId);
         } else {
-            log.info("match {}: account {} accepted, the others are still to accept", match.id(), accountId);
+            log.info("match {}: account {} accepted, the others are still to accept: {}", match.id(), accountId,
+                    acceptState(match.id()));
         }
         runMatcher();
         return new AcceptResult(true, null, everybody, view(searches.findById(current.id()).orElseThrow()));
@@ -728,9 +874,13 @@ public class SearchService {
         return Optional.of(promoted);
     }
 
-    /** real players placed in the match + the virtual ones that joined it (what a FORMING match is counted by) */
+    /** real players placed in the match + the virtual ones it was given (what a FORMING match is counted by) */
     private int playerCount(String matchId) {
-        return searches.listLiveByMatch(matchId).size() + fakes.countPlayersInMatch(matchId);
+        return searches.listLiveByMatch(matchId).size() + fakeCountOf(matchId);
+    }
+
+    private int fakeCountOf(String matchId) {
+        return matches.findById(matchId).map(MatchRecord::fakeCount).orElse(0);
     }
 
     /**
@@ -742,44 +892,91 @@ public class SearchService {
     }
 
     /**
-     * TEST tool: enabled fake searches fill matches that a real player has started. They never create a match and never
-     * take a server, so with no (enabled) fake search this does nothing at all.
+     * TEST tool, Fake Players (RESEARCH_FINDINGS.md #67). Two separate questions:
+     * <ul>
+     *   <li>WHO is in the match - the gather window ({@code backend.fake-players.gather-window} or the panel): the real players
+     *       (and parties) that search the same mode join one gathering match while it runs; every real player that joins
+     *       restarts it;</li>
+     *   <li>HOW MANY virtual players it gets - the Fake Players profile of the mode that fits the match: the enabled one with the
+     *       highest priority whose maps (and server, if it is bound to one) the match can be played on. The match gets
+     *       {@code min(profile count, capacity - real players)}; the capacity of the mode is never changed, the count of the
+     *       profile is never "topped up" to it. A count of 0 starts the match with its real players only.</li>
+     * </ul>
+     * With the master switch off, no enabled profile of the mode or no profile that fits, the match keeps gathering real
+     * players like without the tool. A profile is a setting: it is not used up, every match of the mode applies it afresh.
      */
-    private void fillFormingMatches() {
-        if (!props.fakePlayers().enabled()) {
+    private void applyFakeProfiles() {
+        if (!fakeMasterOn()) {
             return;
         }
-        List<FakeSearch> waiting = fakes.listSearching();
-        if (waiting.isEmpty()) {
-            return;
-        }
+        Instant now = clock.instant();
+        Duration window = gatherWindow();
         for (ModeCategory category : ModeCategory.values()) {
             if (!category.acceptRequired()) {
                 continue;
             }
             for (MatchRecord forming : matches.findForming(category.key())) {
-                if (searches.listLiveByMatch(forming.id()).isEmpty()) {
-                    continue;   // no real player anchors it (it is about to be dissolved)
+                List<SearchRecord> real = searches.listLiveByMatch(forming.id());
+                if (real.isEmpty() || real.size() >= forming.requiredPlayers()) {
+                    continue;   // nobody real anchors it (about to be dissolved) / the real players fill it themselves
                 }
-                for (FakeSearch fake : fakes.listSearching()) {
-                    int players = playerCount(forming.id());
-                    if (players >= forming.requiredPlayers()) {
-                        break;
+                Instant lastJoin = real.stream().map(r -> r.matchedAt() != null ? r.matchedAt() : r.startedAt())
+                        .max(Comparator.naturalOrder()).orElse(now);
+                Instant fillAt = lastJoin.plus(window);
+                if (now.isBefore(fillAt)) {
+                    if (fillWaitLogged.add(forming.id() + "@" + fillAt.toEpochMilli())) {
+                        log.info("match {}: {} real player(s) so far, the virtual players are decided at {} (gather window {}): "
+                                + "real players who search until then join this match", forming.id(), real.size(), fillAt, window);
                     }
-                    if (!fake.category().equals(category.key()) || fake.players() > forming.requiredPlayers() - players
-                            || !joinable(forming, category, fake.maps())) {
-                        continue;
-                    }
-                    fakes.place(fake.id(), forming.id(), clock.instant());
-                    players += fake.players();
-                    log.info("match {}: {} virtual player(s) joined (fake search {}) ({}/{})", forming.id(), fake.players(),
-                            fake.id(), players, forming.requiredPlayers());
-                    if (players >= forming.requiredPlayers()) {
-                        completeMatch(forming, players);
-                    }
+                    continue;
                 }
+                Optional<FakeSearch> profile = pickFakeProfile(forming, category);
+                if (profile.isEmpty()) {
+                    if (fillWaitLogged.add(forming.id() + "@none")) {
+                        log.info("match {}: {} real player(s), no enabled Fake Players profile of {} fits it: it keeps waiting for real players",
+                                forming.id(), real.size(), category.key());
+                    }
+                    continue;
+                }
+                int capacity = forming.requiredPlayers();
+                int effective = Math.min(profile.get().players(), capacity - real.size());
+                if (!matches.setFake(forming.id(), profile.get().id(), profile.get().players(), effective)) {
+                    continue;
+                }
+                log.info("match {}: {} real + {} virtual player(s) (profile {}: {} configured, {} slots left of {}){}", forming.id(),
+                        real.size(), effective, profile.get().id(), profile.get().players(), capacity - real.size(), capacity,
+                        effective < profile.get().players() ? ", the rest is not used" : "");
+                completeMatch(forming, real.size() + effective);
             }
         }
+    }
+
+    /** the enabled profile of the mode with the highest priority that the match can be played with (maps, bound server) */
+    private Optional<FakeSearch> pickFakeProfile(MatchRecord forming, ModeCategory category) {
+        Optional<Set<String>> base = mapPool(forming.id());
+        for (FakeSearch profile : fakes.listEnabled(category.key())) {
+            Optional<Set<String>> pool = narrow(base, profile.maps());
+            if (poolUsable(pool) && anyServerCanServe(category, pool, profile.serverId())) {
+                return Optional.of(profile);
+            }
+        }
+        return Optional.empty();
+    }
+
+    /** the tool is on for this backend (property) and the master switch of the panel is not OFF */
+    private boolean fakeMasterOn() {
+        return props.fakePlayers().enabled() && fakeSettings.get(FakeSettingsRepository.MASTER).map(v -> !"0".equals(v)).orElse(true);
+    }
+
+    /** the panel's value when it was set there, the property otherwise */
+    private Duration gatherWindow() {
+        return fakeSettings.get(FakeSettingsRepository.GATHER_WINDOW_SECONDS).map(v -> {
+            try {
+                return Duration.ofSeconds(Math.max(0, Long.parseLong(v.trim())));
+            } catch (NumberFormatException e) {
+                return props.fakePlayers().gatherWindow();
+            }
+        }).orElse(props.fakePlayers().gatherWindow());
     }
 
     /**
@@ -844,13 +1041,16 @@ public class SearchService {
         });
     }
 
-    /** a member (real or virtual) of a full match went: it gathers again until the missing players are there */
+    /**
+     * A real player left a full match: it gathers again. Its virtual players are decided afresh once the window is over (with the
+     * same or another profile, and one real player less to count).
+     */
     private void revertIfUnderfilled(MatchRecord match) {
-        if (match.status() == MatchStatus.FULL && playerCount(match.id()) < match.requiredPlayers()) {
+        if (match.status() == MatchStatus.FULL) {
             matches.revertToForming(match.id());
             waitingForServerLogged.remove(match.id());
-            log.info("match {} is not full any more ({}/{}), gathering again", match.id(), playerCount(match.id()),
-                    match.requiredPlayers());
+            log.info("match {} lost a player before it had a server: it gathers again ({} real)", match.id(),
+                    searches.listLiveByMatch(match.id()).size());
         }
     }
 
@@ -974,11 +1174,8 @@ public class SearchService {
         for (Long accountId : new LinkedHashSet<>(members.stream().map(SearchRecord::accountId).toList())) {
             roster.add(new RosterEntry(accountId, false));
         }
-        int index = 1;
-        for (FakeSearch fake : fakes.listByMatch(m.id())) {
-            for (int i = 0; i < fake.players(); i++) {
-                roster.add(new RosterEntry(RosterEntry.fakeAccountId(index++), true));
-            }
+        for (int i = 1; i <= m.fakeCount(); i++) {
+            roster.add(new RosterEntry(RosterEntry.fakeAccountId(i), true));
         }
         return List.copyOf(roster);
     }
@@ -998,7 +1195,7 @@ public class SearchService {
         return matches.findActiveByServer(server.get().id()).map(m -> {
             List<RosterEntry> roster = roster(m);
             int fake = (int) roster.stream().filter(RosterEntry::fake).count();
-            return new MatchRoster(m.id(), m.category(), m.status().serverView(), m.map(), m.acceptRequired(), m.requiredPlayers(),
+            return new MatchRoster(m.id(), m.category(), m.status().serverView(), m.map(), m.acceptRequired(), roster.size(),
                     roster.size() - fake, fake, roster, m.status().name());
         });
     }
@@ -1015,13 +1212,13 @@ public class SearchService {
             if (found.isPresent()) {
                 MatchRecord m = found.get();
                 progress = new SearchView.MatchProgress(m.id(), m.status().name(), displayedPlayers(m),
-                        fakes.countPlayersInMatch(m.id()), m.requiredPlayers(), m.map(), m.serverId(), awaitingServer(m),
-                        m.acceptDeadlineAt());
+                        m.fakeCount(), m.requiredPlayers(), m.map(), m.serverId(), awaitingServer(m),
+                        m.acceptDeadlineAt(), mustAcceptCount(m.id()), acceptedCount(m.id()));
                 if (r.status().isAssigned()) {
                     List<RosterEntry> roster = roster(m);
                     int fake = (int) roster.stream().filter(RosterEntry::fake).count();
                     assignment = new SearchView.Assignment(m.id(), m.serverId(), m.serverHost(), m.serverPort(), m.map(),
-                            m.acceptRequired(), m.requiredPlayers(), roster, roster.size() - fake, fake);
+                            m.acceptRequired(), roster.size(), roster, roster.size() - fake, fake);
                 }
             }
         }
@@ -1046,13 +1243,46 @@ public class SearchService {
                 r.endedAt(),
                 seconds,
                 progress,
-                assignment);
+                assignment,
+                r.partyLeaderId());
     }
 
     // ------------------------------------------------------------------------------------------- fake players (TEST tool)
 
+    /** what the panel shows and edits besides the profiles: the tool (property), its master switch, the gather window */
+    public record FakeSettings(boolean available, boolean master, int gatherWindowSeconds) {
+    }
+
+    /** backend.fake-players.enabled: the tool exists on this backend at all */
     public boolean fakePlayersEnabled() {
         return props.fakePlayers().enabled();
+    }
+
+    public synchronized FakeSettings fakeSettings() {
+        return new FakeSettings(props.fakePlayers().enabled(), masterSetting(), (int) gatherWindow().toSeconds());
+    }
+
+    private boolean masterSetting() {
+        return fakeSettings.get(FakeSettingsRepository.MASTER).map(v -> !"0".equals(v)).orElse(true);
+    }
+
+    /** the master switch (Fake Players ON / OFF) and / or the gather window in seconds; null = leave as it is */
+    public synchronized FakeSettings updateFakeSettings(Boolean master, Integer gatherWindowSeconds) {
+        requireFakePlayers();
+        if (gatherWindowSeconds != null && (gatherWindowSeconds < 0 || gatherWindowSeconds > 600)) {
+            throw ApiException.badRequest("invalid_gather_window", "the gather window is 0..600 seconds");
+        }
+        if (master != null) {
+            fakeSettings.put(FakeSettingsRepository.MASTER, master ? "1" : "0");
+            log.info("Fake Players master switch: {}", master ? "ON" : "OFF");
+        }
+        if (gatherWindowSeconds != null) {
+            fakeSettings.put(FakeSettingsRepository.GATHER_WINDOW_SECONDS, Integer.toString(gatherWindowSeconds));
+            log.info("Fake Players gather window: {} s", gatherWindowSeconds);
+        }
+        fillWaitLogged.clear();
+        runMatcher();
+        return fakeSettings();
     }
 
     public synchronized List<FakeSearchView> listFakeSearches() {
@@ -1063,59 +1293,45 @@ public class SearchService {
         requireFakePlayers();
         Normalized n = normalizeFake(request);
         boolean enabled = request.enabled() == null || request.enabled();
-        long id = fakes.insert(n.category().key(), n.players(), n.maps(), enabled, clock.instant());
-        log.info("fake search {} added: {} virtual {} player(s) maps={} enabled={}", id, n.players(), n.category().key(),
-                n.maps(), enabled);
+        long id = fakes.insert(n.category().key(), n.players(), n.maps(), enabled, n.priority(), n.serverId(), clock.instant());
+        log.info("fake profile {} added: {} {} virtual player(s) maps={} priority={} server={} enabled={}", id, n.category().key(),
+                n.players(), n.maps(), n.priority(), n.serverId(), enabled);
         runMatcher();
         return fakeView(fakes.findById(id).orElseThrow());
     }
 
-    /** change players / mode / maps; not while it sits in a match (stop it first) */
+    /** a change applies to the matches that are decided from now on; a match that already has its virtual players keeps them */
     public synchronized FakeSearchView updateFakeSearch(long id, FakeSearchRequest request) {
         requireFakePlayers();
-        FakeSearch current = fakes.findById(id).orElseThrow(() -> ApiException.notFound("fake search " + id));
-        if (current.status() == FakeStatus.MATCHED) {
-            throw ApiException.conflict("fake_search_in_match", "fake search " + id + " is in match " + current.matchId()
-                    + ", stop it before changing it");
-        }
+        fakes.findById(id).orElseThrow(() -> ApiException.notFound("fake search " + id));
         Normalized n = normalizeFake(request);
-        fakes.update(id, n.category().key(), n.players(), n.maps(), clock.instant());
-        log.info("fake search {} updated: {} virtual {} player(s) maps={}", id, n.players(), n.category().key(), n.maps());
+        fakes.update(id, n.category().key(), n.players(), n.maps(), n.priority(), n.serverId(), clock.instant());
+        log.info("fake profile {} updated: {} {} virtual player(s) maps={} priority={} server={}", id, n.category().key(), n.players(),
+                n.maps(), n.priority(), n.serverId());
+        fillWaitLogged.clear();
         runMatcher();
         return fakeView(fakes.findById(id).orElseThrow());
     }
 
-    /** enabled = false stops it (leaves a match that is still forming), true starts a fresh search */
     public synchronized FakeSearchView setFakeEnabled(long id, boolean enabled) {
         requireFakePlayers();
         FakeSearch current = fakes.findById(id).orElseThrow(() -> ApiException.notFound("fake search " + id));
-        if (enabled) {
-            if (current.status() != FakeStatus.MATCHED && current.status() != FakeStatus.SEARCHING) {
-                fakes.start(id, clock.instant());
-                log.info("fake search {} started", id);
-                runMatcher();
-            }
-        } else if (current.status() != FakeStatus.STOPPED) {
-            boolean forming = current.matchId() != null && matches.findById(current.matchId())
-                    .map(m -> m.status().isGathering()).orElse(false);
-            fakes.stop(id, forming, clock.instant());
-            log.info("fake search {} stopped{}", id, forming ? " (left the forming match " + current.matchId() + ")" : "");
-            if (forming) {
-                matches.findById(current.matchId()).ifPresent(this::revertIfUnderfilled);
-            }
+        if (current.enabled() != enabled) {
+            fakes.setEnabled(id, enabled, clock.instant());
+            log.info("fake profile {} {}", id, enabled ? "switched on" : "switched off");
+            fillWaitLogged.clear();
+            runMatcher();
         }
         return fakeView(fakes.findById(id).orElseThrow());
     }
 
     public synchronized void deleteFakeSearch(long id) {
-        Optional<FakeSearch> current = fakes.findById(id);
         if (!fakes.delete(id)) {
             throw ApiException.notFound("fake search " + id);
         }
-        log.info("fake search {} deleted", id);
-        current.map(FakeSearch::matchId).flatMap(matches::findById)
-                .filter(m -> m.status().isGathering())
-                .ifPresent(this::revertIfUnderfilled);
+        log.info("fake profile {} deleted", id);
+        fillWaitLogged.clear();
+        runMatcher();
     }
 
     private void requireFakePlayers() {
@@ -1124,37 +1340,50 @@ public class SearchService {
         }
     }
 
-    private record Normalized(ModeCategory category, int players, List<String> maps) {
+    private record Normalized(ModeCategory category, int players, List<String> maps, int priority, Long serverId) {
     }
 
-    /** fake players only make sense for the Accept modes: one search of a classic mode is complete on its own */
-    private static Normalized normalizeFake(FakeSearchRequest request) {
+    /** fake players only make sense for the Accept modes: a match of a classic mode is complete on its own */
+    private Normalized normalizeFake(FakeSearchRequest request) {
         ModeCategory category = ModeCategory.fromKey(request.mode()).orElseThrow(() ->
                 ApiException.badRequest("unsupported_mode", "unknown mode '" + request.mode() + "'"));
         if (!category.acceptRequired()) {
             throw ApiException.badRequest("fake_mode_unsupported", category.label()
                     + " does not gather players, fake players are for Competitive, Wingman and Danger Zone");
         }
-        int max = category.requiredPlayers() - 1;   // at least one real player is needed to start the match
-        if (request.players() < 1 || request.players() > max) {
-            throw ApiException.badRequest("invalid_players", category.label() + " takes 1-" + max + " fake players per search");
+        int max = requiredPlayers(category) - 1;   // at least one real player is needed to start the match
+        if (request.players() < 0 || request.players() > max) {
+            throw ApiException.badRequest("invalid_players", category.label() + " takes 0-" + max + " fake players");
         }
         List<String> maps = request.maps() == null ? List.of() : List.copyOf(new LinkedHashSet<>(request.maps()));
-        return new Normalized(category, request.players(), maps);
+        Long serverId = request.serverId();
+        if (serverId != null) {
+            GameServer server = servers.findById(serverId).orElseThrow(() ->
+                    ApiException.badRequest("unknown_server", "game server " + serverId + " is not registered"));
+            if (!category.key().equals(server.category())) {
+                throw ApiException.badRequest("server_mismatch", "game server " + serverId + " serves " + server.category()
+                        + ", not " + category.key());
+            }
+            if (!maps.isEmpty() && !server.map().isEmpty() && !maps.contains(server.map())) {
+                throw ApiException.badRequest("server_map_mismatch", "game server " + serverId + " runs " + server.map()
+                        + ", which is not one of the profile's maps " + maps);
+            }
+        }
+        return new Normalized(category, request.players(), maps, request.priority() == null ? 0 : request.priority(), serverId);
     }
 
     private FakeSearchView fakeView(FakeSearch f) {
         ModeCategory category = ModeCategory.fromKey(f.category()).orElseThrow();
-        FakeSearchView.Joined joined = null;
-        if (f.matchId() != null) {
-            Optional<MatchRecord> found = matches.findById(f.matchId());
-            if (found.isPresent()) {
-                MatchRecord m = found.get();
-                joined = new FakeSearchView.Joined(m.id(), m.status().name(), m.serverId(), m.serverHost(), m.serverPort(),
-                        m.map(), displayedPlayers(m), m.requiredPlayers());
-            }
-        }
+        List<FakeSearchView.Used> used = matches.findLiveByFakeProfile(f.id()).stream()
+                .map(m -> new FakeSearchView.Used(m.id(), m.status().name(), searches.listLiveByMatch(m.id()).size(), m.fakeCount(),
+                        m.fakeConfigured() == null ? m.fakeCount() : m.fakeConfigured(), m.requiredPlayers(), m.serverHost(),
+                        m.serverPort(), m.map()))
+                .toList();
+        String serverLabel = f.serverId() == null ? null : servers.findById(f.serverId())
+                .map(server -> server.host() + ":" + server.port() + (server.map().isEmpty() ? "" : " " + server.map()))
+                .orElse("game server " + f.serverId() + " (deleted)");
         return new FakeSearchView(f.id(), category.key(), category.label(), f.players(), f.maps(), f.enabled(),
-                f.status().name(), joined, f.createdAt(), f.updatedAt());
+                f.enabled() ? "ON" : "OFF", f.priority(), f.serverId(), serverLabel, requiredPlayers(category) - 1, used, f.createdAt(),
+                f.updatedAt());
     }
 }

@@ -43,6 +43,26 @@ final class SchemaInitializer {
             ensureColumn(connection, "matchmaking_match", "accept_deadline_at", "INTEGER");
             ensureColumn(connection, "matchmaking_match", "accepted_at", "INTEGER");
             ensureColumn(connection, "game_server", "available_after", "INTEGER");
+            // a member of a party is searched together with its leader (RESEARCH_FINDINGS.md #65)
+            ensureColumn(connection, "matchmaking_search", "party_leader_id", "INTEGER");
+            // the fake players are a pool that gives a match what it is missing; when the game server / the GC of a real
+            // player first got the assignment (RESEARCH_FINDINGS.md #66)
+            ensureColumn(connection, "fake_search", "taken", "INTEGER");
+            ensureColumn(connection, "matchmaking_search", "assignment_seen_at", "INTEGER");
+            // Fake Players are profiles managed from the panel (RESEARCH_FINDINGS.md #67): a priority, an optional server, and the
+            // match records which profile it used and how many virtual players it got (the profile is not consumed by it)
+            ensureColumn(connection, "fake_search", "priority", "INTEGER NOT NULL DEFAULT 0");
+            ensureColumn(connection, "fake_search", "server_id", "INTEGER");
+            ensureColumn(connection, "matchmaking_match", "fake_search_id", "INTEGER");
+            ensureColumn(connection, "matchmaking_match", "fake_count", "INTEGER NOT NULL DEFAULT 0");
+            ensureColumn(connection, "matchmaking_match", "fake_configured", "INTEGER");
+            // a match of an older version: its fake players were rows placed in it, now the match carries their number
+            try (Statement statement = connection.createStatement()) {
+                statement.execute("UPDATE matchmaking_match SET fake_count = (SELECT COALESCE(SUM(COALESCE(taken, players)), 0) "
+                        + "FROM fake_search WHERE fake_search.match_id = matchmaking_match.id) "
+                        + "WHERE fake_count = 0 AND fake_search_id IS NULL "
+                        + "AND EXISTS (SELECT 1 FROM fake_search WHERE fake_search.match_id = matchmaking_match.id)");
+            }
         } catch (SQLException e) {
             throw new IllegalStateException("database migration failed", e);
         }

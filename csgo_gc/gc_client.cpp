@@ -36,6 +36,11 @@ ClientGC::ClientGC(uint64_t steamId)
                 static_cast<uint32_t>(text.size()));
         },
         this);
+
+    // A party member's client never sends a search, the lobby leader's does (its 9101 carries every member). The backend keeps a
+    // search for each member; this finds it and follows it like an own one: assignment, 9107, Match Found, Accept
+    // (RESEARCH_FINDINGS.md #65).
+    BackendClient::WatchAccount(AccountId());
 }
 
 ClientGC::~ClientGC()
@@ -563,6 +568,7 @@ void ClientGC::OnMatchmakingStart(GCMessageRead &messageRead)
     m_pendingAccept = {};
     AcceptTest::DisarmClient();
     m_activeSearch = {};
+    m_followsParty = false; // a search of our own now (as the lobby leader or alone)
 
     // The GC does not pick a server: the Java matchmaking backend does (RESEARCH_FINDINGS.md #49). We report the
     // search (this only queues it for the backend worker thread, nothing here blocks) and carry on when the backend
@@ -582,6 +588,13 @@ void ClientGC::OnMatchmakingStart(GCMessageRead &messageRead)
 
     BackendClient::SearchInfo info;
     info.accountId = AccountId() ? AccountId() : (request.account_ids_size() > 0 ? request.account_ids(0) : 0);
+    for (int i = 0; i < request.account_ids_size(); i++)
+    {
+        if (request.account_ids(i) != 0 && request.account_ids(i) != info.accountId)
+        {
+            info.partyAccountIds.push_back(request.account_ids(i)); // the rest of the lobby: they are searched with us
+        }
+    }
     info.gameType = request.game_type();
     info.mode = mode->name;
     info.gameMode = mode->serverGameMode;
@@ -596,8 +609,8 @@ void ClientGC::OnMatchmakingStart(GCMessageRead &messageRead)
 
     BackendClient::SearchStarted(info, m_steamId);
 
-    Platform::Print("[MM] search %s reported to the backend, waiting for the server it assigns\n",
-        BackendClient::ActiveRequestId().c_str());
+    Platform::Print("[MM] search %s reported to the backend (party of %zu), waiting for the server it assigns\n",
+        BackendClient::ActiveRequestId().c_str(), info.partyAccountIds.size() + 1);
 }
 
 // The backend worker thread reported the state of our search (posted here as GCEvent::BackendSearchResult).
@@ -610,20 +623,41 @@ void ClientGC::OnBackendSearchResult(const std::vector<uint8_t> &buffer)
         return;
     }
 
+    if (result.discovered)
+    {
+        OnPartySearchDiscovered(result);
+        return;
+    }
+
     // While an Accept is out the backend owns its deadline (RESEARCH_FINDINGS.md #63): the search is still tracked, and a
     // result that says the match is gone has to reach the client, or its Match Found popup would stay up for ever.
     if (m_pendingAccept.active && result.requestId == BackendClient::ActiveRequestId())
     {
         if (result.IsAssigned() && result.assignment.matchId == m_pendingAccept.matchId)
         {
-            return; // still the same match (its status moved on), the Accept goes on
+            // still the same match; READY_TO_CONNECT = the backend has the accept of EVERY real player
+            if (result.status == "READY_TO_CONNECT" && !m_pendingAccept.backendAccepted)
+            {
+                m_pendingAccept.backendAccepted = true;
+                Platform::Print("[MM-ACCEPT] the backend says every player of match %s accepted (%u/%u): connecting is allowed\n",
+                    m_pendingAccept.matchId.c_str(), result.matchAcceptedPlayers, result.matchRealPlayers);
+                TryConnectAfterAccept();
+            }
+            else if (result.status != "READY_TO_CONNECT")
+            {
+                // one line per change: who is still to accept is the operator's first question when a match hangs
+                Platform::Print("[MM-ACCEPT] match %s: %u of %u real players accepted - nobody connects before all of them did\n",
+                    m_pendingAccept.matchId.c_str(), result.matchAcceptedPlayers, result.matchRealPlayers);
+            }
+
+            return;
         }
 
         if (result.IsAssigned())
         {
             // another match was assigned to the search: the old one is over, this one starts its own Accept
             WithdrawAccept("another match was assigned");
-            StartServerFlow(result.assignment);
+            StartServerFlow(result.assignment, result.status == "READY_TO_CONNECT");
         }
         else if (result.IsEnded())
         {
@@ -647,7 +681,7 @@ void ClientGC::OnBackendSearchResult(const std::vector<uint8_t> &buffer)
 
     if (result.IsAssigned())
     {
-        StartServerFlow(result.assignment);
+        StartServerFlow(result.assignment, result.status == "READY_TO_CONNECT");
         return;
     }
 
@@ -673,7 +707,36 @@ void ClientGC::OnBackendSearchResult(const std::vector<uint8_t> &buffer)
 // The server of the search is known: from here on it is the flow that already worked with a fixed test server. Accept
 // modes (game_type 8/10/13) take the reservation + Accept path, all the others the direct (Casual style) path, the only
 // difference to before is where the address comes from (the backend's assignment instead of config.txt).
-void ClientGC::StartServerFlow(const BackendClient::Assignment &assignment)
+// The backend has a search for this account that its party leader started (this client sent nothing): set up the search state
+// the way OnMatchmakingStart does, the rest (assignment, 9107, Accept) is the ordinary flow of the tracked search.
+void ClientGC::OnPartySearchDiscovered(const BackendClient::SearchResult &result)
+{
+    const MM::GameMode *mode = MM::FindGameModeByName(result.mode);
+    if (!mode || !mode->supported)
+    {
+        Platform::Print("[MM] the party leader's search %s is for '%s', which this GC does not serve: ignoring it\n",
+            result.requestId.c_str(), result.mode.c_str());
+        return;
+    }
+
+    m_pendingAccept = {};
+    AcceptTest::DisarmClient();
+
+    const MM::MapSelection selection = MM::DecodeMapSelection(*mode, result.gameType);
+    m_activeSearch = {};
+    m_activeSearch.active = true;
+    m_activeSearch.gameType = result.gameType;
+    m_activeSearch.eGame = result.gameType & 0xF;
+    m_activeSearch.mode = mode;
+    m_activeSearch.fallbackMap = MM::PickMap(*mode, selection);
+    m_activeSearch.partyMember = true;
+    m_followsParty = true;
+
+    Platform::Print("[MM] party: the lobby leader searches %s for this account (search %s, %s): following it, this client gets its own "
+        "Match Found / Accept\n", mode->name, result.requestId.c_str(), result.status.c_str());
+}
+
+void ClientGC::StartServerFlow(const BackendClient::Assignment &assignment, bool alreadyAccepted)
 {
     const MM::GameMode *mode = m_activeSearch.mode;
     const uint32_t gameType = m_activeSearch.gameType;
@@ -695,6 +758,23 @@ void ClientGC::StartServerFlow(const BackendClient::Assignment &assignment)
     Platform::Print("[MM] backend assigned match %s: server %s:%u map=%s (%s, accept_required=%d)\n",
         assignment.matchId.c_str(), assignment.serverAddress.c_str(), testServerPort, testMap, mode->name,
         assignment.acceptRequired ? 1 : 0);
+
+    // This is the Match Found of THIS client: the 9107 below is built here, from what this GC's own poll got. Nobody sends it for
+    // another player and it carries no roster (only the address, the map and the fixed cookie), so a player that is not polling its
+    // own search gets nothing. The list of the real players is what the game server arms: one entry each, `awaiting` counts them.
+    {
+        std::string accounts;
+        bool listed = false;
+        for (uint32_t id : assignment.realAccounts)
+        {
+            accounts += (accounts.empty() ? "" : ", ") + std::to_string(id);
+            listed = listed || id == AccountId();
+        }
+
+        Platform::Print("[MM-ACCEPT] Match Found for account %u: match %s has %u real player(s) [%s] + %u fake = %u; this account is %s\n",
+            AccountId(), assignment.matchId.c_str(), assignment.realPlayers, accounts.c_str(), assignment.fakePlayers,
+            assignment.requiredPlayers, assignment.realAccounts.empty() ? "not checked (old backend)" : (listed ? "in the roster" : "NOT IN THE ROSTER (backend/GC mismatch)"));
+    }
 
     Platform::Print("[MM-TEST] Sending MatchmakingGC2ClientReserve: map=%s reservationid=%llx\n",
         testMap, static_cast<unsigned long long>(GameServerCookieId));
@@ -734,11 +814,15 @@ void ClientGC::StartServerFlow(const BackendClient::Assignment &assignment)
         m_pendingAccept.eGame = eGame;
         m_pendingAccept.map = testMap;
         m_pendingAccept.matchId = assignment.matchId;
-        AcceptTest::ArmClient(testServerIp, testServerPort, mode->requiredPlayers);
+        m_pendingAccept.backendAccepted = alreadyAccepted; // nobody had to accept (e.g. only panel searches)
+        // the roster the srcds arms is the backend's match (real + the virtual players of the Fake Players setting), not always
+        // the capacity of the mode: its 0x25 total is checked against THAT
+        const uint32_t rosterSize = assignment.requiredPlayers ? assignment.requiredPlayers : mode->requiredPlayers;
+        AcceptTest::ArmClient(testServerIp, testServerPort, rosterSize);
 
         Platform::Print("[MM-ACCEPT] %s: waiting for the Accept popup / full accept. The srcds on port %u must run "
-            "-gc_mode %s (roster of %u); its 0x25 total is checked against that in the srcds log ([FAKE-MM])\n",
-            mode->name, testServerPort, mode->name, mode->requiredPlayers);
+            "-gc_mode %s (roster of %u = the match of the backend); its 0x25 total is checked against that in the srcds log ([FAKE-MM])\n",
+            mode->name, testServerPort, mode->name, rosterSize);
         return;
     }
 
@@ -796,6 +880,17 @@ void ClientGC::OnMatchmakingStop()
 {
     AcceptTest::DiagLog("client -> GC MatchmakingStop (9102) received");
 
+    if (m_followsParty && m_pendingAccept.active && !m_pendingAccept.serverAccepted)
+    {
+        // The search belongs to the party leader. Only the leader can cancel it (its Stop ends every member's search on the
+        // backend), a member's client sending one here is not a decision of the player - most likely the client found no
+        // game/mmqueue set for this lobby state and dropped the Match Found. Cancelling would take the whole match down.
+        Platform::Print("[MM-ACCEPT] party member: MatchmakingStop from this client during the Accept of match %s ignored - the "
+            "search is the lobby leader's (if the popup never appeared, this client's game/mmqueue was empty for the lobby search)\n",
+            m_pendingAccept.matchId.c_str());
+        return;
+    }
+
     // SIDE CHANNEL: tell the Java matchmaking backend the search we reported is over (RESEARCH_FINDINGS.md #48)
     BackendClient::SearchCancelled();
 
@@ -824,14 +919,40 @@ void ClientGC::OnReservationFullyAccepted()
         return;
     }
 
-    PendingAccept pending = std::move(m_pendingAccept);
-    m_pendingAccept = {};
+    if (m_pendingAccept.serverAccepted)
+    {
+        return; // told twice
+    }
 
     // The client GC is the one that reports "everybody accepted" to the backend (RESEARCH_FINDINGS.md #63): it moves the
     // match from ACCEPTING to ACCEPTED, and without it the backend cancels the match when the Accept deadline passes.
-    Platform::Print("[MM-ACCEPT] everybody accepted (0x25 stage 2, awaiting 0): reporting match %s to the backend\n",
-        pending.matchId.c_str());
+    // This is only the GAME SERVER's word for its roster. The connect waits for the backend as well (TryConnectAfterAccept):
+    // it knows every real player of the match, and one player who accepted early must not be sent on alone (#65).
+    m_pendingAccept.serverAccepted = true;
+    Platform::Print("[MM-ACCEPT] the game server says everybody is at stage 2 (0x25 awaiting 0): reporting match %s to the backend\n",
+        m_pendingAccept.matchId.c_str());
     BackendClient::ReportAccepted();
+    TryConnectAfterAccept();
+}
+
+// The second 9107 (connect), once BOTH the game server (reservation stage 2, awaiting 0) and the backend (every real player
+// reported: the search is READY_TO_CONNECT) say everybody accepted. accepted_count < required_count -> no connect.
+void ClientGC::TryConnectAfterAccept()
+{
+    if (!m_pendingAccept.active || !m_pendingAccept.serverAccepted || !m_pendingAccept.backendAccepted)
+    {
+        if (m_pendingAccept.active && m_pendingAccept.serverAccepted)
+        {
+            Platform::Print("[MM-ACCEPT] waiting for the other players of match %s to accept (the backend has not got them all)\n",
+                m_pendingAccept.matchId.c_str());
+        }
+
+        return;
+    }
+
+    PendingAccept pending = std::move(m_pendingAccept);
+    m_pendingAccept = {};
+    BackendClient::StopPolling(); // connecting: nothing left that the backend could withdraw
 
     Platform::Print("[MM-ACCEPT] sending the second MatchmakingGC2ClientReserve (connect): map=%s reservationid=%llx\n",
         pending.map.c_str(), static_cast<unsigned long long>(GameServerCookieId));
