@@ -50,7 +50,9 @@ import org.springframework.test.web.servlet.request.RequestPostProcessor;
         "backend.required-players.wingman=4",
         "backend.required-players.dangerzone=16",
         "backend.roster-ack-timeout=PT25S",
-        "backend.roster-poll-window=PT10S"
+        "backend.roster-poll-window=PT10S",
+        "backend.accept-timeout=PT25S",
+        "backend.server-release-cooldown=PT15S"
 })
 @AutoConfigureMockMvc
 @Import(BackendTestBase.ClockConfig.class)
@@ -160,6 +162,13 @@ abstract class BackendTestBase {
     void cancel(long account, String requestId) throws Exception {
         mvc.perform(post("/api/v1/matchmaking/cancel").header(KEY, "test-api-key").contentType(MediaType.APPLICATION_JSON)
                 .content("{\"account_id\":" + account + ",\"request_id\":\"" + requestId + "\"}")).andExpect(status().isOk());
+    }
+
+    /** the GC of a player says: the game server reported everybody accepted (POST /matchmaking/accepted), returns the body */
+    JsonNode accepted(long account, String requestId) throws Exception {
+        return body(mvc.perform(post("/api/v1/matchmaking/accepted").header(KEY, "test-api-key")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"account_id\":" + account + ",\"request_id\":\"" + requestId + "\"}")).andExpect(status().isOk()));
     }
 
     /** runs the timers like the reaper would */

@@ -1,6 +1,7 @@
 #include "stdafx.h"
 #include "test_accept.h"
 #include "test_diag.h"
+#include "reservation_keepalive.h"
 
 #include <algorithm>
 #include <chrono>
@@ -139,6 +140,7 @@ enum Command : int
     CommandArm,   // first reservation
     CommandRearm, // unreserve, wait for the engine to drop the cookie, reserve again with a fresh roster
     CommandPause, // a real client is on the server, leave everything alone
+    CommandRelease, // the match is gone: unreserve once, keep nothing alive, arm nothing (until a new roster replaces this driver)
 };
 
 enum class Phase
@@ -186,6 +188,7 @@ struct FakeRoster::Impl
     std::vector<uint32_t> fakeIds; // the fake participants this driver answers for, in roster order
 
     std::atomic<int> command{ CommandArm };
+    std::atomic<bool> released{ false }; // Release() was called: this roster is over, OnMatchEnded must not bring it back
     std::atomic<bool> stopping{ false };
     std::thread thread;
 
@@ -246,7 +249,18 @@ void FakeRoster::OnMatchStarted()
 
 void FakeRoster::OnMatchEnded()
 {
+    if (m_impl->released)
+    {
+        return;
+    }
+
     m_impl->command = CommandRearm;
+}
+
+void FakeRoster::Release()
+{
+    m_impl->released = true;
+    m_impl->command = CommandRelease;
 }
 
 void FakeRoster::Impl::Run()
@@ -263,7 +277,8 @@ void FakeRoster::Impl::Run()
     constexpr auto RetryTimeout = milliseconds(1500);   // per fake, only if no matching 0x25 came back
     constexpr int MaxAttempts = 5;                      // per fake and stage, then it is reported as TIMEOUT
     constexpr auto FirstProbeDelay = milliseconds(1500);// give the main thread time to run the reservation
-    constexpr auto KeepAliveInterval = seconds(8);      // sv_mmqueue_reservation_timeout is 21 s
+    // sv_mmqueue_reservation_timeout is 21 s; the same interval keeps the plain reservation of a classic server alive
+    constexpr auto KeepAliveInterval = seconds(ReservationKeepAlive::RefreshSeconds);
     constexpr auto DoneRearmDelay = seconds(90);        // nobody connected: start over with a clean roster
     constexpr auto GaveUpRearmDelay = seconds(30);      // a fake never got confirmed: start over
     // Unreserve() only zeroes the expiry time; the cookie (and the roster with its stale stages) is dropped later by
@@ -434,7 +449,16 @@ void FakeRoster::Impl::Run()
             cmd = CommandRearm;
         }
 
-        if (cmd == CommandPause)
+        if (cmd == CommandRelease)
+        {
+            FakeLog("the backend match of this roster is gone: unreserving, nothing is kept alive or armed again");
+            notifyReady(false);
+            postReserve(unreservePayload);
+
+            phase = Phase::Paused;
+            gaveUpAt = {};
+        }
+        else if (cmd == CommandPause)
         {
             FakeLog("a client connected, roster left alone until it disconnects");
             phase = Phase::Paused;

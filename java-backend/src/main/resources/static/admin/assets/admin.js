@@ -300,7 +300,7 @@
         matchBody.appendChild(el('tr', null,
           el('td', { class: 'num' }, m.id),
           el('td', null, m.mode_label, m.accept_required ? el('span', { class: 'tag', text: 'Accept' }) : null),
-          el('td', { class: 'num' }, m.server_address + ':' + m.server_port),
+          el('td', { class: 'num' }, m.server_address ? m.server_address + ':' + m.server_port : '— (no server yet)'),
           el('td', null, m.map || '—'),
           el('td', null, el('span', { class: 'pill ' + m.status.toLowerCase(), text: m.status })),
           el('td', { class: 'num' }, m.players + ' / ' + m.required_players),
@@ -308,7 +308,7 @@
           el('td', { class: 'small', title: formatDate(m.created_at) }, formatDate(m.created_at))));
       });
       document.getElementById('matchCount').textContent = String(matches.filter(function (m) {
-        return m.status === 'FORMING' || m.status === 'READY';
+        return ['FORMING', 'FULL', 'READY', 'ACCEPTING', 'ACCEPTED'].indexOf(m.status) >= 0;
       }).length);
       document.getElementById('matchEmpty').hidden = matches.length > 0;
       document.getElementById('matchTable').hidden = matches.length === 0;
@@ -363,7 +363,7 @@
   function fakeMatchText(f) {
     if (!f.match) return '—';
     var m = f.match;
-    return m.match_id + ' on ' + m.server_address + ':' + m.server_port + ' ' + (m.map || '') + '  (' + m.players + '/'
+    return m.match_id + (m.server_address ? ' on ' + m.server_address + ':' + m.server_port + ' ' + (m.map || '') : ' (no server yet)') + '  (' + m.players + '/'
       + m.required_players + ', ' + m.match_status.toLowerCase() + ')';
   }
 

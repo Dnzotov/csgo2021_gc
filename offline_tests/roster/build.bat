@@ -14,7 +14,7 @@ copy /y "%HERE%config.h" "%OUT%\" >nul
 copy /y "%HERE%funchook.h" "%OUT%\" >nul
 copy /y "%HERE%roster_e2e.cpp" "%OUT%\" >nul
 copy /y "%HERE%controller_test.cpp" "%OUT%\" >nul
-for %%F in (backend_client.h backend_client.cpp keyvalue.h keyvalue.cpp server_roster.h server_roster.cpp test_accept.h test_accept.cpp test_diag.h) do copy /y "%SRC%\%%F" "%OUT%\" >nul
+for %%F in (backend_client.h backend_client.cpp keyvalue.h keyvalue.cpp server_roster.h server_roster.cpp test_accept.h test_accept.cpp test_diag.h reservation_keepalive.h) do copy /y "%SRC%\%%F" "%OUT%\" >nul
 call "%HERE%..\..\tools\msvc\VC\Auxiliary\Build\vcvarsamd64_x86.bat" >nul 2>&1
 cd /d "%OUT%"
 cl /nologo /std:c++17 /EHsc /W3 /D_CRT_SECURE_NO_WARNINGS /I. /Fe:controller_test.exe controller_test.cpp server_roster.cpp backend_client.cpp keyvalue.cpp ws2_32.lib || exit /b 1

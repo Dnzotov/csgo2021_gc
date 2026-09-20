@@ -20,5 +20,7 @@ public record SearchRecord(
         Instant lastSeenAt,
         Instant endedAt,
         String matchId,
-        Instant matchedAt) {
+        Instant matchedAt,
+        /** Accept modes: when this player accepted (the GC reports it once the game server says everybody accepted) */
+        Instant acceptedAt) {
 }

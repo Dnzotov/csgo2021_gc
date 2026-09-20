@@ -308,15 +308,17 @@ class MatchmakingIntegrationTest {
     }
 
     @Test
-    void leavingASharedMatchDoesNotReleaseTheServer() throws Exception {
-        long serverId = addServer("10.0.0.5", 27017, "competitive", "de_dust2");
-        search(1, COMPETITIVE, "\"de_dust2\"", "a");
-        assertThat(search(2, COMPETITIVE, "\"de_dust2\"", "b").get("status").asText()).isEqualTo("WAITING_ACCEPT");
+    void leavingAGatheringMatchKeepsTheOthersInIt() throws Exception {
+        long serverId = addServer("10.0.0.5", 27018, "wingman", "de_lake");
+        search(1, WINGMAN, "\"de_lake\"", "a");
+        search(2, WINGMAN, "\"de_lake\"", "b");
+        assertThat(poll("b").get("match").get("players").asInt()).isEqualTo(2);
 
-        cancel(1, "a");
-        assertThat(search(1, COMPETITIVE, "\"de_dust2\"", "a2").get("status").asText()).isEqualTo("SEARCHING");
-        assertThat(server(serverId).get("state").asText()).isEqualTo("RESERVED");
-        assertThat(poll("b").get("status").asText()).isEqualTo("WAITING_ACCEPT");
+        cancel(1, "a");                                                    // one of two leaves: the match goes on gathering
+        assertThat(poll("b").get("status").asText()).isEqualTo("MATCHED");
+        assertThat(poll("b").get("match").get("players").asInt()).isEqualTo(1);
+        assertThat(search(1, WINGMAN, "\"de_lake\"", "a2").get("match").get("players").asInt()).isEqualTo(2);
+        assertThat(server(serverId).get("state").asText()).isEqualTo("AVAILABLE");   // nothing was reserved meanwhile
     }
 
     @Test
@@ -344,23 +346,26 @@ class MatchmakingIntegrationTest {
     // ------------------------------------------------------------------------------------------ Accept modes
 
     @Test
-    void competitiveGathersPlayersOnOneReservedServerBeforeAnybodyGetsIt() throws Exception {
+    void competitiveGathersPlayersFirstAndOnlyAFullMatchReservesAServer() throws Exception {
         long serverId = addServer("10.0.0.5", 27017, "competitive", "de_dust2");
-        addServer("10.0.0.5", 27018, "competitive", "de_mirage");
+        long mirageId = addServer("10.0.0.5", 27018, "competitive", "de_mirage");
 
         JsonNode a = search(1, COMPETITIVE, "\"de_dust2\"", "a");
-        assertThat(a.get("status").asText()).isEqualTo("MATCHED");                  // server reserved, 1/2 players
+        assertThat(a.get("status").asText()).isEqualTo("MATCHED");                  // gathering, 1/2 players
         assertThat(a.has("assignment")).isFalse();
+        assertThat(a.get("match").get("status").asText()).isEqualTo("FORMING");
         assertThat(a.get("match").get("players").asInt()).isEqualTo(1);
         assertThat(a.get("match").get("required_players").asInt()).isEqualTo(2);
-        assertThat(server(serverId).get("state").asText()).isEqualTo("RESERVED");
+        assertThat(server(serverId).get("state").asText()).isEqualTo("AVAILABLE");  // #63: no server is reserved while gathering
 
-        // a player who wants another map does not join, the second server is reserved for a second match
+        // a player who wants another map does not join: a second gathering match, still no server reserved
         JsonNode other = search(3, COMPETITIVE, "\"de_mirage\"", "c");
         assertThat(other.get("match").get("match_id").asText()).isNotEqualTo(a.get("match").get("match_id").asText());
+        assertThat(server(mirageId).get("state").asText()).isEqualTo("AVAILABLE");
 
-        // a compatible player completes the first match: both get the same server, the Accept phase starts
+        // a compatible player completes the first match: the server is reserved now, both get it, the Accept phase starts
         JsonNode b = search(2, COMPETITIVE, "\"de_dust2\",\"de_inferno\"", "b");
+        assertThat(server(serverId).get("state").asText()).isEqualTo("RESERVED");
         assertThat(b.get("status").asText()).isEqualTo("WAITING_ACCEPT");
         assertThat(b.get("assignment").get("accept_required").asBoolean()).isTrue();
         JsonNode aAgain = poll("a");
@@ -369,15 +374,22 @@ class MatchmakingIntegrationTest {
         assertThat(aAgain.get("assignment").get("server_port").asInt()).isEqualTo(27017);
         assertThat(poll("c").get("status").asText()).isEqualTo("MATCHED");            // still waiting for its second player
 
-        // a further player cannot join the finished match and finds no free dust2 server
-        assertThat(search(4, COMPETITIVE, "\"de_dust2\"", "d").get("status").asText()).isEqualTo("SEARCHING");
+        // a further player cannot join the finished match: a new one gathers, and when it is full it waits for a free dust2 server
+        JsonNode d = search(4, COMPETITIVE, "\"de_dust2\"", "d");
+        assertThat(d.get("status").asText()).isEqualTo("MATCHED");
+        assertThat(d.get("match").get("match_id").asText()).isNotEqualTo(a.get("match").get("match_id").asText());
+        JsonNode e = search(5, COMPETITIVE, "\"de_dust2\"", "e");
+        assertThat(e.get("status").asText()).isEqualTo("MATCHED");                 // full, no free server: held
+        assertThat(e.get("match").get("status").asText()).isEqualTo("FULL");
+        assertThat(e.get("match").get("awaiting_server").asBoolean()).isTrue();
+        assertThat(e.has("assignment")).isFalse();
     }
 
     @Test
     void aFormingMatchFallsApartWhenItsOnlyPlayerCancelsAndTheServerIsFreed() throws Exception {
         long serverId = addServer("10.0.0.5", 27017, "competitive", "de_dust2");
         search(1, COMPETITIVE, "\"de_dust2\"", "a");
-        assertThat(server(serverId).get("state").asText()).isEqualTo("RESERVED");
+        assertThat(server(serverId).get("state").asText()).isEqualTo("AVAILABLE");   // gathering reserves nothing (#63)
         cancel(1, "a");
         assertThat(server(serverId).get("state").asText()).isEqualTo("AVAILABLE");
         assertThat(server(serverId).has("reserved_match_id")).isFalse();
@@ -389,7 +401,7 @@ class MatchmakingIntegrationTest {
     void aPlayerWhoStopsPollingLeavesTheFormingMatchAndTheServerIsFreed() throws Exception {
         long serverId = addServer("10.0.0.5", 27017, "competitive", "de_dust2");
         search(1, COMPETITIVE, "\"de_dust2\"", "a");
-        assertThat(server(serverId).get("state").asText()).isEqualTo("RESERVED");
+        assertThat(server(serverId).get("state").asText()).isEqualTo("AVAILABLE");
 
         clock.advance(Duration.ofMinutes(6));                                        // stale-search-timeout is PT5M
         mvc.perform(get("/api/v1/matchmaking/searches").header(KEY, "test-api-key"));  // runs the timers
@@ -458,6 +470,7 @@ class MatchmakingIntegrationTest {
         assertThat(server(id).get("state").asText()).isEqualTo("AVAILABLE");
         long accept = addServer("10.0.0.6", 27017, "competitive", "de_dust2");
         search(9, COMPETITIVE, "\"de_dust2\"", "c-1");
+        search(10, COMPETITIVE, "\"de_dust2\"", "c-2");                     // the match is full now: the server is reserved
         assertThat(server(accept).get("state").asText()).isEqualTo("RESERVED");
         mvc.perform(post("/api/v1/servers/state").header(KEY, "test-api-key").contentType(MediaType.APPLICATION_JSON)
                 .content("{\"address\":\"10.0.0.6\",\"port\":27017,\"state\":\"AVAILABLE\"}")).andExpect(status().isOk());
@@ -465,19 +478,24 @@ class MatchmakingIntegrationTest {
     }
 
     @Test
-    void deletingAReservedServerReturnsItsFormingPlayersToTheQueue() throws Exception {
+    void deletingAReservedServerReturnsItsPlayersToTheQueue() throws Exception {
         long id = addServer("10.0.0.5", 27017, "competitive", "de_dust2");
         search(1, COMPETITIVE, "\"de_dust2\"", "a");
+        search(2, COMPETITIVE, "\"de_dust2\"", "b");                         // full: the server is reserved, Accept is running
+        assertThat(poll("a").get("status").asText()).isEqualTo("WAITING_ACCEPT");
         mvc.perform(delete("/admin/api/servers/" + id).with(ADMIN).with(csrf())).andExpect(status().isNoContent());
-        JsonNode a = poll("a");
-        assertThat(a.get("status").asText()).isEqualTo("SEARCHING");
-        assertThat(a.has("match")).isFalse();
+        for (String request : new String[] { "a", "b" }) {
+            JsonNode search = poll(request);
+            assertThat(search.get("status").asText()).isEqualTo("SEARCHING");     // no server of the category is left
+            assertThat(search.has("match")).isFalse();
+        }
     }
 
     @Test
     void editingAServerNeverChangesItsState() throws Exception {
         long id = addServer("10.0.0.5", 27017, "competitive", "de_dust2");
-        search(1, COMPETITIVE, "\"de_dust2\"", "r-1");                    // Accept mode: the server is RESERVED for the match
+        search(1, COMPETITIVE, "\"de_dust2\"", "r-1");
+        search(2, COMPETITIVE, "\"de_dust2\"", "r-2");                    // Accept mode: the server is RESERVED once the match is full
         mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put("/admin/api/servers/" + id)
                         .with(ADMIN).with(csrf()).contentType(MediaType.APPLICATION_JSON)
                         .content("{\"host\":\"10.0.0.5\",\"port\":27017,\"category\":\"competitive\",\"map\":\"de_mirage\",\"enabled\":true,\"max_players\":20}"))

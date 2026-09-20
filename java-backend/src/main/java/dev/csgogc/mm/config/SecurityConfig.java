@@ -27,7 +27,7 @@ import org.springframework.security.web.util.matcher.RequestMatcher;
  * Access rules:
  * <ul>
  *   <li>/admin/** and everything the panel calls: logged-in admin (session cookie, CSRF protected);</li>
- *   <li>POST /api/v1/matchmaking/search|cancel: the GC, X-Api-Key (open only if backend.api-key is empty);</li>
+ *   <li>POST /api/v1/matchmaking/search|cancel|accepted: the GC, X-Api-Key (open only if backend.api-key is empty);</li>
  *   <li>GET /api/v1/matchmaking/searches: admin session or API key;</li>
  *   <li>POST /api/v1/servers/state, GET /api/v1/servers/roster: a game server, X-Api-Key;</li>
  *   <li>GET /api/v1/health: public.</li>
@@ -60,10 +60,12 @@ public class SecurityConfig {
         http.authorizeHttpRequests(auth -> {
             auth.requestMatchers("/api/v1/health", "/error", "/admin/login", "/admin/assets/**", "/").permitAll();
             if (apiKeyConfigured) {
-                auth.requestMatchers(HttpMethod.POST, "/api/v1/matchmaking/search", "/api/v1/matchmaking/cancel")
+                auth.requestMatchers(HttpMethod.POST, "/api/v1/matchmaking/search", "/api/v1/matchmaking/cancel",
+                                "/api/v1/matchmaking/accepted")
                         .hasAnyRole("API", "ADMIN");
             } else {
-                auth.requestMatchers(HttpMethod.POST, "/api/v1/matchmaking/search", "/api/v1/matchmaking/cancel")
+                auth.requestMatchers(HttpMethod.POST, "/api/v1/matchmaking/search", "/api/v1/matchmaking/cancel",
+                                "/api/v1/matchmaking/accepted")
                         .permitAll();
             }
             auth.requestMatchers(HttpMethod.GET, "/api/v1/matchmaking/searches", "/api/v1/matchmaking/search/*").hasAnyRole("API", "ADMIN");

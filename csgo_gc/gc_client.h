@@ -34,6 +34,9 @@ private:
     void OnBackendSearchResult(const std::vector<uint8_t> &buffer);
     void StartServerFlow(const BackendClient::Assignment &assignment);
     void OnReservationFullyAccepted();
+    void WithdrawAccept(const std::string &reason);
+    void EndAccept(const std::string &reason);
+    void SendMatchmakingUpdate(int32_t matchmaking);
     void AdjustItemEquippedState(GCMessageRead &messageRead);
     void ClientPlayerDecalSign(GCMessageRead &messageRead);
     void UseItemRequest(GCMessageRead &messageRead);
@@ -72,6 +75,7 @@ private:
         uint16_t serverPort{};
         uint32_t eGame{};
         std::string map;
+        std::string matchId; // the backend match whose Accept this is (the backend withdraws it when the deadline passes)
     };
 
     PendingAccept m_pendingAccept;

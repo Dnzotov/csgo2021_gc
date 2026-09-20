@@ -48,6 +48,7 @@ struct Rig
     struct Arm { std::vector<uint32_t> participants; std::string source; bool replacing; };
     std::vector<Arm> arms;
     std::vector<std::string> confirms;
+    std::vector<std::string> releases;
     bool playerOnServer{};
     std::unique_ptr<RosterFeed::Controller> c;
 
@@ -56,6 +57,7 @@ struct Rig
         RosterFeed::Controller::Host host;
         host.arm = [this](const std::vector<uint32_t> &p, const std::string &s, bool r) { arms.push_back({ p, s, r }); };
         host.confirm = [this](const std::string &m) { confirms.push_back(m); };
+        host.release = [this](const std::string &m) { releases.push_back(m); };
         host.playerOnServer = [this] { return playerOnServer; };
         c = std::make_unique<RosterFeed::Controller>(mode, required, std::move(host));
     }
@@ -175,6 +177,65 @@ int main()
         Snapshot down; down.state = Snapshot::State::Unavailable;
         r.c->OnSnapshot(down);
         Expect(r.c->Armed() && !r.c->UsingBackendRoster() && r.confirms.empty(), "stays armed, the backend roster is no longer 'in use', nothing is confirmed");
+    }
+
+    printf("== the backend cancelled the match (Accept timeout): the armed reservation is released, once\n");
+    {
+        Rig r;
+        auto roster = Roster({ REAL }, 9);
+        r.c->OnSnapshot(Match("m-1", "READY", "competitive", roster));
+        r.c->OnFakesReady(true);
+        Snapshot none; none.state = Snapshot::State::NoMatch; none.message = "no match on this server";
+        r.c->OnSnapshot(none);
+        Expect(r.releases == std::vector<std::string>{ "m-1" }, "NoMatch after an armed backend match: released, naming that match");
+        Expect(!r.c->Armed() && !r.c->UsingBackendRoster() && r.c->ArmedMatchId().empty(), "nothing is armed any more");
+        r.c->OnSnapshot(none);
+        r.c->OnPlayersChanged();
+        Expect(r.releases.size() == 1, "polling NoMatch again (or a player event) releases nothing more");
+
+        // the next match (same players again) arms afresh: nothing to unreserve first, confirmed only when the fakes are ready
+        r.c->OnSnapshot(Match("m-2", "READY", "competitive", roster));
+        Expect(r.arms.size() == 2 && !r.arms[1].replacing && r.arms[1].participants == roster, "the next match arms afresh, replacing nothing");
+        Expect(r.confirms == std::vector<std::string>{ "m-1" }, "and is not confirmed before its fakes are ready");
+        r.c->OnFakesReady(true);
+        Expect(r.confirms == std::vector<std::string>({ "m-1", "m-2" }), "confirmed when they are");
+    }
+
+    printf("== ... but never while a player is on the server, for the legacy roster, or when the backend is just unreachable\n");
+    {
+        Rig r;
+        r.c->OnSnapshot(Match("m-1", "READY", "competitive", Roster({ REAL }, 9)));
+        r.playerOnServer = true;
+        Snapshot none; none.state = Snapshot::State::NoMatch;
+        r.c->OnSnapshot(none);
+        Expect(r.releases.empty() && r.c->Armed(), "a player is on the server: the match is being played, kept");
+        r.playerOnServer = false;
+        r.c->OnPlayersChanged();
+        Expect(r.releases == std::vector<std::string>{ "m-1" }, "released once the player left and the backend still has no match");
+
+        Rig l;
+        l.c->OnLegacyArmed(Roster({ REAL }, 9));
+        l.c->OnSnapshot(none);
+        Expect(l.releases.empty() && l.c->Armed(), "the legacy roster is not the backend's to take away");
+
+        Rig u;
+        u.c->OnSnapshot(Match("m-1", "READY", "competitive", Roster({ REAL }, 9)));
+        Snapshot down; down.state = Snapshot::State::Unavailable;
+        u.c->OnSnapshot(down);
+        Expect(u.releases.empty() && u.c->Armed(), "backend unreachable: nothing is released");
+    }
+
+    printf("== a new match with the same roster while the old one is armed is a new match, not a release\n");
+    {
+        Rig r;
+        auto roster = Roster({ REAL }, 9);
+        r.c->OnSnapshot(Match("m-1", "READY", "competitive", roster));
+        r.c->OnFakesReady(true);
+        r.c->OnSnapshot(Match("m-2", "READY", "competitive", roster));
+        Expect(r.releases.empty() && r.c->ArmedMatchId() == "m-2", "no NoMatch in between: kept, and it belongs to the new match now");
+        Snapshot none; none.state = Snapshot::State::NoMatch;
+        r.c->OnSnapshot(none);
+        Expect(r.releases == std::vector<std::string>{ "m-2" }, "and it is the new match that is released when that goes");
     }
 
     printf("== the poller's snapshot survives the trip to the GC thread\n");

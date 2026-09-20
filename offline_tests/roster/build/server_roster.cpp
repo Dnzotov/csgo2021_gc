@@ -151,6 +151,8 @@ void Controller::OnLegacyArmed(const std::vector<uint32_t> &participants)
     m_armed = true;
     m_armedParticipants = participants;
     m_armedSource = "legacy";
+    m_armedFromBackend = false;
+    m_armedMatchId.clear();
     m_fakesReady = false;
 }
 
@@ -162,6 +164,32 @@ void Controller::OnPlayersChanged()
 void Controller::Apply()
 {
     m_usable = false;
+
+    if (m_snapshot.state == Snapshot::State::NoMatch && m_armed && m_armedFromBackend)
+    {
+        // The backend answered that this server has no match, yet a backend match is armed: it was cancelled (Accept timeout,
+        // a player left) or it ended. Not while somebody is on the server - that match is being played.
+        if (m_host.playerOnServer())
+        {
+            return;
+        }
+
+        const std::string matchId = m_armedMatchId;
+        Platform::Print("[MM-ACCEPT] backend match %s is gone (%s): releasing its reservation\n", matchId.c_str(),
+            m_snapshot.message.c_str());
+        m_armed = false;
+        m_armedParticipants.clear();
+        m_armedSource.clear();
+        m_armedFromBackend = false;
+        m_armedMatchId.clear();
+        m_fakesReady = false;
+        if (m_host.release)
+        {
+            m_host.release(matchId);
+        }
+
+        return;
+    }
 
     if (m_snapshot.state != Snapshot::State::Match || !m_snapshot.Complete())
     {
@@ -191,6 +219,8 @@ void Controller::Apply()
     {
         // already armed with exactly this roster (e.g. the same players again): keep it, it is at stage 1 already
         m_armedSource = "backend match " + roster.matchId;
+        m_armedMatchId = roster.matchId;
+        m_armedFromBackend = true;
         ConfirmIfReady();
         return;
     }
@@ -205,6 +235,8 @@ void Controller::Apply()
     m_armed = true;
     m_armedParticipants = roster.participants;
     m_armedSource = "backend match " + roster.matchId;
+    m_armedMatchId = roster.matchId;
+    m_armedFromBackend = true;
     m_fakesReady = false;
     m_host.arm(roster.participants, m_armedSource, replacing);
 }

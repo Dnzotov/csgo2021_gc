@@ -33,11 +33,13 @@ public record SearchView(
         /** the server the player has to connect to; only when the match is complete (WAITING_ACCEPT / READY_TO_CONNECT) */
         Assignment assignment) {
 
-    /** players = real + virtual (fake) participants gathered so far */
+    /** players = real + virtual (fake) participants gathered so far; serverId 0 = no server reserved yet */
     public record MatchProgress(String matchId, String status, int players, int fakePlayers, int requiredPlayers, String map,
                                 long serverId,
-                                /** complete, but the game server has not confirmed its roster yet: no assignment for now */
-                                boolean awaitingServer) {
+                                /** complete, but no server yet / the game server has not confirmed its roster yet: no assignment for now */
+                                boolean awaitingServer,
+                                /** ACCEPTING: until when the players have to accept (the backend cancels the match after it) */
+                                Instant acceptDeadlineAt) {
     }
 
     /** MatchAssignment: everything the GC needs to run the existing 9107 / Accept / QueueConnect flow */

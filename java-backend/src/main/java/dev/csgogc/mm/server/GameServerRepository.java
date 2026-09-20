@@ -15,7 +15,7 @@ import org.springframework.stereotype.Repository;
 public class GameServerRepository {
 
     private static final String COLUMNS = "id, host, port, category, map, enabled, state, reserved_match_id, reserved_at, "
-            + "last_assigned_at, last_heartbeat_at, max_players, created_at, updated_at";
+            + "last_assigned_at, last_heartbeat_at, max_players, created_at, updated_at, available_after";
 
     private final JdbcClient jdbc;
 
@@ -43,15 +43,19 @@ public class GameServerRepository {
                 .optional();
     }
 
-    /** enabled and AVAILABLE servers of a category, the least recently assigned first (spreads the load) */
-    public List<GameServer> findFree(String category) {
+    /**
+     * enabled and AVAILABLE servers of a category that may be handed out at {@code now}, the least recently assigned first
+     * (spreads the load)
+     */
+    public List<GameServer> findFree(String category, Instant now) {
         return jdbc.sql("SELECT " + COLUMNS + " FROM game_server WHERE enabled = 1 AND state = 'AVAILABLE' AND category = ? "
-                        + "ORDER BY COALESCE(last_assigned_at, 0), id")
-                .param(category)
+                        + "AND (available_after IS NULL OR available_after <= ?) ORDER BY COALESCE(last_assigned_at, 0), id")
+                .params(category, now.toEpochMilli())
                 .query(GameServerRepository::map)
                 .list();
     }
 
+    /** servers that are RESERVED since before the cutoff (the matchmaker checks that a live match still holds each of them) */
     public List<GameServer> findReservedBefore(Instant cutoff) {
         return jdbc.sql("SELECT " + COLUMNS + " FROM game_server WHERE state = 'RESERVED' AND reserved_at < ?")
                 .param(cutoff.toEpochMilli())
@@ -87,7 +91,7 @@ public class GameServerRepository {
     /** AVAILABLE -> RESERVED for a match (only if it is still AVAILABLE: two searches never get the same server) */
     public boolean reserve(long id, String matchId, Instant now) {
         return jdbc.sql("UPDATE game_server SET state = 'RESERVED', reserved_match_id = ?, reserved_at = ?, "
-                        + "last_assigned_at = ?, updated_at = ? WHERE id = ? AND state = 'AVAILABLE'")
+                        + "last_assigned_at = ?, updated_at = ?, available_after = NULL WHERE id = ? AND state = 'AVAILABLE'")
                 .params(matchId, now.toEpochMilli(), now.toEpochMilli(), now.toEpochMilli(), id)
                 .update() > 0;
     }
@@ -102,10 +106,22 @@ public class GameServerRepository {
                 .update();
     }
 
-    /** sets AVAILABLE / BUSY and drops any reservation */
+    /** sets AVAILABLE / BUSY and drops any reservation (and any cooldown) */
     public boolean setState(long id, String state, Instant now) {
-        return jdbc.sql("UPDATE game_server SET state = ?, reserved_match_id = NULL, reserved_at = NULL, updated_at = ? WHERE id = ?")
+        return jdbc.sql("UPDATE game_server SET state = ?, reserved_match_id = NULL, reserved_at = NULL, available_after = NULL, "
+                        + "updated_at = ? WHERE id = ?")
                 .params(state, now.toEpochMilli(), id)
+                .update() > 0;
+    }
+
+    /**
+     * a reserved server goes back to AVAILABLE but is not handed out before {@code availableAfter} (a cancelled Accept
+     * match: its game server still holds the old reservation for a moment). Only if the given match still holds it.
+     */
+    public boolean release(long id, String matchId, Instant availableAfter, Instant now) {
+        return jdbc.sql("UPDATE game_server SET state = 'AVAILABLE', reserved_match_id = NULL, reserved_at = NULL, "
+                        + "available_after = ?, updated_at = ? WHERE id = ? AND reserved_match_id = ?")
+                .params(availableAfter == null ? null : availableAfter.toEpochMilli(), now.toEpochMilli(), id, matchId)
                 .update() > 0;
     }
 
@@ -149,6 +165,7 @@ public class GameServerRepository {
                 lastHeartbeatAt,
                 maxPlayersOrNull,
                 Instant.ofEpochMilli(rs.getLong("created_at")),
-                Instant.ofEpochMilli(rs.getLong("updated_at")));
+                Instant.ofEpochMilli(rs.getLong("updated_at")),
+                instantOrNull(rs, "available_after"));
     }
 }

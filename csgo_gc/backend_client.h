@@ -11,6 +11,7 @@
 //   POST <backend_url>/api/v1/matchmaking/search       {account_id, game_type, mode, game_mode, maps, request_id}
 //   GET  <backend_url>/api/v1/matchmaking/search/<id>  polled once a second while the search runs (also its heartbeat)
 //   POST <backend_url>/api/v1/matchmaking/cancel       {account_id, request_id}
+//   POST <backend_url>/api/v1/matchmaking/accepted     {account_id, request_id}   "the game server said everybody accepted"
 // all with the X-Api-Key header from matchmaking.backend_api_key.
 //
 // Nothing here ever blocks the GC thread or the game: the calls below only update a small state and wake a dedicated
@@ -53,8 +54,9 @@ struct Assignment
 struct SearchResult
 {
     std::string requestId;
-    // SEARCHING, MATCHED (server reserved, players missing), WAITING_ACCEPT, READY_TO_CONNECT (both carry an
-    // assignment), CANCELLED, EXPIRED, REMOVED, COMPLETED (the backend ended the search)
+    // SEARCHING, MATCHED (a match is gathering players, no server yet), WAITING_ACCEPT, READY_TO_CONNECT (both carry an
+    // assignment), CANCELLED, EXPIRED, REMOVED, COMPLETED (the backend ended the search). A search that had a WAITING_ACCEPT
+    // assignment and is SEARCHING / MATCHED again lost its match: the Accept timed out or somebody cancelled it (#63).
     std::string status;
     uint32_t matchPlayers{};    // MATCHED: players gathered so far
     uint32_t matchRequired{};
@@ -88,6 +90,11 @@ void SearchCancelled();
 
 // request id of the search being tracked, empty when there is none (used to drop results of an older search)
 std::string ActiveRequestId();
+
+// The game server reported that everybody accepted (reservation stage 2, awaiting 0): tell the backend so it moves the match
+// from ACCEPTING to ACCEPTED (RESEARCH_FINDINGS.md #63). Also ends the polling of the search: from here the backend no longer
+// withdraws the assignment. Retried a few times, the backend answer is only logged. Does nothing without a tracked search.
+void ReportAccepted();
 
 // ---- srcds side: the roster of the match on this game server (RESEARCH_FINDINGS.md #55) ----
 // The backend is the source of truth for who takes part in a test match: the real players and the virtual (fake)

@@ -61,6 +61,10 @@ public:
     std::string DedicatedServerAddress() const;
     // TEST ONLY, srcds: how long after the Accept popup is up before the first fake participant accepts
     uint32_t TestFakeAcceptDelayMs() const { return 2500; }
+    // srcds without -gc_mode (RESEARCH_FINDINGS.md #60, reservation_keepalive.h): the plain reservation of the server is
+    // refreshed while clients use the server, and for this many seconds after the last one connected / left (or after
+    // the server started); then it is released. matchmaking.reservation_idle_seconds, 0 = no limit.
+    uint32_t ReservationIdleSeconds() const { return m_reservationIdleSeconds; }
     // runtime diagnostics of the matchmaking UI flow (test_diag.h), client only, default on; matchmaking.test_diag
     // can still switch it off but it is not part of config.txt any more
     bool TestDiag() const { return m_testDiag; }
@@ -100,6 +104,7 @@ private:
 
     std::string m_testAcceptMode;
     bool m_testDiag{ true };
+    uint32_t m_reservationIdleSeconds{ 30 * 60 }; // = ReservationKeepAlive::DefaultIdleSeconds
 
     std::string m_backendUrl;
     std::string m_backendApiKey;

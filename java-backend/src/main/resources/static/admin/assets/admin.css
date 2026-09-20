@@ -58,10 +58,10 @@ td.actions { text-align: right; white-space: nowrap; }
 .empty { color: var(--muted); padding: 18px 4px; margin: 0; }
 
 .pill { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; border: 1px solid var(--line); }
-.pill.searching, .pill.enabled, .pill.available, .pill.ready_to_connect, .pill.ready { color: var(--ok); border-color: var(--ok); }
+.pill.searching, .pill.enabled, .pill.available, .pill.ready_to_connect, .pill.ready, .pill.accepted { color: var(--ok); border-color: var(--ok); }
 .pill.disabled, .pill.cancelled, .pill.removed, .pill.completed, .pill.ended, .pill.stopped { color: var(--muted); }
 .pill.expired, .pill.busy { color: var(--warn); border-color: var(--warn); }
-.pill.matched, .pill.waiting_accept, .pill.reserved, .pill.forming { color: var(--accent); border-color: var(--accent); }
+.pill.matched, .pill.waiting_accept, .pill.reserved, .pill.forming, .pill.full, .pill.accepting { color: var(--accent); border-color: var(--accent); }
 td.small { font-size: 12px; color: var(--muted); }
 .tag { font-size: 11px; padding: 0 6px; border-radius: 4px; background: var(--line); color: var(--muted); margin-left: 6px; }
 

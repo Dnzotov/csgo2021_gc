@@ -128,6 +128,31 @@ public class SearchApiController {
         return body;
     }
 
+    /** the GC of a player that accepted: the game server reported everybody accepted (reservation stage 2, awaiting 0) */
+    public record AcceptedRequest(
+            @NotNull @Min(1) @Max(0xFFFFFFFFL) Long accountId,
+            @Pattern(regexp = "[A-Za-z0-9_.:-]{1,64}", message = "must be 1-64 chars of [A-Za-z0-9_.:-]") String requestId) {
+    }
+
+    /**
+     * "I accepted" (RESEARCH_FINDINGS.md #63): the player must be in a match that is ACCEPTING, otherwise nothing changes and
+     * the answer says why (accepted=false). When every real player of the match reported, the match is ACCEPTED.
+     */
+    @PostMapping("/matchmaking/accepted")
+    public Map<String, Object> accepted(@Valid @RequestBody AcceptedRequest request) {
+        SearchService.AcceptResult result = searches.accept(request.accountId(), request.requestId());
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("accepted", result.accepted());
+        body.put("match_accepted", result.matchAccepted());
+        if (result.reason() != null) {
+            body.put("reason", result.reason());
+        }
+        if (result.search() != null) {
+            body.put("search", result.search());
+        }
+        return body;
+    }
+
     /** The player stopped searching (MatchmakingStop). Cancelling a search that does not exist is not an error. */
     @PostMapping("/matchmaking/cancel")
     public Map<String, Object> cancel(@Valid @RequestBody CancelRequest request) {

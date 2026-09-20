@@ -57,7 +57,10 @@ bool Deserialize(const std::string &text, Snapshot &snapshot);
 //     (replacing another one first), and once every fake participant is at stage 1 tell the backend "armed";
 //   * anything else (no match, backend down, a roster of another size, e.g. required-players=1) -> the legacy roster
 //     (first sniffed 0x21) stays in charge, and the backend is told right away that there is nothing to wait for;
-//   * a roster change is postponed while a player is on the server.
+//   * a roster change is postponed while a player is on the server;
+//   * an armed backend match that the backend no longer has (it answers "no match on this server": the Accept timed out or
+//     somebody cancelled it) is released: the reservation is dropped, nothing is kept alive, the next match arms afresh.
+//     Not while a player is on the server, and never for the legacy roster or when the backend is merely unreachable.
 class Controller
 {
 public:
@@ -67,6 +70,9 @@ public:
         std::function<void(const std::vector<uint32_t> &participants, const std::string &source, bool unreserveFirst)> arm;
         // "the roster of this match is armed" (or "nothing to arm, hand the server out")
         std::function<void(const std::string &matchId)> confirm;
+        // the backend has no match on this server any more (cancelled at the Accept, ended) although one was armed for it and
+        // nobody is on the server: drop the reservation and stop keeping it alive (RESEARCH_FINDINGS.md #63)
+        std::function<void(const std::string &matchId)> release;
         std::function<bool()> playerOnServer;
     };
 
@@ -82,6 +88,7 @@ public:
     bool InArmedRoster(uint32_t accountId) const;
     const std::string &ArmedSource() const { return m_armedSource; }
     const std::string &MatchId() const { return m_snapshot.matchId; }
+    const std::string &ArmedMatchId() const { return m_armedMatchId; }
 
 private:
     void Apply();
@@ -98,6 +105,8 @@ private:
     std::string m_armedSource;
     bool m_fakesReady{};
     std::string m_confirmedMatchId;
+    std::string m_armedMatchId;      // the backend match the armed roster belongs to
+    bool m_armedFromBackend{};       // the armed roster is a backend match's (not the legacy one)
 };
 
 // One worker thread. The handler is called on it whenever the answer changes (not on every poll).

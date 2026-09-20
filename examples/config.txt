@@ -42,6 +42,11 @@
 
 	// the same value as backend.api-key of the backend (java-backend\config\application.properties), sent as X-Api-Key
 	"backend_api_key"	""
+
+	// dedicated server (srcds) without -gc_mode only: the server keeps its matchmaking reservation alive (the engine drops
+	// it after ~21 s) while clients use it and this many seconds after the last one connected / left or after the server
+	// started, then releases it. 0 = never release. Default 1800 (30 min).
+	// "reservation_idle_seconds"	"1800"
 }
 
 // steam related options

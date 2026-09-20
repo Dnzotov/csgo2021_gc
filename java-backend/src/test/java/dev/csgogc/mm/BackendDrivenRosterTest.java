@@ -283,9 +283,14 @@ class BackendDrivenRosterTest extends BackendTestBase {
         String first = body(pollRoster()).get("match_id").asText();
         ready(first);
 
-        // the player starts over (Accept failed): the old match ends, the same fake players are started again
+        // the player starts over (Accept failed): the old match is cancelled and the fake players are searching again on their
+        // own. Its server is not handed out for the cooldown: srcds sees no match on it (and drops its old reservation)
         search(REAL, COMPETITIVE, "\"de_dust2\"", "b");
-        fakeEnabled(fakeId, true);
+        assertThat(fake(fakeId).get("status").asText()).isEqualTo("MATCHED");
+        pollRoster().andExpect(status().isNotFound());
+        clock.advance(Duration.ofSeconds(16));                                // server-release-cooldown is PT15S
+        pollRoster().andExpect(status().isNotFound());                        // srcds keeps asking: it reads its roster from here
+        tick();
         JsonNode second = body(pollRoster().andExpect(status().isOk()));
         assertThat(second.get("match_id").asText()).isNotEqualTo(first);
         assertThat(second.get("players").size()).isEqualTo(10);

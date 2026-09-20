@@ -82,9 +82,10 @@ class FakePlayersIntegrationTest extends BackendTestBase {
         addServer("10.0.0.5", 27018, "wingman", "de_lake");
         long fakeId = addFake("wingman", 3, null);
         search(1, WINGMAN, "\"de_lake\"", "w");
-        cancel(1, "w");                                                    // the client sends MatchmakingStop when it connects
+        assertThat(accepted(1, "w").get("match_accepted").asBoolean()).isTrue();   // everybody accepted: the client connects
+        cancel(1, "w");                                                    // ... and sends MatchmakingStop when it does
         JsonNode match = matches().get(0);
-        assertThat(match.get("status").asText()).isEqualTo("READY");
+        assertThat(match.get("status").asText()).isEqualTo("ACCEPTED");
         assertThat(match.get("players").asInt()).isEqualTo(4);
         assertThat(match.get("fake_players").asInt()).isEqualTo(3);
         assertThat(fake(fakeId).get("match").get("players").asInt()).isEqualTo(4);
@@ -229,8 +230,9 @@ class FakePlayersIntegrationTest extends BackendTestBase {
         search(1, WINGMAN, "\"de_lake\"", "a");
         assertThat(fake(fakeId).get("status").asText()).isEqualTo("MATCHED");
         assertThat(server(serverId).get("state").asText()).isEqualTo("RESERVED");
+        accepted(1, "a");                                                  // the Accept went through: the match is ACCEPTED
 
-        // the real player is alone with virtual ones: starting a new search gives the old server up (Accept failed)
+        // the real player is alone with virtual ones: starting a new search after that ends the old match (it was played)
         search(1, WINGMAN, "\"de_lake\"", "b");
         assertThat(matches().size()).isEqualTo(2);
         int ended = 0;
@@ -247,10 +249,33 @@ class FakePlayersIntegrationTest extends BackendTestBase {
     }
 
     @Test
+    void anAcceptThatDidNotGoThroughCancelsTheMatchAndTheFakePlayersSearchAgainOnTheirOwn() throws Exception {
+        addServer("10.0.0.5", 27018, "wingman", "de_lake");
+        long fakeId = addFake("wingman", 3, "\"de_lake\"");
+        search(1, WINGMAN, "\"de_lake\"", "a");                            // WAITING_ACCEPT, nobody accepted
+
+        // starting over (the Accept failed): the old match is CANCELLED, not ENDED - the fake players are searching again
+        // and are part of the very next match without anybody pressing Start
+        search(1, WINGMAN, "\"de_lake\"", "b");
+        int cancelled = 0;
+        String cancelledId = null;
+        for (JsonNode m : matches()) {
+            if (m.get("status").asText().equals("CANCELLED")) {
+                cancelled++;
+                cancelledId = m.get("id").asText();
+            }
+        }
+        assertThat(cancelled).isEqualTo(1);
+        assertThat(fake(fakeId).get("status").asText()).isEqualTo("MATCHED");
+        assertThat(fake(fakeId).get("match").get("match_id").asText()).isNotEqualTo(cancelledId);
+    }
+
+    @Test
     void theReservationTtlEndsAMatchWithFakePlayersAndFreesTheServer() throws Exception {
         long serverId = addServer("10.0.0.5", 27018, "wingman", "de_lake");
         long fakeId = addFake("wingman", 3, null);
         search(1, WINGMAN, "\"de_lake\"", "a");
+        accepted(1, "a");                                                  // the match is ACCEPTED: the TTL ends it
         clock.advance(Duration.ofMinutes(11));
         tick();
         assertThat(server(serverId).get("state").asText()).isEqualTo("AVAILABLE");
@@ -259,15 +284,23 @@ class FakePlayersIntegrationTest extends BackendTestBase {
     }
 
     @Test
-    void anAdminReleaseOfTheServerDissolvesAFormingMatchAndRequeuesTheFakeSearch() throws Exception {
-        long serverId = addServer("10.0.0.5", 27017, "competitive", "de_dust2");
-        long fakeId = addFake("competitive", 4, null);
-        search(REAL, COMPETITIVE, "\"de_dust2\"", "a");
+    void anAdminTakingTheServerAwayCancelsTheMatchAndTheNextOneWaitsForAFreeServer() throws Exception {
+        long serverId = addServer("10.0.0.5", 27018, "wingman", "de_lake");
+        long fakeId = addFake("wingman", 3, null);
+        search(REAL, WINGMAN, "\"de_lake\"", "a");                          // full: the server is RESERVED, Accept is running
         assertThat(fake(fakeId).get("status").asText()).isEqualTo("MATCHED");
+        String first = poll("a").get("match").get("match_id").asText();
         mvc.perform(post("/admin/api/servers/" + serverId + "/state").with(ADMIN).with(csrf())
                 .contentType(MediaType.APPLICATION_JSON).content("{\"state\":\"BUSY\"}")).andExpect(status().isOk());
-        assertThat(fake(fakeId).get("status").asText()).isEqualTo("SEARCHING");
-        assertThat(poll("a").get("status").asText()).isEqualTo("SEARCHING");
+
+        // the first match is cancelled, everybody searches again and gathers a new match, which waits: the only server is BUSY
+        JsonNode again = poll("a");
+        assertThat(again.get("status").asText()).isEqualTo("MATCHED");
+        assertThat(again.get("match").get("match_id").asText()).isNotEqualTo(first);
+        assertThat(again.get("match").get("status").asText()).isEqualTo("FULL");
+        assertThat(again.has("assignment")).isFalse();
+        assertThat(fake(fakeId).get("status").asText()).isEqualTo("MATCHED");
+        assertThat(fake(fakeId).get("match").get("match_id").asText()).isEqualTo(again.get("match").get("match_id").asText());
     }
 
     // ------------------------------------------------------------------------------------------ admin API

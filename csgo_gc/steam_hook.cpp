@@ -143,6 +143,9 @@ public:
 static GCWrapper<ClientGC, NetworkingClient> *s_clientGC;
 static GCWrapper<ServerGC, NetworkingServer> *s_serverGC;
 
+// InstallGC(dedicated): a srcds process (not a listen server inside csgo.exe), decides who keeps the plain reservation alive
+static bool s_dedicated;
+
 // clunky!!! we need access to this for... some reason
 // fetched when s_serverGC is initalized, nulled when it's destroyed
 static ISteamGameServer *s_steamGameServer;
@@ -229,6 +232,7 @@ public:
         {
             assert(!s_serverGC);
             s_serverGC = new GCWrapper<ServerGC, NetworkingServer>{ GetSteamNetworkingMessages(pipe, user) };
+            s_serverGC->m_gc.SetDedicated(s_dedicated);
 
             assert(!s_steamGameServer);
             s_steamGameServer = GetSteamGameServer(pipe, user);
@@ -469,6 +473,7 @@ public:
         if (s_serverGC && result == k_EBeginAuthSessionResultOK)
         {
             s_serverGC->m_networking.ClientConnected(steamID.ConvertToUint64(), pAuthTicket, cbAuthTicket);
+            s_serverGC->m_gc.NoteClientJoined(); // a client on the server: the reservation lease of a classic dedicated server runs on
         }
 
         return result;
@@ -479,6 +484,7 @@ public:
         if (s_serverGC)
         {
             s_serverGC->m_networking.ClientDisconnected(steamID.ConvertToUint64());
+            s_serverGC->m_gc.NoteClientLeft();
 
             // also remember to unsub from the socache!!! not sure if this does anything in newer builds though
             s_serverGC->m_gc.PostToGC(GCEvent::ClientSOCacheUnsubscribe, steamID.ConvertToUint64(), nullptr, 0);
@@ -1120,14 +1126,19 @@ static void *ResolveVEngineServer()
     return s_engineServer;
 }
 
-static void DispatchReserveServerForQueuedGame(const std::vector<uint8_t> &payload)
+// verbose = false for the keep-alive refreshes (reservation_keepalive.h logs those itself, once per interval).
+// Returns what the engine returned (false when it could not be called).
+static bool DispatchReserveServerForQueuedGame(const std::vector<uint8_t> &payload, bool verbose = true)
 {
-    Platform::Print("[MM] Calling IVEngineServer::ReserveServerForQueuedGame\n");
+    if (verbose)
+    {
+        Platform::Print("[MM] Calling IVEngineServer::ReserveServerForQueuedGame\n");
+    }
 
     void *engineServer = ResolveVEngineServer();
     if (!engineServer)
     {
-        return;
+        return false;
     }
 
 #ifdef _WIN32
@@ -1141,15 +1152,22 @@ static void DispatchReserveServerForQueuedGame(const std::vector<uint8_t> &paylo
     auto reserveFn = reinterpret_cast<ReserveServerForQueuedGame_t>(vtable[149]);
 
     bool result = reserveFn(engineServer, payloadString.c_str());
-    Platform::Print("[MM] ReserveServerForQueuedGame result: %d\n", result ? 1 : 0);
+    if (verbose)
+    {
+        Platform::Print("[MM] ReserveServerForQueuedGame result: %d\n", result ? 1 : 0);
+    }
 
-    if (!result)
+    if (!result && verbose)
     {
         Platform::Print("[MM] ReserveServerForQueuedGame failed\n");
     }
+
+    return result;
 #else
     (void)payload;
+    (void)verbose;
     Platform::Print("[MM] ReserveServerForQueuedGame bridge is Windows-only, ignoring\n");
+    return false;
 #endif
 }
 
@@ -1232,6 +1250,15 @@ static void Hk_SteamGameServer_RunCallbacks()
 
     if (s_serverGC)
     {
+        // The plain reservation of a classic dedicated server is refreshed here, on the same thread and through the
+        // same bridge as every other ReserveServerForQueuedGame (reservation_keepalive.h, RESEARCH_FINDINGS.md #60). It
+        // is engine-only work, so it does not wait for the Steam logon below.
+        s_serverGC->m_gc.ReservationLease().Tick(ReservationKeepAlive::Clock::now(),
+            [](const std::string &payload, bool verbose)
+            {
+                return DispatchReserveServerForQueuedGame(std::vector<uint8_t>(payload.begin(), payload.end()), verbose);
+            });
+
         // only run server gc when logged on as an attempt to more accurately mimic real gc behaviour
         // FIXME: does csgo handle CMsgConnectionStatus?
         assert(s_steamGameServer);
@@ -1263,6 +1290,15 @@ static void Hk_SteamGameServer_RunCallbacks()
 
             case HostEvent::ReserveServerForQueuedGame:
                 DispatchReserveServerForQueuedGame(event.buffer);
+                break;
+
+            case HostEvent::ReservationKeepAlive:
+                // id = the cookie: reserve it right away and keep it reserved
+                s_serverGC->m_gc.ReservationLease().Start(event.id, ReservationKeepAlive::Clock::now(),
+                    [](const std::string &payload, bool verbose)
+                    {
+                        return DispatchReserveServerForQueuedGame(std::vector<uint8_t>(payload.begin(), payload.end()), verbose);
+                    });
                 break;
 
             default:
@@ -1387,6 +1423,8 @@ static void ShutdownSteamAPI(void *steamApi, bool dedicated)
 
 void SteamHookInstall(bool dedicated)
 {
+    s_dedicated = dedicated;
+
     // thanks valve for ruining my life
     AppId::Init();
 

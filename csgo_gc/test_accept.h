@@ -81,6 +81,9 @@ public:
     void OnMatchStarted();
     // the last real client left: unreserve + reserve again with a fresh roster (stage 0 for everybody)
     void OnMatchEnded();
+    // the match this roster was armed for is gone (the backend cancelled it, RESEARCH_FINDINGS.md #63): unreserve once and
+    // stop refreshing the reservation. Unlike OnMatchEnded nothing is armed again; a new roster needs a new FakeRoster.
+    void Release();
 
 private:
     struct Impl;

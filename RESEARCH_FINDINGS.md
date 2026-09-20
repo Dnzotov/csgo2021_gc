@@ -4787,3 +4787,851 @@ GC/srcds-facing (`/api/v1`, заголовок `X-Api-Key`; пустой клю�
 
 ### §56 STATUS
 Актуальный checkpoint записан. Реализовано и подтверждено тестами (Java 82/82, C++ офлайн): backend-выбор сервера, reservation split, Skirmish variants, fake players на backend, `assignment.players[]`, канал ростера srcds ↔ backend с удержанием assignment, legacy fallback. **Подтверждено в настоящей игре:** Accept-flow трёх режимов (legacy-ростер, `-ip 192.168.1.150`), Casual/DM через backend (старые DLL/jar). **Не проверено в игре:** всё, что новее §53 (DLL 98c794…, jar после §54). Следующий шаг — игровой тест 56.14, пункт 3.
+
+---
+
+## §57. РАССЛЕДОВАНИЕ: `-gc_mode` ↔ у игрока на srcds нет скинов / inventory (только аудит + RE; код, конфиги и Git не менялись)
+
+Размещено в конце файла: секция §56 (checkpoint) к моменту запроса уже существует, поэтому это следующая секция после последней. Старые записи не тронуты; где новый вывод уточняет старый — это сказано явно («актуально»).
+
+### 57.1 Постановка
+
+Наблюдение пользователя: (1) srcds с нашим `csgo_gc.dll` **без** `-gc_mode` → игрок подключается, скины есть; (2) тот же srcds с `-gc_mode competitive` → matchmaking/reservation работают, игрок подключается, **скинов/inventory нет**; (3) Casual/DM `-gc_mode` не нужен; (4) map groups работают — не трогать; (5) напарники — отдельная задача. Требовалось найти цепочку `-gc_mode → состояние → место, где inventory не доходит`. Не трогать: matchmaking, reservation protocol, `0x21`/`0x25`, Accept flow, Panorama, map groups, fake roster, server selection.
+
+### 57.2 КРАТКИЙ ВЫВОД
+
+1. **[CONFIRMED] В коде inventory-пути нет ни одной ветки по `gc_mode`.** Значение доходит только до `main.cpp:27` (ставить ли recv-хук на srcds) и до `ServerGC::StartAcceptTestRoster` (roster/Q-резервация). Ни то ни другое не читает и не пишет ни SOCache, ни SteamID/AccountID, ни welcome. Путь inventory — см. 57.4.
+2. **[CONFIRMED] Место, где inventory перестаёт доходить, — транспорт Steam P2P (`ISteamNetworkingMessages`) srcds → клиент, ещё до какой-либо логики GC.** В прогонах с `-gc_mode` клиент ни разу не получил `k_EMsgNetworkConnect` (нет `NetworkingClient: sending socache`), srcds ни разу не получил SOCache (нет `HandleNetMessage`), на srcds — `OnSessionFailed: Timed out attempting to connect`, на клиенте — `Ignoring P2P signal from 'steamid:<GS>', unknown remote connection`. Без SOCache от клиента `server.dll` не получает предметы игрока → скинов нет [механизм «нет SOCache → нет скинов» — HIGH CONFIDENCE, устройство upstream `csgo_gc`; в логе успешных сессий `HandleNetMessage … 141 bytes` совпадает по размеру с одним экипированным предметом из `inventory.txt` — согласуется, но не доказывает].
+3. **[HIGH CONFIDENCE, контрольного прогона нет] Наиболее вероятная причина — не сам `-gc_mode`, а `-ip`/`+ip` srcds**, который в проекте с §51/§52 обязателен для Accept-серверов (адрес fake-пакетов). Движок передаёт `ip` в `SteamGameServer_InitSafe(unIP=…)` как адрес, к которому привязывается Steam-часть game server (57.6); ровно эта связка «`+ip` ⇒ нет скинов» уже была замечена пользователем в самой ранней фазе проекта (57.6) и тогда осталась «отложенной». `-gc_mode` — сопутствующий признак (Accept-srcds всегда запускаются с `-ip`), а не причина.
+4. **[HYPOTHESIS, вероятность низкая]** Единственный `-gc_mode`-специфичный код, который может влиять на Steam-транспорт, — inline-хук `ws2_32!WSARecvFrom` в процессе srcds (ставится **только** при `-gc_mode`, 57.3 E1). Хук пассивный (вызывает оригинал, ничего не меняет), тот же хук стоит в клиенте и не мешает его P2P; но `steamclient.dll` импортирует `WSARecvFrom`, поэтому полностью исключить нельзя без прогона `-gc_mode bogus` (тест T-B).
+5. **[UNRESOLVED] Строгое доказательство** (какая именно из переменных `-ip` / хук / roster-потоки ломает P2P) требует 2–3 запусков без правки кода — 57.8. Пользователь не сказал, был ли `-ip` в запуске без `-gc_mode`; от этого зависит вывод 3.
+
+### 57.3 Где парсится `-gc_mode` и все места, где он влияет на поведение
+
+Разбор: `config.cpp:7-37` `CommandLineValue(name)` — токен после `-gc_mode` из `Platform::CommandLine()`; `config.cpp:47-59,63,118` `applyCommandLine()` → `GCConfig::m_testAcceptMode` (вызывается и когда `config.txt` не найден). Единственный читатель — `config.h:57` `TestAcceptMode()`. Клиент `-gc_mode` не использует (`gc_client.cpp:727` только печатает подсказку из таблицы режимов). Конфиг-ключ `test_accept_mode` удалён (§49); остался только аргумент командной строки.
+
+| # | Где | Что делает при непустом `-gc_mode` | Затрагивает inventory-путь? |
+|---|---|---|---|
+| E1 | `main.cpp:27-31` `InstallGC(dedicated=true)` | `AcceptTest::InstallRecvHook()` — funchook-патч `ws2_32!WSARecvFrom` на весь процесс (`test_accept.cpp:847-887`, `Hk_WSARecvFrom:814-841`). **Без `-gc_mode` на srcds хука нет**; на клиенте он ставится всегда (`main.cpp:21-26`) | Косвенно, только если хук ломает приём Steam-пакетов [HYPOTHESIS, низкая] |
+| E2 | `gc_server.cpp:332-347` `ReserveServerForOurCookie` | не шлёт plain `G<cookie>,<cookie>,1:`, вместо этого `StartAcceptTestRoster()` | нет |
+| E3 | `gc_server.cpp:357-422` `StartAcceptTestRoster` | `SetServerSniff`, `RosterFeed::Controller`, `RosterFeed::Poller` (поток, HTTP GET roster раз в секунду, только если `BackendClient::Enabled()`) | нет (отдельные потоки, свои сокеты) |
+| E4 | `test_accept.cpp` `FakeRoster::Impl::Run` (286-470) | свой поток, `WSAStartup`/`WSACleanup` (парные), UDP-сокет на эфемерный порт, `Q…`-резервация через host-событие, keep-alive `ReserveServerForQueuedGame` раз в 8 с, Unreserve+12 с | нет |
+| E5 | `gc_server.cpp:104-116, 220-226` | учёт `m_connectedClients`; `OnMatchStarted()` (=`CommandPause`) вызывается **из `HandleNetMessage`**, то есть только когда от клиента пришёл SOCache | зависит от inventory, а не наоборот (57.9 п.1) |
+| E6 (не флаг DLL) | движок: `-ip`/`+ip` → cvar `ip` → `m_unIP` | Steam-часть GS привязывается к этому адресу (57.6) | **да — это кандидат №1** |
+
+Не найдено: ни одного места, где `gc_mode` меняет порядок инициализации GC, SteamID/AccountID, `ServerHello`/`ServerWelcome`, `CMsgClientHello/Welcome`, SOCache, подписки на callbacks `SteamGameServer`, обработку protobuf. `SendServerWelcome` (`gc_server.cpp:296-312`) вызывается одинаково: на `k_EMsgGCServerHello` (до/независимо от `StartAcceptTestRoster`) либо по первому net-сообщению. Обычный Steam/GC-путь при `-gc_mode` **не отключается**: `SteamHookInstall(dedicated)` (`main.cpp:19`) идёт до всех `-gc_mode`-веток и одинаков.
+
+### 57.4 Путь inventory (файлы/функции) — и почему он не зависит от `gc_mode`
+
+1. Клиент подключается к srcds; движок srcds вызывает `ISteamGameServer::BeginAuthSession(ticket, steamID)` → хук `steam_hook.cpp:466-473` → `NetworkingServer::ClientConnected(steamId, ticket)` (`networking_server.cpp:66-83`): `m_clients.Add`, затем `SendMessageToUser(k_EMsgNetworkConnect + ticket)` по `ISteamNetworkingMessages` (канал `NetMessageChannel`). При сбое отправки печатается `SendMessageToUser failed …` (в логах srcds с `-gc_mode` этой строки нет — отправка «принята», сессия падает позже асинхронно).
+2. Клиент: `NetworkingClient::OnSessionRequest` (`networking_client.cpp:159-169`) принимает сессию только от game-server-аккаунта; `Update` (12-48) читает канал; `HandleMessage` (64-97) сверяет ticket с `GetAuthSessionTicket` (`ValidateTicket`) → `m_serverSteamId`, печатает **`NetworkingClient: sending socache to <GS steamid>`** и шлёт `GCEvent::SOCacheRequest`.
+3. `ClientGC::HandleSOCacheRequest` (`gc_client.cpp:216-223`): `m_inventory.BuildCacheSubscription(...)` → `HostEvent::NetMessage` → `NetworkingClient::SendMessage` (`networking_client.cpp:99-119`) на GS.
+4. srcds: `NetworkingServer::ReceiveMessage` (`networking_server.cpp:12-30`, сессия должна быть в `m_clients`) → `ServerGC::HandleNetMessage` (`gc_server.cpp:220-294`, печатает **`HandleNetMessage: <steamid>, N bytes`**) → `ValidateMessageOwnerSOID<CMsgSOCacheSubscribed>` (`:182-218`, `RemoveUnequippedItems`, лимит `MaxServerSOCacheItems=64`) → `PostToHost(HostEvent::Message, k_ESOMsg_CacheSubscribed…)` → `server.dll`.
+
+Ветвление по `gc_mode` в шагах 1-4 отсутствует (единственное упоминание — блок `m_testRoster` в `HandleNetMessage:222-226`, он только ставит keep-alive на паузу). **[CONFIRMED чтением кода].**
+
+### 57.5 Данные из логов
+
+**srcds (три сохранённых лога §53, DLL до §55, все с `-gc_mode` и `-ip 192.168.1.150`)** — `competive_srcds.txt` (стр. 452, 605, 614), `wingman_srcds.txt` (451, 572, 577), `dangerzone_srcds.txt` (451, 632, 651): в каждом есть `ws2_32!WSARecvFrom hooked (…sniffer on srcds)`, `OnSessionFailed: Timed out attempting to connect` (без префикса `NetworkingClient::` ⇒ это `NetworkingServer::OnSessionFailed`, `networking_server.cpp:128-132`), `HandleClientSOCacheUnsubscribe`, и **нет ни одной** строки `HandleNetMessage`. Порядок в Competitive: 9102 Stop → `GiftsLeaderboardRequest` (server.dll уже на связи с игроком) → `OnSessionFailed` → keep-alive `ReserveServerForQueuedGame` продолжается (следствие, 57.9 п.1). Строка `[MM-ACCEPT] backend roster` в этих логах отсутствует (это старый DLL; логов srcds с DLL 20:43 нет — `gc_log.txt` перезаписан прогоном 21:10).
+
+**Клиент (`csgo\console.log`, накопительный, 19790 строк, 24 подключения к srcds):**
+
+| Период | Сервер | Подключений | `NetworkingClient: sending socache` | `Ignoring P2P signal … unknown remote connection` |
+|---|---|---|---|---|
+| строки 1906–8683 (старые DLL). Строки 1906 и 3259 — **до появления Accept-кода** (первая `[MM-ACCEPT]` строка консоли — 3929; DLL той эры без `-gc_mode` и без recv-хука, ср. `csgo_gc.dll.bak_pre_accept`); остальные 11 (3960…8683: семь классических 27016, серверы 27016/27017/27018 Accept-эры) — какие аргументы были у тогдашнего srcds, неизвестно | 27016/27017/27018 | 13 | **0** | 10 (1919, 3272, 3973, 4652, 5336, 6804, 8323, 8472, 8580, 8696) |
+| 9381–13153, 18763 (классика, без `-gc_mode`) | 27016, 27014 | 5 | **5** (9387, 10950, 13012, 13201, 18812) | 0 (после успеха — `problem detected locally (5003): App did not respond to Messages session request in time`) |
+| 14864–18315 (Accept-серверы, `-gc_mode`, с §52 `-ip`) | 27017 ×3, 27018, 27019 ×2 | 6 | **0** | 6 (14877, 16347, 16493, 16629, 18083, 18663) |
+
+Последний `gc_log.txt` (21:10, клиент + classic srcds без `-gc_mode`): `NetworkingClient: sending socache to 90293049537669121` + `HandleNetMessage: 76561199010432725, 141 bytes` — inventory дошёл. Итого: 5 из 24 подключений с inventory, все 5 — classic. Из 19 неудач **минимум 2 (стр. 1906, 3259) случились в эре, когда `-gc_mode` и recv-хука в DLL ещё не существовало** ⇒ P2P-сбой не является следствием `-gc_mode` как такового (ещё 11 неудач — старые сборки с неизвестными аргументами srcds, как доказательство не используются). **[CONFIRMED (счёт по логам)]**
+
+Побочная строка в `gc_log.txt` 21:10: `ServerGC spawned / Using SteamGameServer014 / SendMessageToUser failed for 76561199010432725: 2` — это ServerGC самого `csgo.exe` (listen-сервер клиента при `QueueConnect variant=0` без сервера, 014 vs 013 у srcds); клиент шлёт `NetworkConnect` самому себе. К srcds/`-gc_mode` не относится. [CONFIRMED как наблюдение, причина — HYPOTHESIS]
+
+### 57.6 Историческая связь `ip` ↔ inventory (что уже было известно, но не сведено вместе)
+
+- **[CONFIRMED, слова пользователя в самой ранней фазе проекта; транскрипты `c8c2faf9…`/`353ac6d4…`, HANDOFF-запрос]**: «GC умеет эмулировать inventory, но при запуске клиента с `+ip` скины в игре/тренировке с ботами не применяются». Первая рабочая командная строка srcds тоже была с `+ip`: `srcds.exe -game csgo -console -usercon -insecure +ip 192.168.1.150 +port 27015 +map de_dust2 +game_type 1 +game_mode 2 +sv_lan 1 -maxplayers_override 10`. Запись в findings — §14 («`P2P_Transport_ICE_Enable` гипотеза для `+ip`/inventory проблемы», INCONCLUSIVE: DLL не загрузился в том прогоне) и §15 п.14 («`+ip`/inventory проблема — отложена»). **Актуально теперь:** эта «отложенная» проблема и есть то, что наблюдается сейчас; отдельной проблемы `-gc_mode` нет.
+- **[CONFIRMED, утёкший исходник движка `cstrike15_src-master\engine\sv_steamauth.cpp:171-199, 268-272`; версия сборки 1352 может отличаться]**: `m_unIP = INADDR_ANY`; если cvar `ip` (создаётся `-ip`/`+ip`) непустой и не loopback — `m_unIP = ip`; затем cvar `ip_steam` (если задан) перекрывает `m_unIP`; `SteamGameServer_InitSafe(m_unIP, m_usPort+1, gamePort, queryPort, mode, version)`. Steamworks: `unIP` — адрес, к которому привязывается сервер (`INADDR_ANY` = все интерфейсы). В `bin\engine.dll` строка `ip_steam` присутствует (2 вхождения) [HYPOTHESIS: логика 1352 совпадает с утёкшей].
+- **[CONFIRMED]** `CommandLineValue("-ip")` (`config.cpp:132-136`) читает только токен `-ip`; `+ip` он не видит (тогда `DedicatedServerAddress()` = `127.0.0.1`, а движок всё равно привязывается). Это добавляет вариант к гипотезе §51 (там перечислен `+ip` как одна из причин регрессии fake).
+- **[CONFIRMED]** Все Accept-srcds с §51/§52 запускаются с `-ip 192.168.1.150` (требование теста §52); в документированных командах §49 (`config.txt` комментарий) `-ip` не было, реальная строка запуска пользователя неизвестна [?].
+- **[HYPOTHESIS]** Механизм: Steam-P2P (`SteamNetworkingMessages`, ICE, GS анонимный `9029…`) с привязкой к одному LAN-адресу не устанавливает сессию с клиентом на той же машине (сигналы GS доходят до клиента, но клиент «не знает» соединение → `unknown remote connection`, GS → таймаут). Точное звено (bind/ICE-кандидаты/вторая привязка) не установлено; ранее проверявшаяся `P2P_Transport_ICE_Enable` (`LogIceTransportConfigDiagnostic`) остаётся не подтверждённой и не опровергнутой.
+
+### 57.7 Гипотезы: ранжирование (актуально)
+
+| # | Гипотеза | Статус | За | Против / что не проверено |
+|---|---|---|---|---|
+| H1 | Причина — `ip`-привязка srcds (`-ip`/`+ip` → `SteamGameServer_InitSafe(unIP≠0)`) | **HIGH CONFIDENCE** | движок (исходник) передаёт `ip` в Steam bind; пользователь в начале проекта связал `+ip` с потерей скинов; все 6 Accept-подключений с `-ip` без inventory; первая задокументированная командная строка srcds содержала `+ip 192.168.1.150`, а подключения 1906 и 3259 (эра без `-gc_mode` и хука) тоже без inventory; корреляция с `-gc_mode` объясняется тем, что `-ip` нужен только Accept-серверам | нет контрольного прогона «classic + `-ip`»; неизвестно, был ли `-ip` в запуске пользователя без `-gc_mode` |
+| H2 | Причина — хук `WSARecvFrom` на srcds (только с `-gc_mode`) | **HYPOTHESIS (низкая)** | единственный `-gc_mode`-код рядом с Steam-транспортом; `steamclient.dll` импортирует `WSARecvFrom`/`WSARecv`/`WSASendTo` | хук пассивный; в клиенте тот же хук работает; сбой был и в эре без хука и без `-gc_mode` (подключения 1906, 3259) |
+| H3 | Причина — потоки/сокеты roster (Poller, FakeRoster) или `Q`-резервация | **HYPOTHESIS (низкая)** | — | сокеты эфемерные, `WSAStartup/Cleanup` парные, отдельные потоки; в логах нет признаков; Q-резервация не влияет на `BeginAuthSession` |
+| H4 | Причина — «неудачный момент» (клиент в загрузке карты, `SteamAPI_RunCallbacks` не крутится, session request протухает: клиентский `Messages session request … discarding`) | **HYPOTHESIS** | сообщение `5003 App did not respond…` есть в успешных сессиях; P2P хрупок | не объясняет 6/6 vs 5/5 |
+| — | «`-gc_mode` меняет SOCache/AccountID/welcome/порядок GC-init» | **ОПРОВЕРГНУТО кодом (57.3-57.4)** | — | — |
+
+### 57.8 Разделяющие тесты (без правки кода, одна и та же DLL/jar; успех = клиент `[GC] NetworkingClient: sending socache to …` и srcds `HandleNetMessage: <steamid>, N bytes`; неуспех = `OnSessionFailed: Timed out attempting to connect` на srcds и `Ignoring P2P signal…` на клиенте)
+
+Запуск: клиент первым, потом srcds; сохранить `gc_log.txt` сразу после теста; порты как в реестре.
+
+| Тест | Командная строка srcds | Что проверяет | Если скинов НЕТ | Если скины ЕСТЬ |
+|---|---|---|---|---|
+| **T-A** | `srcds.exe -game csgo -console -ip 192.168.1.150 -port 27016 +game_type 0 +game_mode 0 +map de_dust2` (без `-gc_mode`) | `-ip` отдельно от `-gc_mode` | H1 подтверждена: виноват `-ip` | H1 ослаблена → смотреть T-B/T-C |
+| **T-B** | `srcds.exe -game csgo -console -port 27016 -gc_mode bogus +game_type 0 +game_mode 0 +map de_dust2` (без `-ip`; хук ставится, roster не создаётся: `[MM-ACCEPT] -gc_mode 'bogus' is not a supported accept mode`, резервация plain `G`) | recv-хук отдельно | H2 подтверждена: виноват хук | H2 отброшена |
+| **T-C** | `srcds.exe -game csgo -console -port 27017 -gc_mode competitive +game_type 0 +game_mode 1 +map de_dust2` (**без** `-ip`: хук + Poller + FakeRoster + Q, адрес fake `127.0.0.1`) | все `-gc_mode`-эффекты E1-E5 без `ip`; заодно контрольный прогон к §51-§53 (проходят ли fake на 127.0.0.1 без `-ip`) | причина в E1-E5 (H2/H3) | H1 подтверждена: `-gc_mode` невиновен |
+| **T-D** (обход) | `… -ip 192.168.1.150 +ip_steam 0.0.0.0 -gc_mode competitive …` | развязывает Steam-привязку и `-ip` (по `sv_steamauth.cpp:191-199`) | `ip_steam` не работает в 1352 / причина не в bind | H1 + готовое исправление без кода |
+
+Рекомендуемый порядок: T-A → T-C → (T-B, если T-A даёт «скины есть») → T-D. Нужен также сохранённый srcds-лог **с DLL 20:43** для того прогона, о котором сообщил пользователь (сейчас его нет).
+
+### 57.9 Что менять (после выбора по 57.8) и что нельзя трогать
+
+- **Если подтвердится H1 (наиболее вероятно):** «одно конкретное влияние» = требование `-ip` для Accept-серверов. Варианты исправления (по возрастанию вмешательства): (F1) запуск без правок кода: `+ip_steam 0.0.0.0` (T-D) или запуск Accept-srcds без `-ip`; (F2) код: отделить адрес fake-пакетов от `-ip` — отдельный параметр GC (аргумент, например `-gc_addr`, или ключ `matchmaking` в `csgo_gc/config.txt`), по умолчанию адрес, доступный при `INADDR_ANY`-привязке (LAN-IP/loopback), `DedicatedServerAddress()` больше не читает engine-`ip`; затрагивает только `config.cpp:121-136` и вызовы `DedicatedServerAddress()` в `gc_server.cpp` (`Poller`, `CreateTestRoster`, `ArmRoster`) — протокол `0x21/0x25`, Accept и roster не меняются. Backend-реестр серверов хранит LAN-адрес отдельно, привязка не нужна.
+- **Если подтвердится H2:** ставить хук на srcds лениво/точечно (только когда реально нужен sniff), либо убрать sniff-хук на srcds совсем (roster приходит с backend, §55; legacy-sniff нужен только как fallback) — `main.cpp:27-31`, `test_accept.cpp:847-887`.
+- **Если H3/H4:** тогда нужны диагностические логи (см. ниже), а не правка.
+- **Диагностика (если тесты не разделят):** в `NetworkingServer::ClientConnected` логировать результат `SendMessageToUser` и `GetSessionConnectionInfo`; в `NetworkingClient::OnSessionRequest` — факт прихода запроса; логировать `unIP`/`BLoggedOn`/`GetSteamID` GS при старте. Всё — чисто логирование.
+- **Нельзя трогать (чтобы не сломать matchmaking/reservation):** формат и логику `0x21/0x25`, `BuildQueuedReservationPayload`, `FakeRoster` (машину состояний, тайминги), `RosterFeed::Controller/Poller`, Java `assignment.players[]`/`roster`/`ready`, Accept-flow клиента (`gc_client.cpp` `OnReservationFullyAccepted`), Panorama-хуки, map groups/variants, выбор сервера, Java reservation split. Inventory-путь (57.4) менять не нужно: он работает, когда доходит транспорт (5/5 в классике).
+
+### 57.10 Побочные наблюдения (не правились)
+
+1. **[CONFIRMED]** `OnMatchStarted()` (пауза keep-alive Q-резервации) вызывается из `HandleNetMessage`, т.е. по приходу SOCache. Пока SOCache не доходит, keep-alive `ReserveServerForQueuedGame` каждые 8 с продолжается прямо во время матча (видно в `competive_srcds.txt` после `OnSessionFailed`). Это следствие проблемы inventory, но и хрупкая связка: игрок без `csgo_gc` (без SOCache) оставит keep-alive включённым. Не трогать до решения по 57.8.
+2. **[CONFIRMED]** `inventory.txt` игрока содержит один предмет (def_index 507, paint 38, seed 41, wear ≈0) + `default_equips`; «скины» в тесте — по сути один экипированный нож, поэтому при отсутствии SOCache вид игрока — дефолтный.
+3. **Поправка к §56.2 [CONFIRMED, файлы на диске 21:2x]:** установленная в игре `csgo_gc.dll` теперь **`1b953c31a737b20e24ace14ac57c92f4fedc121f9b7079232376dd836f21fdec`** (5 903 360 B, 20:43) — равна `Build\release\csgo_gc\csgo_gc.dll`; `java-backend\target\matchmaking-backend.jar` пересобран в 20:44. То есть §55-код backend-driven roster, скорее всего, уже установлен и это тот DLL, с которым пользователь проводил последний тест. Что именно изменилось между сборками 20:12 (§56.2, `98c794c0…`) и 20:43 — не проверялось (исходники `gc_server.*`, `server_roster.*` и `offline_tests\roster\*` новее 20:10). Рабочее дерево Git на момент проверки чистое.
+4. Логи srcds пользовательского теста с DLL 20:43 (`-gc_mode competitive`, без скинов) отсутствуют; вывод по «новому» поведению основан на §53-логах (старая сборка) и на словах пользователя.
+
+### §57 STATUS
+
+| Вывод | Статус |
+|---|---|
+| Inventory-путь (57.4) не содержит ветвлений по `gc_mode` | **CONFIRMED** (чтение кода) |
+| `-gc_mode` влияет только через E1-E5 (хук, roster/Q, потоки, учёт клиентов) | **CONFIRMED** |
+| Сбой — Steam P2P srcds→клиент; `NetworkConnect` до клиента не доходит; SOCache не отправляется | **CONFIRMED** (логи srcds + console.log) |
+| Все 6 Accept-подключений (с `-ip`) без inventory, все 5 classic-подключений (текущие DLL) с inventory | **CONFIRMED** (счёт по console.log) |
+| P2P-сбой был и без `-gc_mode` и без хука (ранняя эра) | **CONFIRMED** (подключения 1906 и 3259, до появления Accept-кода) — `-gc_mode` не единственная причина |
+| `ip` → `SteamGameServer_InitSafe(unIP)` в движке | **CONFIRMED** по утёкшему исходнику; для сборки 1352 — HIGH CONFIDENCE |
+| Причина отсутствия скинов — привязка srcds к `ip` (`-ip`/`+ip`), а не `-gc_mode` | **HIGH CONFIDENCE** (нет контрольного прогона T-A) |
+| Точный механизм сбоя P2P при привязке (bind/ICE/кандидаты) | **UNRESOLVED / HYPOTHESIS** |
+| Виноват хук `WSARecvFrom` на srcds | **HYPOTHESIS (низкая)**; решает T-B |
+| Виноваты потоки/сокеты roster или Q-резервация | **HYPOTHESIS (низкая)**; решает T-C |
+| `+ip_steam 0.0.0.0` разрывает связь `-ip` ↔ Steam bind в сборке 1352 | **HYPOTHESIS**; решает T-D |
+| Исправление: убрать требование `-ip` (F1/F2), inventory/reservation/Accept не менять | **HIGH CONFIDENCE** как направление, до T-A/T-C — не выполнять |
+
+---
+
+## §58. READ-ONLY АУДИТ ТЕКУЩЕГО ACCEPT MATCHMAKING FLOW: первый vs второй вход, fake не принимают, popup не закрывается по таймауту (код, конфиги и Git не менялись)
+
+Опирается на §36–§39, §41–§46, §53–§57 (не переопределяются без доказательств; поправки — в 58.9). `-gc_mode` для Accept-режимов считается обязательным и здесь не исследуется; inventory/skins не затрагиваются (§57); Wingman не исследовался → **UNRESOLVED**. Новые источники: прогон пользователя `gc_log.txt` (21:57, srcds **без** `-ip`, DLL 20:43, backend `target\matchmaking-backend.jar` со **своим** `target\config\application.properties` — без `required-players`-переопределений, значит retail 10/4/16) + `csgo\console.log` (строки 20420–20701, попытки a1–a6) + копия БД backend (`target\data\matchmaking.db`, читалась через копию) + утёкший исходник движка (`cstrike15_src-master\engine\`: `baseclientstate.cpp`, `baseserver.cpp`, `net_ws.cpp`, `public\tier1\netadr.h`) + распакованный из `csgo\panorama\code.pbin` текст `popup_accept_match.js` (файл в архиве лежит несжатым, скрипты в scratchpad, в репозиторий не добавлялись) + свежий IDA-разбор `client_panorama.dll` (`sub_10585930`, `sub_10580EA0`, `sub_10580010`, `sub_1057FF90`, `sub_103DF430` хвост, id событий `word_10D54BFC/BF8/C00`).
+
+### 58.1 КРАТКИЕ ОТВЕТЫ (корневые причины)
+
+1. **Первый popup не появляется — [CONFIRMED]**: srcds отвечает на **первый** `0x21 stage 1` реального клиента `awaiting=127` (аккаунта нет в ростере / резервации нет). Клиентский движок при `numPlayersAwaiting==0x7F` сразу переводит запрос в `AOS_FAILED` (`baseclientstate.cpp:397-401`) **без повторов**; `sub_103DF430` получает state 3 → ветка «will not queue connect» → callback `(1,0)` уничтожается, popup не показывается, `game/mmqueue=reserved` (его пишет 9107-хендлер безусловно) остаётся → UI «confirming match» навсегда (до 9102). Ростер srcds к этому моменту не взведён по двум причинам: (а) legacy-путь взводит его **только после** sniff'а этого самого первого `0x21` (по построению опоздание); (б) backend-путь §55, который должен взвести ростер **до** выдачи назначения, **инертен**: srcds без `-ip` опрашивает `127.0.0.1:27017`, а в реестре backend сервер — `192.168.1.150:27017` → «no match on this server», опрос не засчитывается, `serverReadsRoster=false`, backend отдаёт назначение сразу (WAITING_ACCEPT через 205–282 мс).
+2. **Fake не принимают — [CONFIRMED (логи) / HIGH CONFIDENCE (исходник движка)]**: без `-ip` fake шлют `0x21` на `127.0.0.1`; движок принимает пакеты по сокету (stage 1 fake реально записан: у реального на a6 `stage=1 awaiting=0 total=10`), но **ответы `0x25` адресату 127.0.0.1 движок кладёт не в UDP-сокет, а во внутреннюю loopback-очередь** (`net_ws.cpp:2579`: `to.IsLocalhost() && !net_usesocketsforloopback` → `NET_SendLoopPacket`; `net_usesocketsforloopback` по умолчанию `"0"`, `netadr.cpp:148` `IsLocalhost` = 127.0.0.1). Драйвер `FakeRoster` подтверждает fake только по ответу на их сокете → 5 попыток → `TIMEOUT ×9` → `gaveUp`, **фаза Accept не наступает никогда**, реальный видит `awaiting=9` пока не истечёт 21 с. В прогоне §53 с `-ip 192.168.1.150` (источник fake не localhost) те же fake подтверждались (`competive_srcds.txt` стр. 491–508, 545+).
+3. **Popup остаётся после таймаута — [CONFIRMED (JS+decompile+лог) / HIGH CONFIDENCE (полнота)]**: в эмуляции **нет ни одного «владельца» таймаута ready-up**. JS `popup_accept_match.js` сам не закрывается (счётчик доходит до 0 и только скрывает таймер), закрыть его может лишь нативный `RaiseReadyUp(false,…)` → `_ReadyForMatch(false)` → `UIPopupButtonClicked`. Нативная ветка отказа `sub_103DF430` (state 3) вызывает `RaiseReadyUp(false,0,0)` **только при `mode != 0`** (`LABEL_114`: `if (this[132] && byte_1519DDEE && v25 != 1 …)`), а Accept-callback имеет `mode 0` → destroy без закрытия. Наш GC не шлёт клиенту ничего (нет 9104 `matchmaking==3`, нет 9112).
+4. **Второй вход отличается — [CONFIRMED]**: клиентское состояние в a4 и a6 идентично (`game/mmqueue=(exception)`, `active callback=none`, тот же `reservationid=293a206f6c6c6548`, тот же 9107 #1). Расходится **srcds**: первый `0x25` — `awaiting=127 total=0` (a1–a4) против `awaiting=0 total=10` (a6). Причина — ростер и stage'ы в движке srcds **переживают попытку** (cookie константа → `m_arrReservationPlayers` пересобирается только при смене cookie): ростер, взведённый sniff'ом первой попытки, держится keep-alive'ом, а stage 1 fake, принятые движком (но не подтверждённые драйверу), остаются. Плюс backend: fake-поиск после матча со статусом ENDED → `COMPLETED` (не возвращается), поэтому «включить fake заново».
+5. **Минимальный набор изменений ПОСЛЕ аудита — 58.10** (только концептуально).
+
+### 58.2 Хронология последнего прогона (`gc_log.txt` + `console.log`, время клиентское `t`)
+
+| Поп. | Backend | 9107 | Первый `0x25` реальному | Итог клиента | Прочее |
+|---|---|---|---|---|---|
+| a1 | WAITING_ACCEPT (282 мс) | #1 (game_type 16392, &0xF=8) | `stage=1 awaiting=127 total=0` (+0.334) | state 3 → `active callback=none` (+0.348), popup нет | Stop через 10 с |
+| a2 | WAITING_ACCEPT (255 мс) | #1 | `awaiting=127` (+0.306) | state 3, popup нет | Stop через 37 с |
+| a3 | MATCHED «1/10» (fake не было), через 4.3 с WAITING_ACCEPT | #1 (+4.30) | `awaiting=127` (+4.32) | state 3, popup нет | cancel не дошёл (backend перезапускали, 21:40) |
+| a4 | WAITING_ACCEPT (275 мс), match `m-dc9b3b6e` READY через 112 мс | #1 | `awaiting=127 total=0` (+0.303); sniff → legacy-ростер взведён +0.32 | state 3 (+0.320), popup нет | fake: 9×`sent`, ретраи; Stop +5.98 |
+| a5 | **MATCHED «1/10»** (`m-1866d194`, fake нет: `COMPLETED`) | — | — | Stop +1.45 | match CANCELLED |
+| a6 | WAITING_ACCEPT (205 мс), `m-69489101` READY через 100 мс | #1 | `stage=1 awaiting=0 total=10` (+0.229) | `PlaySoundEffect('popup_accept_match_found')` +0.250, `RaiseReadyUp(1,0,10)` +0.255 → **popup есть** | Accept +2.87 → `stage=2 awaiting=9` каждую секунду; fake никогда не шлют stage 2; +23.2 srcds `re-arming/unreserving`; **+24.207 state 3 → callback destroyed, `RaiseReadyUp(false)` не вызван** |
+
+srcds (a4→a6): `[MM-ACCEPT] backend roster: asking the backend for the roster of 127.0.0.1:27017` → `no match on this server` (адрес ≠ реестру `192.168.1.150:27017`); `[FAKE-MM] started … source=legacy … server=127.0.0.1:27017`; `TIMEOUT after 5 attempts` ×9 (дважды: первый и перевзведённый ростер).
+
+### 58.3 A. Клиентская state machine (что реально происходит; ссылки на §36–§39, §58 = новые проверки)
+
+Цепочка эмулятора: `9101 MatchmakingStart` (`sub_103F6240`, `mmqueue=registering`) → GC: `BackendClient` POST search (асинхронно) → ответ `WAITING_ACCEPT` + сервер → **9107 #1** с `reservation.game_type∈{8,10,13}` → **`sub_103DC4B0`** (гейт: сессия есть и `mmqueue` непуст; **на каждом 9107** `Update{mmqueue reserved}`; старый callback уничтожается; `cb=(stage 1, mode 0)` — ctor сразу регистрирует движковый запрос `CServerMsg_CheckReservation`, 0x21 каждую **1.0 с**, максимум **21** попытка, `sv_mmqueue_reservation_timeout`=`extended`=21, `baseclientstate.cpp:337`) → ответ `0x25`:
+
+| Ответ сервера | Состояние запроса (`imatchasync.h`: 0 RUNNING, 3 FAILED, 4 SUCCEEDED) | `sub_103DF430` | Итог |
+|---|---|---|---|
+| `awaiting=127` | **сразу FAILED (3)**, без повторов | ветка «will not queue connect» → destroy cb, `dword_15278690=0`; `RaiseReadyUp(false)` только при `mode≠0` | **нет popup**, `mmqueue=reserved` остаётся |
+| `awaiting=N>0` (stage 1) | RUNNING (0), повторы 1/с до 21 с | `S==0,T==1` — ничего | ждёт |
+| `awaiting=0` (stage 1) | SUCCEEDED (4) | `T==1`: KV `mmqueue reserved`, `popup_accept_match_found`, `ServerReserved(map)`, `RaiseReadyUp(true,0,total)`; **cb остаётся** | **popup** |
+| Accept-кнопка | `sub_103DF3A0`: `cb+140=2`, новый запрос stage 2 (окно **снова 21 с**) | `S==0,T==2`: `RaiseReadyUp(true, total−awaiting, total)` каждую секунду | счётчик |
+| `awaiting=0` (stage 2) | SUCCEEDED | `T==2,M==0` → **return** (ничего) | ждёт второй 9107 |
+| 21 с без `awaiting=0` (stage 2) | FAILED (3) без пакета | как первая строка: destroy cb, popup **не закрыт** | **stale popup** (a6 +24.207) |
+
+Дальше (успешный путь, §38/§46): `0x25 stage 2 awaiting 0` → клиентский watcher (`test_accept.cpp` `Hk_WSARecvFrom`) → `OnReservationFullyAccepted` → **9107 #2** без `reservation` → cb `(2,2)` → 0x21 stage 2 → 0x25 state 4 → QueueConnect-ветка (`mmqueue=connect`, `popup_accept_match_confirmed`, `RaiseReadyUp(false…)` при `v29≠1`) → KV `QueueConnect` → poller `sub_103DEB90` (>2100 мс) → `Command(QueueConnect)` → `connect`.
+
+**«Confirming match» без popup — [CONFIRMED (механика) / HIGH CONFIDENCE (название UI)]:** «confirming match» = состояние `game/mmqueue=reserved`, которое пишет 9107-хендлер сам по себе; popup — результат **отдельной** асинхронной проверки (0x21/0x25). Если проверка провалилась (state 3), `mmqueue` никто не сбрасывает (нативная ветка отказа для `mode 0` его не трогает; сброс делают только 9104 `matchmaking==0` или отмена `sub_103DE630`/9102). Popup не вызывается напрямую из 9107 — подтверждено ещё §38: показ = `ServerReserved` из `sub_103DF430` при `S==4 ∧ T==1`.
+
+**FIRST vs SECOND attempt (расхождение клиент↔сервер):**
+
+```
+FIRST (a4):  9101 → POST search → WAITING_ACCEPT → 9107#1 → cb(1,0) → 0x21 s1 → srcds: roster НЕТ → 0x25 awaiting=127
+             → AOS_FAILED → cb destroyed → (popup нет; mmqueue=reserved) ‖ srcds: sniff видит 0x21 → взводит Q + fake
+SECOND (a6): 9101 → POST search → WAITING_ACCEPT → 9107#1 → cb(1,0) → 0x21 s1 → srcds: roster ЕСТЬ, fake stage 1 уже записаны
+             → 0x25 awaiting=0 total=10 → state 4 → sound + ServerReserved + RaiseReadyUp(true,0,10) → popup
+ПЕРВОЕ РАСХОЖДЕНИЕ: содержимое первого 0x25 на реальный 0x21 stage 1 (127 vs 0). Клиентские события до него идентичны.
+```
+
+Функции из задания: `sub_103DC4B0` (9107) — роль 58.3; `sub_103D9900` (9104) — **ни разу не вызывался** (GC не шлёт 9104); `sub_103DF430` — центральная таблица; `sub_103DF3A0` — только Accept; `sub_103E1390` — регистрация события `ServerReserved` (raiser `sub_103E2DF0`, вызывается из `sub_103DF430`; хук `ServerReserved` не устанавливается — факт показа popup'а судится по `PlaySoundEffect`/`RaiseReadyUp` в логе и по наблюдению пользователя); `sub_10581640` — регистрация события `PanoramaComponent_Lobby_ReadyUpForMatch` (`word_10D54BF8`); `sub_103D8AF0` — singleton-getter лобби (адаптер к `RaiseReadyUp` `sub_1057FF90`: `lobby+16 = bShow ? Plat_MSTime() : 0`, затем событие); `sub_103F6240` — 9101/heartbeat; `sub_103D7750` — builder `QueueConnectToServer`.
+
+### 58.4 B. Fake-player Accept (srcds `FakeRoster` + backend roster)
+
+- **Стадии драйвера** (`test_accept.cpp:252-664`): Arm → Q + keep-alive (8 с) → **Probe** (первый пакет через 1.5 с, по одному пакету на fake каждые 150 мс, подтверждение = `0x25` **на сокете этого fake** с `token==fake`, `awaiting≠127`, до 5 попыток по 1.5 с) → **WaitPopup** (`notifyReady(true)`: «все fake на stage 1») → `popupSeen` = на сокет fake пришёл `0x25 stage 1 awaiting 0` (движок рассылает его всем записанным адресам при `awaiting==0`, `baseserver.cpp:2217+`) → **Accept** через `acceptDelayMs` 2500 мс (fake шлют stage 2) → Done (перевзвод через 90 с, если никто не подключился). `TIMEOUT` → `gaveUpAt` → через 30 с Unreserve + 12 с cooldown + новый Q.
+- **Каждый переход зависит от приёма UDP на сокете fake.** Когда ответы не доходят (loopback, 58.1 п.2), драйвер остаётся в Probe → gaveUp, `notifyReady(true)` не вызывается, Accept не наступает. Движок при этом stage 1 fake **регистрирует** (запрос принят по сокету) — это и есть «полусостояние», которое переживает попытку (58.7).
+- **Что такое «roster ready» — [CONFIRMED по коду]:** `Controller::ConfirmIfReady` (`server_roster.cpp:213`) шлёт `POST /servers/roster/ready` только если ростер **backend-овский** (`m_usable`), взведён, совпадает с текущим snapshot и `m_fakesReady` (= `notifyReady(true)` = все 9 fake подтверждены ответами). Для legacy-ростера (`OnLegacyArmed`) `m_usable=false` → подтверждение не шлётся никогда. Backend: `awaiting_server` держит назначение, пока нет ack / `roster-ack-timeout` PT25S / srcds перестал опрашивать (`roster-poll-window` PT10S); опрос засчитывается **только** если сервер найден по `(host,port)` (`SearchService.rosterForServer:700-705`, `findByHostPort`, точное сравнение) — неизвестный адрес молча даёт «нет матча».
+- **Backend считает fake готовыми независимо от srcds:** виртуальные участники (`fake_search`), матч READY через ~100 мс после создания (БД: `ready_at − created_at` = 112 / 100 мс). «Готовность» fake на srcds backend знает лишь из `POST ready`.
+- **Может ли клиент дойти до «confirming match», пока fake не готовы — да:** UI-состояние ставит 9107 (t+0.3 с). Без fake на stage 1 клиент получает `awaiting=9` (RUNNING) и **ждёт до 21 с** (popup появится, если fake успеют), после чего FAILED. При legacy fake стартуют только **после** первого 0x21 → в первом цикле ростера нет вообще → сразу 127.
+- **Первый ростер создаётся слишком поздно — [CONFIRMED]:** legacy взводит ростер в ответ на sniff первого `0x21`; ответ на него уже ушёл с 127 (a4: `0x25 awaiting=127` в +0.303, «arming the roster» сразу после). Backend-путь предназначен ровно для устранения этого, но при адресе `127.0.0.1` не работает.
+- **Первый запуск srcds vs последующие:** после старта srcds с `-gc_mode` **резервации нет вообще** (`ReserveServerForOurCookie` возвращает управление раньше plain-`G`), `cookie=0` → любой 0x21 → `reservationMatch=false` → 127. То же после: Unreserve (Done через 90 с, gaveUp через 30 с + cooldown 12 с), истечения резервации (21 с без keep-alive) и любого сброса cookie гибернацией. То есть «первая попытка» — это **любая попытка, когда на srcds нет взведённого ростера**, а не только первая после старта.
+- **a1–a3 [UNRESOLVED]:** там тоже `awaiting=127`, хотя a2/a3 шли через 16 и 60 с после a1 (ростер a1 должен был быть жив). Лога srcds той сессии нет (`gc_log.txt` перезаписан) — возможные причины (cooldown/Unreserve, иной экземпляр srcds, иной DLL) не проверялись.
+
+### 58.5 C. Таймаут / popup
+
+- **Показ:** native `ServerReserved(map)` → `party.js` `_ShowMatchAcceptPopUp` → `UiToolkitAPI.ShowGlobalCustomLayoutPopupParameters(popup_accept_match.xml, 'map_and_isreconnect=<map>,false')` + `ShowAcceptPopup` (глобальный popup, живёт вне страницы).
+- **Состояние popup'а — JS:** `m_hasPressedAccept`, `m_numPlayersReady`, `m_numTotalClientsInReservation`, `m_numSecondsRemaining`, `m_jsTimerUpdateHandle`, `m_isNqmmAnnouncementOnly`, `m_isReconnect`; **нативное:** `lobby+16` = момент последнего `RaiseReadyUp(true,…)` (пишется каждую секунду, на таймер не влияет), `lobby+24` = момент **показа** popup'а (пишет `sub_10580010`, обработчик события `ShowReadyUpPanel` = `word_10D54BFC`; JS `_Init` диспатчит это событие — **новое, CONFIRMED IDA**).
+- **Таймер:** JS `GetReadyTimeRemainingSeconds()` → `sub_10580EA0`: `0`, если `mmqueue`/`system/lock` пусты или `lobby+24==0`, иначе `sv_mmqueue_reservation_extended_timeout(21) − (now − lobby+24)/1000 − 1` = **20 с обратного отсчёта от показа popup'а** (новое, CONFIRMED). JS `_OnTimerUpdate` при `≤0` только перестаёт перепланироваться и скрывает метку.
+- **Закрытие popup'а возможно только так:** (1) `PanoramaComponent_Lobby_ReadyUpForMatch(false,…)` → `_ReadyForMatch(false)` → `CloseAcceptPopup` + `UIPopupButtonClicked('')`; (2) `_OnNqmmAutoReadyUp` (только `@map`-вариант); (3) `MatchAssistedAccept`/кнопка **не закрывают**. `CloseAcceptPopup` слушает лишь `chat.js` (возврат панели чата) — он **следствие**, а не причина закрытия. Источники `RaiseReadyUp(false,…)` в клиенте: QueueConnect-ветка `sub_103DF430` (`M≠0`, `v29≠1`), ветка отказа `sub_103DF430` (**только `M≠0`**), 9104 `matchmaking==3` (`(false,0,0)`, `0x103d9d5b`).
+- **Таймауты, которые реально существуют:** (а) движковый запрос stage 2 живёт 21 с после нажатия Accept (a6: +2.87 → +24.2) → state 3 → destroy cb, popup остаётся; (б) если Accept **не** нажат: запрос stage 1 уже SUCCEEDED, активного запроса нет → **не истекает ничего**, popup стоит вечно (после 0 в JS-таймере) — HIGH CONFIDENCE, live не проверялось; (в) srcds: резервация 21 с (продлевается keep-alive'ом 8 с); (г) backend: `assigned-search-timeout` PT2M → поиск `COMPLETED` молча (БД: `search 25 COMPLETED` через 120 с), клиенту не сообщается; (д) клиентский watcher `ArmTimeoutMs` 180 с (только для 0x25-хука).
+- **Сообщения при таймауте:** ни одно. `9112 GC2ClientAbandon` — только уведомление-попап «Matchmaking abandon notification» (§39.2), не закрывает ready-up и не чистит состояние; `9104` наш GC не отправляет вообще (`gc_client.cpp`: ни одного `MatchmakingGC2ClientUpdate`). Единственный GC-ориентированный путь закрытия в клиенте — `9104 matchmaking==3` (закрывает ready-up и ставит `mmqueue=searching`) с последующим `matchmaking==0` (очистка `mmqueue`, `cfg/qmmconnect.dt`), плюс 9102 при ручной отмене.
+- **Ручной выход vs таймаут:** ручной выход = клиент шлёт 9102 → `ClientGC::OnMatchmakingStop` (`BackendClient::SearchCancelled`, `m_pendingAccept={}`, `DisarmClient`, сообщения клиенту нет); закрывает ли он открытый popup — **не проверено (UNRESOLVED, live)**. Таймаут — нативный state 3 без каких-либо сообщений и без закрытия. **Пропущенный переход:** «ready-up истёк → закрыть popup + очистить `mmqueue` + отменить поиск/сервер» — его не выполняет ни клиент (для `mode 0`), ни srcds, ни GC, ни JS.
+
+### 58.6 D. Что переживает первую попытку (persistent state)
+
+| Слой | Состояние | Переживает? | Роль в расхождении |
+|---|---|---|---|
+| client.dll | `dword_15278690` (активный callback) | нет: state 3 → `0` (`active callback=none` на входе a4/a6 одинаково) | не различает |
+| client.dll | `game/mmqueue` | **да** (`reserved` после отказа; чистится 9104(0)/9102-путём) | объясняет «confirming match» без popup; гейт 9107 проходит и в a4, и в a6 |
+| client.dll | `dword_15278694` (отложенный QueueConnect KV), `lobby+16/+24` | нет / перезаписываются | не различает |
+| client.dll | стек popup'а (глобальный) | **да**, если не закрыт (a6 → stale popup) | влияет на следующие попытки визуально |
+| GC (csgo_gc клиента) | `m_pendingAccept`, `m_activeSearch`, `AcceptTest` armed | сбрасываются на 9101/9102 | не различает |
+| reservation cookie | `GameServerCookieId=0x293A206F6C6C6548` (константа, тот же в a1–a6) | **да, всегда тот же** | движок не отличает матчи друг от друга |
+| match / request id | новые на каждую попытку (`m-dc9b3b6e`, `m-1866d194`, `m-69489101`) | — | **на srcds не передаются** (Q содержит только cookie) |
+| srcds (движок) | `m_arrReservationPlayers` + stage'и (`SetReservationCookie` пересобирает только при **смене cookie**, §41.5/§42.1) | **да** | главное расхождение: fake stage 1 из a4 записаны, ростер жив |
+| srcds (`FakeRoster`) | фаза Probe/gaveUp/Cooldown, keep-alive 8 с | да | окна, где 0x21 снова получит 127 (Cooldown/после Unreserve) |
+| Java: `matchmaking_search` | старый поиск CANCELLED / COMPLETED (2 мин) | да | «новый поиск одиночки завершает READY-матч» → ENDED |
+| Java: `matchmaking_match` | READY-матч держит сервер до нового поиска / TTL 10 мин | да | a4-матч ENDED при старте a5 |
+| Java: `fake_search` | `endMatch(ENDED)` → **COMPLETED** (`fakes.completeByMatch`), возврат в SEARCHING только при CANCELLED (`unplaceByMatch`) | **да** | a5: MATCHED «1/10» — fake нет; нужно «выключить/включить fake» |
+| Java: `game_server` | `AVAILABLE` (классический сервер без резервации по §54), `last_assigned_at` | да | не различает |
+
+### 58.7 E. Reservation lifecycle (порядок событий)
+
+Требуемый порядок для чистого первого входа (по движковому коду, **CONFIRMED**): **(1)** на srcds взведён `Q<cookie>,<cookie>,1:[real][fake…]` с реальным AccountID **до** того, как клиент пошлёт первый `0x21` → **(2)** fake stage 1 достигнуты (или хотя бы в пути: пока `awaiting>0` клиент ждёт до 21 с) → **(3)** 9107 #1 → 0x21 → `awaiting=0` → popup. Текущий порядок: assignment → **9107 сразу** (backend не держит) → 0x21 → 127 → сброс → (после) ростер. Поэтому нужен порядок `backend assignment → roster (srcds взвёл + fake stage 1) → ack → 9107`, ровно то, что уже реализовано backend'ом в §55 (`awaiting_server`), но не работает из-за адреса. Слишком поздно — ростер (legacy) и `notifyReady`; слишком рано — нет (keep-alive держит резервацию 8 с при окне 21 с; stale stage'ы — иная проблема, см. D). `Unreserve` + cooldown 12 с создаёт окна без ростера, в которые любой 0x21 получает 127 (в a6 Unreserve пришёлся на +23.2 с — за секунду до FAILED, не причина его).
+- `ReportGCQueuedMatchStart` — в retail-`server.dll` заглушка (§40), не влияет.
+
+### 58.8 Побочные подтверждённые факты
+
+- **Запросы `0x21` живут по 21 попытке×1 с (stage 1 и stage 2)** — не 1.5 с и не 180 с (`baseclientstate.cpp:337`, `CServerMsg::Update` FAILED по `m_maxAttempts`); это то самое 21-секундное окно, которое видно в a6 (+2.87…+24.2).
+- `AsyncOperationState_t`: 0 RUNNING, 1 ABORTING, 2 ABORTED, **3 FAILED, 4 SUCCEEDED** — расшифровка `state=N` в клиентских диаг-логах.
+- Backend, запущенный пользователем, читает `target\config\application.properties` (14:47, без `required-players`), а не `java-backend\config\` (16:21, с `=1`): отсюда «1/10» и обязательные fake.
+- Ключ движка `net_usesocketsforloopback` (`net_ws.cpp:70`, default 0; в release-ветке флаги `0`) существует в утёкшем исходнике, а строка `net_usesocketsforloopback` (и `sv_mmqueue_reservation_extended_timeout`, `net_showudp_remoteonly`) присутствует в установленном `bin\engine.dll` 1352 (по 1 вхождению, [CONFIRMED]); принимается ли `+net_usesocketsforloopback 1` в командной строке srcds и меняет ли поведение — не проверено [HYPOTHESIS].
+
+### 58.9 Поправки к старым записям (старые тексты не удалялись; актуально — ниже)
+
+| Старый вывод | Актуально сейчас |
+|---|---|
+| §51/§53: почему loopback-источник fake «не работает» — механизм **HYPOTHESIS** (`+ip`, привязка, `engine.dll` особо обращается с 127.0.0.1) | **HIGH CONFIDENCE:** движок кладёт ответ на `127.0.0.1` в loopback-очередь, а не в сокет (`net_ws.cpp:2579`); запрос при этом принимается и stage записывается |
+| §55/§56: backend-путь снимает `awaiting=127` первой попытки (assignment держится до ack srcds) | верно **только когда srcds опрашивает адрес из реестра backend** (`-ip`/эквивалент). Без `-ip` (`DedicatedServerAddress()`=`127.0.0.1`) backend-путь **инертен**, работает legacy с гарантированным 127; `roster ready` при loopback не наступает и по второй причине (ответов на сокетах fake нет) |
+| §49–§53: «`-ip 192.168.1.150` нужен для fake» | причина `-ip` — не привязка srcds, а то, что **источник fake ≠ 127.0.0.1**; `-ip` — лишь один из способов (58.10 п.1); при этом §57 показывает, что `-ip` подозревается в потере inventory → два требования сталкиваются, разводить их нужно кодом/параметром |
+| §46/§53: «popup исчезает по таймеру/по итогу Accept» (подразумевалось) | popup закрывается **только** `RaiseReadyUp(false)`; таймаутного пути в эмуляции нет |
+| §38.6/§39.1: `9104 matchmaking==3` закрывает ready-up | подтверждено; **наш GC его не шлёт**, поэтому единственный GC-путь закрытия не используется |
+
+### 58.10 Минимальный набор изменений ПОСЛЕ аудита (только концепция, код не менялся)
+
+1. **Развести адрес srcds для GC-нужд и engine-`ip`.** Poller и fake-драйвер должны использовать **не-loopback адрес, совпадающий с записью реестра backend** (отдельный параметр GC — аргумент/ключ `config.txt`, по умолчанию не `127.0.0.1`), а не `DedicatedServerAddress()` из `-ip`. Это одним изменением: (а) оживляет backend-ростер и удержание назначения (первый вход), (б) даёт `TIMEOUT`-free подтверждения fake и переход в Accept (fake принимают), (в) не требует `-ip` (§57). Альтернатива без кода: `+net_usesocketsforloopback 1` на srcds (проверить live).
+2. **Гарантировать порядок «ростер до 9107» и убрать зависимость от sniff в основном пути:** при работающем п.1 — оставить как есть (`awaiting_server`, ack, timeout 25 с); legacy-sniff оставить fallback'ом с явным предупреждением «первая попытка = 127». Если backend недоступен/ростер не подходит — не отдавать назначение клиенту, пока ростер не подтверждён (иначе гарантирован сброс).
+3. **Владелец таймаута ready-up (пропущенный переход):** GC (по данным backend/srcds: назначение выдано, но не набран `awaiting=0` stage 2 за ≈20–21 с) шлёт клиенту 9104 `matchmaking=3` (закрывает popup) затем `matchmaking=0` (чистит `mmqueue`), отменяет поиск в backend и освобождает сервер/Unreserve; либо клиентский хук на destroy-путь `sub_103DF430` (M==0) с вызовом `RaiseReadyUp(false,0,0)`. Не использовать 9112 (только уведомление).
+4. **Развязать попытки:** (а) уникальный reservation cookie на матч, выдаваемый backend'ом (в 9107 `reservationid` и в GET roster для srcds) — исключит перенос stage'ов/ростера между попытками (сейчас cookie — константа сборки); (б) при `endMatch(ENDED)` реального игрока, ушедшего до подключения, возвращать fake в SEARCHING (сейчас COMPLETED); (в) очищать ростер srcds при отмене поиска (Unreserve по `POST` из backend/GC), а не по таймерам 30/90 с.
+5. **Диагностика (только логи):** на srcds — лог каждого ответа `0x25` по fake и адреса источника, лог `reservationMatch/IsReserved` при 127; на клиенте — лог `ServerReserved` (хук не ставится, но можно логировать вызов `sub_103E2DF0`) и destroy callback при state 3.
+
+### 58.11 Что требует live-теста пользователем (Claude не может запускать CS:GO/srcds)
+
+1. **Подтвердить loopback-причину без правки кода:** srcds `-gc_mode competitive +net_usesocketsforloopback 1` (без `-ip`), порт как в реестре. Ожидание: в `gc_log.txt` `[FAKE-MM] … stage=1 confirmed`, `server reports stage 1 awaiting=0`, fake шлют stage 2, при Accept `awaiting=0`, второй 9107, connect. Если `TIMEOUT` остались — причина другая.
+2. **Проверить backend-путь (первый вход) при корректном адресе:** srcds `-ip 192.168.1.150 -port 27017 -gc_mode competitive …` (адрес = реестру), свежий запуск, ровно **одна** попытка. Ожидание: `[MM-ACCEPT] backend roster of match … armed and every fake participant is at stage 1: telling the backend`, назначение приходит позже (~3–5 с), первый `0x25` = `awaiting=0`, popup с первой попытки. Сохранить `gc_log.txt` сразу после теста (файл общий и пересоздаётся при старте процесса).
+3. **Таймаут popup:** (а) Accept нажат, fake не принимают/выключены — ожидаемо state 3 через ~21 с после нажатия, popup остаётся; (б) Accept **не** нажат — стоит ли popup бесконечно (нет ни одного события); зафиксировать по логу время; (в) ручной выход (Stop) при открытом popup — закрывается ли.
+4. **Логи srcds для a1–a3-подобных случаев** (127 при «живом» ростере): держать консоль/копию `gc_log.txt` каждой попытки; отметить, был ли Unreserve/cooldown (`unreserving, fresh roster in 12 s`) до попытки.
+5. **Wingman** — **UNRESOLVED**, отдельный RE/тест не проводился.
+
+### §58 STATUS
+
+| Вывод | Статус |
+|---|---|
+| Первый `0x25` на реальный `0x21 stage 1` = `awaiting=127` в a1–a4, `awaiting=0` в a6; клиентские события до него идентичны | **CONFIRMED** (логи) |
+| `awaiting==127` ⇒ `AOS_FAILED` без повторов ⇒ state 3 ⇒ destroy cb ⇒ popup не показывается, `mmqueue=reserved` остаётся | **CONFIRMED** (исходник `baseclientstate.cpp:397-401` + decompile `sub_103DF430` + лог) |
+| Backend-путь ростера инертен без `-ip` (адрес `127.0.0.1` ≠ реестр `192.168.1.150`); назначение не удерживается | **CONFIRMED** (лог `no match on this server`, `WAITING_ACCEPT` через 205–282 мс, код `rosterForServer`) |
+| Legacy-ростер по построению создаётся после первого 0x21 | **CONFIRMED** (код `gc_server.cpp:357-490`, лог a4) |
+| Ответы движка на `127.0.0.1` идут в loopback-очередь, не в сокет ⇒ fake не подтверждаются ⇒ Accept-фаза не наступает | **HIGH CONFIDENCE** (исходник `net_ws.cpp:2579` + 3 факта логов: `TIMEOUT`×9 при принятом stage 1, `awaiting=9` в a6, контраст с §53); для сборки 1352 не проверялось → live-тест 58.11 п.1 |
+| Клиентское окно запроса 21 с×1 с (stage 1 и 2), FAILED по исчерпанию | **CONFIRMED** (исходник) / совпадает с логом (+2.87 → +24.2) |
+| JS popup не закрывается сам; закрытие только `RaiseReadyUp(false)`; таймер = 20 с от `ShowReadyUpPanel` | **CONFIRMED** (JS из `code.pbin`, IDA `sub_10580010/10580EA0`) |
+| Ветка отказа `sub_103DF430` не вызывает `RaiseReadyUp(false)` при `mode 0` ⇒ stale popup после таймаута Accept | **CONFIRMED** (decompile `LABEL_114` + лог a6 +24.207 без `RaiseReadyUp(false)`) |
+| Если Accept не нажат, popup стоит бесконечно (нет активного запроса/таймаута) | **HIGH CONFIDENCE** (вывод из кода; live не проверялось) |
+| GC никогда не шлёт 9104/9112; 9112 не закрывает popup | **CONFIRMED** (код `gc_client.cpp`, §39.2) |
+| Persistent-состояние srcds (ростер + stage'ы при неизменном cookie) — причина отличия второй попытки | **CONFIRMED** (лог a6 + источник §41.5/§42.1) |
+| fake `COMPLETED` после ENDED-матча ⇒ «включить fake заново» | **CONFIRMED** (код `endMatch`/`FakeSearchRepository` + БД + лог a5) |
+| Причина `awaiting=127` в a2/a3 (ростер a1 должен был быть жив) | **UNRESOLVED** (нет лога srcds) |
+| Закрывает ли ручной Stop открытый popup | **UNRESOLVED** (live) |
+| Wingman | **UNRESOLVED** (не исследовался) |
+| Cvar `net_usesocketsforloopback` присутствует в `engine.dll` 1352 (строка найдена) | **CONFIRMED** |
+| `+net_usesocketsforloopback 1` на srcds возвращает ответы fake в сокет и чинит Accept fake | **HYPOTHESIS** (live 58.11 п.1) |
+
+---
+
+## §59. READ-ONLY АУДИТ: Casual matchmaking — назначение сервера проходит, клиент выдаёт «Failed to connect to the match» (код, конфиги и Git не менялись)
+
+Область: только Casual (non-Accept) путь `MatchmakingStart → backend → assignment → 9107 → reservation check → QueueConnect → connect`. Accept/fake/popup/Wingman/inventory/`-gc_mode`/Panorama/§58 не исследовались (найденные пересечения помечены UNRESOLVED). Команда srcds пользователя не менялась и не «чинилась»: `srcds.exe -game csgo -console -usercon -insecure -ip 192.168.1.150 -port 27017 +game_type 0 +game_mode 1 +map de_vertigo` (без `-gc_mode`). Источники: `gc_log.txt` (23:23:14, клиент + srcds, DLL 20:43), `csgo\console.log` (строки 22179+), копия БД backend (`java-backend\target\data\matchmaking.db`, читалась через копию), код C++ (`gc_client.cpp`, `gc_server.cpp`, `backend_client.cpp`, `config.cpp`), код Java (`SearchService`, `SearchView`, `GameServerRepository`), утёкший исходник движка (`engine\baseserver.cpp`, `sv_main.cpp`, `baseclientstate.cpp`, `net_ws.cpp`), `csgo\resource\csgo_english.txt`, прежние разделы §34, §38, §41, §46, §49–§57.
+
+### 59.1 Observed failure — **CONFIRMED**
+
+Четыре поиска Casual подряд (a1–a4, 23:22:12 → 23:22:56 по БД, время клиента `t`), каждый одинаково:
+
+```
+[BACKEND] search …: READY_TO_CONNECT -> 192.168.1.150:27017 map=de_vertigo match=m-1cc21992 (185 ms)
+[MM-DIAG a1 t=+0.189s] GC->client 9107 #1 SENT: reservation=no … direct_udp=192.168.1.150:27017 server_address=192.168.1.150:27017
+[MM-DIAG a1 t=+0.210s] client.dll reservation callback CREATED: stage=2 mode=2  (direct connect variant)
+[MM-DIAG a1 t=+0.224s] UDP 0x21 SENT to 192.168.1.150:27017: stage=2 cookie=293a206f6c6c6548 account=1050166997
+[MM-DIAG a1 t=+0.225s] UDP 0x25 RECV from 192.168.1.150:27017: stage=2 awaiting=127 total=0
+[MM-DIAG a1 t=+0.241s] client.dll reservation callback ENTER: request state=3 …
+[MM-DIAG a1 t=+0.243s] client -> GC MatchmakingStop (9102) received
+[MM-DIAG a1 t=+0.245s] client.dll reservation callback EXIT : game/mmqueue=(no session) active callback=none
+```
+
+В `console.log` за все четыре попытки **нет** `Connecting to …`, `Connected to …`, `QueueConnect RAISED`, `sending socache`, `OnSessionFailed`. Текст ошибки — `#SFUI_LobbyPrompt_MMFailedTitle` = «Matchmaking Failed» + `#SFUI_QMM_ERROR_NoOngoingMatch` = **«Failed to connect to the match.»** (`csgo_english.txt`, UTF-16) — это ровно ветка отказа `sub_103DF430` для `mode==2` (§38.4: `CloseSession` + `sub_103D98D0("#SFUI_LobbyPrompt_MMFailedTitle","#SFUI_QMM_ERROR_NoOngoingMatch")`), **CONFIRMED** по строкам и по декомпиляции.
+
+### 59.2 Exact failing stage — **CONFIRMED**
+
+| Этап | Результат | Свидетельство |
+|---|---|---|
+| 9101 `MatchmakingStart` (`game_type=1677740039`, eGame=7, mode=casual) | OK | `[MM] mode=casual accept_required=0 …` |
+| backend search / polling | OK | `READY_TO_CONNECT` за 185–210 мс |
+| assignment → `StartServerFlow` | OK | `backend assigned match … server 192.168.1.150:27017` |
+| 9107 (#1, без `reservation` ⇒ cb `(2,2)`) | OK | `reservation callback CREATED: stage=2 mode=2` |
+| **0x21 stage 2 → 0x25** | **FAIL: `awaiting=127 total=0`** | лог (все 4 попытки) |
+| движковый запрос → `AOS_FAILED` (3) | сразу, без повторов (`baseclientstate.cpp:397-401`) | `request state=3` |
+| `sub_103DF430`, `mode==2` | «will not queue connect» → `CloseSession` + popup «Failed to connect to the match»; клиент сам шлёт 9102 | лог: `MatchmakingStop` через 15–20 мс |
+| `QueueConnect` KV / `sub_103DEA80` / `sub_103DEB90` | **не достигнуты** | нет `QueueConnect RAISED` |
+| фактический `connect ip:port` | **не выполнялся** | нет `Connecting to` |
+| сетевое соединение / приём сервером / Steam P2P | **не достигнуты** | нет `HandleNetMessage`, `OnSessionFailed` |
+
+То есть отказ происходит **до** `QueueConnect` и до любого `connect`: на проверке резервации сервера. Сеть до srcds есть (сервер ответил `0x25` за 1–20 мс), но резервацию считает недействительной.
+
+### 59.3 Backend assignment — **CONFIRMED (значения) / реконструкция (текст JSON)**
+
+- Клиент реально отправляет `mode=casual`, `game_mode=casual` (`POST /api/v1/matchmaking/search`, лог), category в БД `casual`. Реестр backend (`game_server`, копия БД): **id 6, `192.168.1.150:27017`, category `casual`, map `de_dust2` (метка), `enabled=1`, `state=AVAILABLE`, `reserved_match_id=NULL`**, создан 23:22:07 (5 с до a1; прежняя запись id 5 — `competitive`, 27017). Матчи: `m-1cc21992 / m-8ca5ac31 / m-3c6272ea` (ENDED — «новый поиск одиночки завершает READY-матч», §49.4), `m-a108e05c` READY; `required_players=1`, `accept_required=0`.
+- Реальный режим srcds (`+game_type 0 +game_mode 1` = competitive-режим сервера) backend **не знает** (он видит только метку реестра), и **для проверки резервации это безразлично**: `CBaseServer::ReplyReservationCheckRequest` (`baseserver.cpp:2124-2232`) использует только `cookie`, `stage`, `steamid`, `sv_mmqueue_reservation[0]` и roster — не `game_type/game_mode/map`. **CONFIRMED** (исходник). Вывод «причина в `game_mode`» из этого лога не следует.
+- Реконструкция ответа `GET /api/v1/matchmaking/search/{request_id}` для a1 (по коду `SearchView.Assignment` + `README.md` + разбор `backend_client.cpp:475-485`; сырой JSON в логе не печатается, печатается разобранное):
+  `{"status":"READY_TO_CONNECT", … "assignment":{"match_id":"m-1cc21992","server_id":6,"server_address":"192.168.1.150","server_port":27017,"map":"de_vertigo","accept_required":false,"required_players":1,"players":[{"account_id":1050166997,"fake":false}]}}` — адрес и порт **совпадают** с `192.168.1.150:27017` (`resolveIpv4(server.host())`, `pickServer`, `SearchService.java:347-360`).
+- Побочно (UNRESOLVED, не причина): `assignment.map` берётся из **метки реестра** (`server.map()`, `mapCompatible`), а не с реального srcds (`de_vertigo`): a3 получил `de_nuke`, a4 — `de_dust2` (пользователь правил метку под запрос; в БД сейчас `de_dust2`). Карту фактически определяет srcds; клиент использует метку только для 9107/loading screen.
+
+### 59.4 Actual client destination — **CONFIRMED**
+
+Цепочка адреса: backend JSON `server_address`/`server_port` → `backend_client.cpp:479-484` (`Assignment::serverAddress/serverPort`, `hasAssignment`) → `ClientGC::OnBackendSearchResult` → `ClientGC::StartServerFlow(assignment)` (`gc_client.cpp:664-741`): `TryParseIpAddress(assignment.serverAddress, testServerIp)` → `reserve.set_direct_udp_ip(testServerIp)`, `set_direct_udp_port(port)`, `set_server_address("192.168.1.150:27017")` (`AddressString`), `set_reservationid(GameServerCookieId)`, `set_map(...)` → 9107 → клиент: адрес → cb `+96..+127` → цель `0x21` и `adronline`.
+Лог: `direct_udp=192.168.1.150:27017 server_address=192.168.1.150:27017`, `UDP 0x21 SENT to 192.168.1.150:27017`. **Не 127.0.0.1**, не старый адрес: `test_server_*`/`test_accept_mode` из `config.txt` удалены (§49; `config.txt` клиента содержит только `backend_url`, `backend_api_key`; grep по `csgo_gc/*.cpp,*.h` — единственный `127.0.0.1` это `GCConfig::DedicatedServerAddress()` (`config.cpp:135`) для srcds). Адрес и порт назначения совпадают с запущенным srcds (`-ip 192.168.1.150 -port 27017`).
+
+### 59.5 QueueConnect path — **CONFIRMED (устройство) / not reached (исполнение)**
+
+- Наш код **не формирует `connect`** вообще: GC отдаёт только 9107 (адрес, cookie `0x293A206F6C6C6548` = `GameServerCookieId`, map, для Casual **без** `reservation`). Дальше всё делает клиентский `client.dll` (§38): cb `(2,2)` → 0x21 stage 2 → `0x25` state 4 → ветка QueueConnect (`v29=1`): `mmqueue=connect`, KV `QueueConnect{adronline, reservationid, helper_pSession, helper_time=+2000, auto_close_session, map, gametype, gamemode}` (`sub_103DEA80`) → per-frame poller `sub_103DEB90` (>2100 мс) → `Command(QueueConnect)` в matchmaking.dll → `UpdateClientReservation(cookie)` + `StartLoadingScreenForCommand("connect <adronline>")` → `Cbuf_AddText` → консольная `connect`. `matchid` в этой цепочке не участвует (Casual `G<cookie>,<cookie>` использует cookie как match id).
+- Сравнение с тем, что реальный CS:GO ждёт после 9107: для Casual — 9107 без `reservation`/с не-accept `game_type` (§38.5/§41.4); наш вызов идентичен рабочему прогону из 21:10 (см. 59.7). **QueueConnect не причина**: в четырёх попытках он не запускался.
+- **Остаток старой логики — [CONFIRMED]:** `StartServerFlow` для non-Accept (`gc_client.cpp:732-741`) ставит в **клиентском** процессе `ReserveServerForQueuedGame(BuildReservationPayload(AccountId()))` — в `console.log` виден `-> Reservation cookie 293a206f6c6c6548: reason ReserveServerForQueuedGame: G293a206f6c6c6548,293a206f6c6c6548,1:[3e9846d5]` (это движок **клиента**, `sv`-объект csgo.exe; на удалённый srcds он не влияет). Наследие эпохи listen-server (§29–§32). Вред неустановлен [UNRESOLVED], причиной провала не является.
+
+### 59.6 Server-side state — **CONFIRMED (правила движка и наблюдения) / HIGH CONFIDENCE (причина)**
+
+Правила (`baseserver.cpp`, `sv_main.cpp`, соответствуют §41.5/§42.1):
+- Ответ `awaiting=127` даётся, если **не** выполнено `stage≠0 ∧ cookie==GetReservationCookie() ∧ steamid≠0 ∧ (sv_mmqueue_reservation[0]=='Q' или 'G')` (`baseserver.cpp:2124-2200`). Наш 0x21: stage 2, cookie `293A…6548`, steamid `76561199010432725` — то есть 127 ⇒ **на srcds в этот момент нет действующей резервации с нашим cookie** (`GetReservationCookie()==0` либо другой).
+- Plain-`G` резервация ставится srcds **ровно один раз** — на `k_EMsgGCServerHello` (`gc_server.cpp:83-86`, `ReserveServerForOurCookie:332-347`; для srcds без `-gc_mode` `StartAcceptTestRoster()` возвращает `false`). В `gc_log.txt`: одна серверная запись `[MM] Queueing server reservation … result: 1` (строка 1622, за 7 строк до a1) и далее `ServerReservationResponse`; больше серверных резерваций нет (остальные 4 — клиентские, 59.5). Ни таймера, ни повторной резервации, ни `Unreserve`-вызова для classic-srcds в коде нет (§34.2 не изменялся: единственный вызов `ReserveServerForOurCookie` — ServerHello).
+- `ReserveServerForQueuedGame(bReserve=1)` ставит `m_flReservationExpiryTime = net_time + sv_mmqueue_reservation_timeout` (**21 с**, `baseserver.cpp:239,4086`). Пустой (без клиентов) резервированный сервер сбрасывает cookie (`SetReservationCookie(0)`, `sv_mmqueue_reservation=""`, `sv_main.cpp:1985-2045`), когда прошли `sv_hibernate_postgame_delay` (5 с) **и** истёк `m_flReservationExpiryTime`. То есть **без обновления резервация plain-`G` живёт ≈21–26 с и исчезает, пока никто не подключился**.
+- Приём клиента при `connect` (`baseserver.cpp:1021-1050`): `IsReserved() ∧ cookie≠` → `#Valve_Reject_Reserved_For_Lobby`; `IsExclusiveToLobbyConnections() ∧ cookie≠` → `#Valve_Reject_Connect_From_Lobby`; иначе принимается. **Отличие «прямой connect» vs «matchmaking connect»** (по коду, live не проверялось): прямой `connect 192.168.1.150:27017` (cookie клиента 0) принимается **только если сервер не зарезервирован**; matchmaking-путь до `connect` вообще не доходит, если предварительная проверка `0x21/0x25` вернула 127 — поэтому «прямой работает, matchmaking нет» — ожидаемая картина для сервера с истёкшей резервацией. **HIGH CONFIDENCE** (исходник, не проверено на `engine.dll` 1352 и на сервере пользователя).
+- Что **видно** на srcds в `gc_log.txt`: нет `HandleNetMessage`, `OnSessionFailed`, `Sending server welcome due to net message`, `HandleClientSOCacheUnsubscribe` — клиент ни разу не подключался (согласуется с 59.2). Строки консоли srcds `-> Reservation cookie …: reason …` (их печатает движок при каждой смене cookie) **не сохраняются** (консоль srcds на диск не пишется; в `gc_log.txt` попадают только `Platform::Print`) — поэтому фактический момент/причина сброса cookie **не наблюдаются**.
+- Время: srcds стартовал ≈23:21:36 (`steam_appid.txt`, косвенно), ServerHello — позже (загрузка карты + логин), a1 — 23:22:12.7, a2 23:22:16, a3 23:22:33, a4 23:22:56. Точное расстояние ServerHello→a1 неизвестно [UNRESOLVED]; для a2–a4 оно заведомо больше окна 21 с только если ServerHello был раньше ≈23:21:55; a1 — на границе.
+
+### 59.7 Comparison with last known working Casual flow — **CONFIRMED (лог) / HIGH CONFIDENCE (вывод)**
+
+Последнее рабочее состояние — `gc_log.txt` прогона 21:10 (a16, classic srcds 27016, Casual, DLL 20:43, то есть тот же билд, что и сейчас) и `console.log` 12962/13153/18763: `READY_TO_CONNECT → 9107 (reservation=no) → cb (2,2) → 0x21 stage 2 → 0x25 stage=2 awaiting=0 total=0 → PlaySoundEffect('popup_accept_match_found') → QueueConnect RAISED variant=1 (+2000 ms) / variant=2 → connect → Connected → NetworkingClient: sending socache → HandleNetMessage`. Первое рабочее состояние — §41.2/§46 (Casual + отдельный srcds 192.168.1.150).
+
+| | Рабочий (21:10, 27016) | Сейчас (23:22, 27017) |
+|---|---|---|
+| assignment / 9107 / cb / 0x21 | идентичны | идентичны |
+| **0x25 на 0x21 stage 2** | **`awaiting=0`** | **`awaiting=127`** |
+| дальше | QueueConnect → connect → socache | state 3 → popup «Failed to connect…» |
+| srcds | classic, командная строка неизвестна (в findings §49 — без `-ip`, без `-gc_mode`) | `-insecure -ip 192.168.1.150 -port 27017 +game_mode 1`, без `-gc_mode` |
+| резервация srcds | plain `G`, поиск, вероятно, вскоре после старта | plain `G`, поиск ≥ ~20–36 с после старта, 4 поиска подряд |
+
+Что менялось после §41/§46 и трогает этот путь (§48–§57): (1) §49 — backend выбирает сервер (адрес из реестра, не из `config.txt`); (2) §54 — Java reservation split: для non-Accept `markAssigned` вместо `RESERVED` (сервер остаётся `AVAILABLE`, повторно выдаётся сразу; на srcds это ничего не меняет); (3) §45–§55 — Accept-код в `gc_server.cpp`: в `ReserveServerForOurCookie` добавлена ранняя проверка `m_testRoster || m_testWaitingForPlayer || StartAcceptTestRoster()`, но для srcds без `-gc_mode` она возвращает `false` и plain-`G` ставится как раньше — **логика резервации classic-srcds не менялась с §33** (§34.2 актуален). Регрессии в коммите/сборке 20:43 для этого пути **не найдено**; наблюдаемое — та же ситуация, что зафиксирована в §34 («второй/третий Casual — Failed to connect to the match»), проявившаяся, когда classic-srcds перестал быть свежим (вероятно, раньше Casual-серверы 27016/27014 проверялись вскоре после старта; порядок запуска в тех прогонах не записан). Общий вывод не привязан к последнему коммиту (§34 старше §49–§57).
+
+### 59.8 Root cause
+
+1. **[CONFIRMED]** Назначение и адрес корректны (`192.168.1.150:27017`), 9107 корректен, `QueueConnect`/`connect` **не выполнялись**: провал — на предварительной проверке резервации (`0x21` stage 2 → `0x25 awaiting=127` → `AOS_FAILED` → «Failed to connect to the match»).
+2. **[HIGH CONFIDENCE]** Причина `awaiting=127`: на classic-srcds **нет действующей резервации с cookie `293A206F6C6C6548`** — plain-`G` ставится один раз на ServerHello (`gc_server.cpp:332-347`) и без обновления гаснет через ≈21 с (+5 с при пустом сервере, `baseserver.cpp:239,4086`, `sv_main.cpp:1985-2045`). Ни srcds, ни backend, ни GC резервацию не поддерживают/не восстанавливают. Это тот же корень, что **§34 (вариант C)**, до сих пор не исправленный.
+3. **[HYPOTHESIS]** Что именно наблюдалось бы на консоли srcds: `-> Reservation cookie 0: reason reserved(yes), clients(no), reservationexpires(…)` перед a1 (a1 — на границе окна; a2–a4 — заведомо после). Прямого наблюдения нет.
+4. **[HYPOTHESIS, низкая]** Альтернативы, не исключённые без консоли srcds: срабатывание `SetReservationCookie(0)` иным путём (`SetHibernating(true)`, `server.dll` competitive-режима — `+game_mode 1`; `ShouldHoldGameServerReservation`), другой cookie на srcds (иная сборка DLL). Против них: reply-логика от режима не зависит (59.3), тот же DLL 20:43 в обоих процессах, наличие одной серверной записи резервации.
+
+### 59.9 Minimal fix concept (только концепция; код НЕ менялся)
+
+- **Поддерживать plain-`G` резервацию на classic-srcds постоянно** (модель FakeRoster keep-alive: повтор `G<cookie>,<cookie>,1:` каждые ≈8 с, окно 21 с) вместо одноразового вызова. Файлы/функции: `csgo_gc/gc_server.cpp` — `ServerGC::ReserveServerForOurCookie()` (сделать повторяемым; обновление через `PostToHost(HostEvent::ReserveServerForQueuedGame, …)`, как уже делает `FakeRoster`), `csgo_gc/gc_server.h` (состояние/таймер), таймер: поток/тик в `ServerGC` (у `SharedGC` нет таймера) либо per-frame в `csgo_gc/steam_hook.cpp` (`Hk_SteamAPI_RunCallbacks`/`RunCallbacks` для srcds, где уже сливаются host-события) — как раньше предлагал §34.6. Не для `-gc_mode` (там Q ведёт `FakeRoster`).
+- Побочные эффекты, которые надо учесть (по коду): постоянно зарезервированный сервер отвергает клиента без cookie (прямой `connect` из консоли → `#Valve_Reject_Reserved_For_Lobby`) и не уходит в hibernate; вход после матча: держать резервацию, пока есть клиенты, допустимо.
+- Опционально (не необходимо для исправления): убрать клиентскую резервацию из `StartServerFlow` (`gc_client.cpp:732-741`, `BuildReservationPayload:459`); Java менять не нужно (assignment корректен); долгосрочно — heartbeat srcds → backend (сейчас backend не знает, жива ли резервация; §56.12).
+
+### 59.10 Live tests required (Claude не может запускать CS:GO/srcds)
+
+1. **Свежий srcds той же командой, один поиск Casual сразу после загрузки карты** (≤ ~15 с после появления консольной строки о готовности/ServerHello): ожидается `0x25 awaiting=0` и `Connecting to public(192.168.1.150:27017)`. Затем **тот же srcds, тот же поиск через ≥ 40 с** без клиента: ожидается `awaiting=127` и «Failed to connect to the match». Это разделяет «истёкшая резервация» и все альтернативы.
+2. **Консоль srcds**: сохранить/сфотографировать строки `-> Reservation cookie …: reason …` от старта до провала (там будет и причина, и момент сброса). Включить в srcds `developer 1`/`net_showudp 1` не обязательно.
+3. **Прямой `connect 192.168.1.150:27017` из консоли клиента**: ожидание — принимается, если резервация уже сброшена; отклоняется (`Reserved_For_Lobby`), если сервер свежий и зарезервирован.
+4. Для исключения `+game_mode 1`: тот же тест 1 на srcds с `+game_mode 0` (только как диагностика; команду пользователя не менять постоянно).
+
+### 59.11 UNRESOLVED / пересечения (не исследовалось)
+
+- Карта: метка реестра ≠ карта srcds (`de_vertigo`); assignment.map берётся из метки [UNRESOLVED].
+- Casual на srcds в competitive-режиме (`+game_mode 1`) — будет ли игровой опыт/`gamemode` корректным после connect [UNRESOLVED, до connect не дошло].
+- Связь с `-gc_mode`/Accept (Q-резервация держит cookie keep-alive'ом, поэтому Accept-серверы этой проблемы не имеют; classic — имеют): наблюдение, не исследование.
+- Клиентская резервация в `StartServerFlow` — вред неизвестен [UNRESOLVED].
+
+### §59 STATUS
+
+| Вывод | Статус |
+|---|---|
+| Назначение backend корректно: `192.168.1.150:27017`, порт/category casual, ответ разбирается C++ без искажений | **CONFIRMED** |
+| Клиентский 9107/0x21 идут на `192.168.1.150:27017`; `127.0.0.1`/`test_server_*`/старый адрес не используются | **CONFIRMED** |
+| `QueueConnect` и `connect` не выполнялись; отказ — на проверке резервации (`0x25 awaiting=127` → `AOS_FAILED`) | **CONFIRMED** |
+| «Failed to connect to the match» = `MMFailedTitle` + `NoOngoingMatch` из ветки `mode==2` `sub_103DF430` | **CONFIRMED** |
+| Проверка резервации не зависит от `game_mode`/map srcds | **CONFIRMED** (исходник) |
+| Plain-`G` резервация на srcds ставится единственный раз (ServerHello) и без обновления гаснет за ≈21–26 с | **CONFIRMED** (код + исходник движка) |
+| Именно это и вызвало `awaiting=127` в a1–a4 | **HIGH CONFIDENCE** (нет консоли srcds; a1 на границе окна) |
+| Тот же корень, что §34 (вариант C); регрессии в §48–§57 для этого пути нет | **HIGH CONFIDENCE** |
+| Прямой connect работает при незарезервированном сервере, matchmaking — нет | **HIGH CONFIDENCE** (исходник; live не проверялось) |
+| Альтернативные причины сброса cookie (`server.dll` competitive-режима, hibernation, другой cookie) | **HYPOTHESIS** (низкая) |
+| Точное время ServerHello относительно a1 | **UNRESOLVED** |
+| Метка карты реестра ≠ карта srcds; Casual на competitive-сервере; вред клиентской резервации | **UNRESOLVED** |
+
+---
+
+## §60. ИСПРАВЛЕНИЕ §59: keep-alive plain-`G` резервации classic-srcds (реализация, офлайн-тесты; live-проверка не проводилась)
+
+Реализация вывода §59 (root cause: plain-`G` резервация ставится один раз на `k_EMsgGCServerHello` и гаснет за ≈21–26 с, поиск после этого получает `0x25 awaiting=127` → «Failed to connect to the match»). §59 не изменялся. Не затронуты: Java backend, Accept/`-gc_mode` поток, `FakeRoster` (кроме общей константы), Panorama, Wingman, inventory/skins, `ClientGC::StartServerFlow` (клиентская резервация `gc_client.cpp:732-741` оставлена как есть, §59.5), адрес/QueueConnect. Git не трогался. **DLL собрана, но не установлена и не запускалась в игре**: `Build\release\csgo_gc\csgo_gc.dll`, 5 920 256 B, SHA-256 `74BFD178639A46ADC17E95DFD10A8D19DA1CF1A960D05ED868BCFAACEA9DA665`; в игре по-прежнему `1b953c31…` (20:43) — копирует пользователь.
+
+### 60.1 Найденные существующие механизмы (проверено перед кодом) — **CONFIRMED**
+
+| Механизм | Где | Как использован |
+|---|---|---|
+| Единственный вызов резервации classic-srcds | `ServerGC::HandleMessage` `k_EMsgGCServerHello` → `SendServerWelcome()` + `ReserveServerForOurCookie()` (`gc_server.cpp`) | точка запуска lease; для `-gc_mode` функция возвращается раньше (`m_testRoster \|\| m_testWaitingForPlayer \|\| StartAcceptTestRoster()`), поэтому второй цикл не возникает |
+| Мост в engine | `HostEvent::ReserveServerForQueuedGame` → `DispatchReserveServerForQueuedGame` → `IVEngineServer::ReserveServerForQueuedGame` (vtable[149]) на host-потоке (`steam_hook.cpp`) | **тот же** вызов и путь; функция теперь возвращает результат движка и умеет тихий режим |
+| Host-поток / per-frame | `Hk_SteamGameServer_RunCallbacks` (srcds main thread, один раз за кадр; уже сливает `GetHostEvents`) | сюда добавлены `Lease::Tick` и обработчик нового `HostEvent::ReservationKeepAlive`; **нового потока нет** |
+| `Hk_SteamAPI_RunCallbacks` | клиентский pump (csgo.exe) | не менялся (лисен-сервер внутри csgo.exe тоже вызывает `Hk_SteamGameServer_RunCallbacks`, но keep-alive там выключен, 60.3) |
+| Keep-alive `FakeRoster` | `test_accept.cpp` `FakeRoster::Impl::Run`: свой поток, `KeepAliveInterval` 8 с, фазы Probe/Accept/Done/Cooldown/Paused, Unreserve+12 с | **не переписывался**: у него другой жизненный цикл (Q-roster, фазы, свой поток и сокет); общий у двух механизмов — только интервал (`ReservationKeepAlive::RefreshSeconds`, константа теперь одна) |
+| Освобождение | `Unreserve` `…,0:` (`CBaseServer::Unreserve`, §42.1) | использован для idle-остановки; в других местах для classic не применялся |
+| Lifecycle клиентов | хуки `BeginAuthSession` / `EndAuthSession` (`steam_hook.cpp`), уже зовут `NetworkingServer::ClientConnected/Disconnected` | добавлены уведомления lease (клиент вошёл/вышел) |
+
+### 60.2 Что изменено и почему
+
+| Файл | Изменение |
+|---|---|
+| `csgo_gc/reservation_keepalive.h` (**новый**, header-only) | `ReservationKeepAlive::Lease`: состояния `Inactive → Active → Stopped(Idle/Refused/Shutdown)`; `Start(cookie, now, reserve)`, `Tick(now, reserve)`, `Stop(reason)`, `ClientJoined/ClientLeft(now)`; `Payload(cookie, reserve)` = ровно прежняя строка `G%llx,%llx,1:` (и `…,0:`); константы `RefreshSeconds=8`, `DefaultIdleSeconds=1800`, `MaxConsecutiveFailures=3`. Без потока и без своих часов: время и вызов `ReserveServerForQueuedGame` приходят снаружи → тестируется офлайн |
+| `csgo_gc/gc_shared.h` | `HostEvent::ReservationKeepAlive` (`id` = cookie) |
+| `csgo_gc/gc_server.h/.cpp` | член `m_reservationLease` (лог через `Platform::Print("[MM] …")`, idle из конфига), `SetDedicated`, `NoteClientJoined/Left`, `ReservationLease()`; `ReserveServerForOurCookie()`: для dedicated без `-gc_mode` вместо разового `PostToHost(ReserveServerForQueuedGame)` шлёт `HostEvent::ReservationKeepAlive`, для listen-сервера — прежнюю разовую резервацию (та же строка); деструктор останавливает lease (`Shutdown`); обновлён комментарий |
+| `csgo_gc/steam_hook.cpp` | `s_dedicated` (из `SteamHookInstall(dedicated)`) → `ServerGC::SetDedicated`; `DispatchReserveServerForQueuedGame(payload, verbose=true)` возвращает `bool` результата движка, при `verbose=false` не печатает своих строк; в `Hk_SteamGameServer_RunCallbacks`: `Lease::Tick` каждый кадр (до проверки `BLoggedOn`, резервация — работа движка) и `case HostEvent::ReservationKeepAlive` → `Lease::Start`; `BeginAuthSession` → `NoteClientJoined`, `EndAuthSession` → `NoteClientLeft` |
+| `csgo_gc/config.h/.cpp`, `examples/config.txt` | `matchmaking.reservation_idle_seconds` (default 1800, `0` = без ограничения), `GCConfig::ReservationIdleSeconds()` |
+| `csgo_gc/test_accept.cpp` | `FakeRoster::KeepAliveInterval` = `ReservationKeepAlive::RefreshSeconds` (значение то же, 8 с; одна константа вместо двух) |
+| `offline_tests/reservation/` (**новый**) | `keepalive_test.cpp`, `build.bat`, `README.md` |
+| `offline_tests/roster/build.bat` | копирует `reservation_keepalive.h` (его теперь включает `test_accept.cpp`) |
+
+### 60.3 Механизм keep-alive и жизненный цикл
+
+**Механизм [CONFIRMED (код, сборка, офлайн-модель)].** `ServerHello` (GC-поток) → `PostToHost(HostEvent::ReservationKeepAlive, GameServerCookieId)` → host-поток в `Hk_SteamGameServer_RunCallbacks`: `Lease::Start` немедленно резервирует (`G<cookie>,<cookie>,1:`, с прежними строками лога `[MM] Calling…/result`) и взводит цикл; далее **каждый кадр** `Lease::Tick`: если прошло ≥ 8 с — повторный `ReserveServerForQueuedGame` с тем же cookie/payload, **тихий** в мосте, одна строка лога от lease за интервал. Второй `Start` с тем же cookie игнорируется — контур один. Интервал 8 с при окне движка 21 с (`sv_mmqueue_reservation_timeout`, допустимо 5..180) переживает два потерянных обновления.
+
+**Состояния и переходы.**
+- *Inactive* — резервации нет: srcds ещё не получил ServerHello; `-gc_mode` (резервацией владеет Q-roster `FakeRoster`); listen-сервер (внутри csgo.exe, прежняя разовая резервация).
+- *Active* (резервация и keep-alive живы) — вход: `Start` (ServerHello dedicated без `-gc_mode`), либо повторный запуск после idle-остановки при входе клиента.
+- *Stopped(Idle)* — сервер **пуст** и не было входов/выходов клиентов `reservation_idle_seconds` (default 30 мин; счёт от старта или от ухода последнего клиента): отправляется `Unreserve` (`…,0:`), обновления прекращаются, движок сам снимает cookie. **Пока на сервере есть хотя бы один клиент, lease не истекает** (матч длиннее lease не приводит к потере резервации). Вход клиента (`BeginAuthSession`) заново запускает остановленный lease («re-armed by client activity»).
+- *Stopped(Refused)* — движок отказал 3 раза подряд (`sv_ShutDown_WasRequested`, чужой cookie, `VEngineServer023` не найден); успешное обновление сбрасывает счётчик; провал самой первой резервации не фатален (повторяется обновлением).
+- *Stopped(Shutdown)* — `~ServerGC` (процесс/сервер завершается).
+- «Матч/назначение закончились»: srcds **не получает** такой сигнал (backend не менялся, heartbeat/API не добавлялись) — приближается idle-lease по пустому серверу. Это осознанное ограничение (60.6).
+
+**Логи (`[MM]` + консольный префикс `[GC]`):** `Reservation keep-alive started cookie=293a206f6c6c6548 refresh=8s idle-lease=1800s`; `Reservation keep-alive refresh cookie=… result=1 (#N)` (одна на интервал); `Reservation keep-alive stopped cookie=…: server empty for the idle lease, reservation released | the engine refuses the reservation | server shutting down`; `Reservation keep-alive re-armed by client activity cookie=…`; `[MM] Queueing server reservation keep-alive on host thread` (постановка). Строк `Calling IVEngineServer…`/`result` на каждое обновление **нет** (только у первой резервации и у `FakeRoster`).
+
+### 60.4 Тесты
+
+| Проверка | Результат |
+|---|---|
+| `offline_tests\reservation\keepalive_test.exe` — настоящий `reservation_keepalive.h` против модели правил движка (`baseserver.cpp`/`sv_main.cpp`: срок 21 с, сброс cookie у пустого сервера через 5 с после истечения, `Unreserve`), собственные часы | **78 проверок, 0 провалов** |
+| 1. резервация создаётся, payload байт-в-байт `G293a206f6c6c6548,293a206f6c6c6548,1:` | pass |
+| 2/3. keep-alive стартует; до 8 с обновлений нет, потом раз в 8 с (за 60 с: 7 обновлений, 7 строк лога, не по кадру) | pass |
+| 4. второй/третий `Start` не создаёт второй контур | pass |
+| 5. `Stop` прекращает обновления (300 с тишины), повторный `Stop` не логирует второй раз | pass |
+| 8. cookie и payload одинаковы во всех вызовах (120 с) | pass |
+| Регрессия §59: разовая резервация к 40 с даёт `awaiting=127`; с lease через 40 с и через 10 мин — `awaiting=0` | pass |
+| Жизненный цикл: idle-остановка с `Unreserve`; продление активностью; повторный запуск при входе клиента; не «мгновенный» повторный запуск после остановки; `0` = без лимита (3 ч); матч 3 ч при lease 60 с; lease считается от ухода последнего клиента; `ClientLeft` без `ClientJoined` не уводит счётчик ниже нуля | pass |
+| Движок отказывает: остановка на 3-м подряд, сброс счётчика успехом, повтор первой неудачной резервации | pass |
+| Уведомления клиентов из другого потока при работающем `Tick` | pass |
+| Мутационная проверка (убрал сброс флага re-arm при остановке) | тест **упал** (2 провала) — тест чувствителен |
+| 6/7. `-gc_mode`/`FakeRoster` не сломан: `roster\controller_test.exe` (таблица решений) | ALL PASSED (0 failed) |
+| 6/7. `roster\roster_e2e.exe 1050166997 10 20000 legacy` (реальные `FakeRoster`+`test_accept.cpp`, UDP-заглушка движка) после смены константы | цепочка прежняя: 9 fake `stage 1 confirmed` → popup `awaiting=0` → 9 fake `stage 2` → `awaiting=0 total=10`; без TIMEOUT |
+| Сборка `csgo_gc.dll` (`build_local.bat`), в тронутых файлах предупреждений нет; в DLL присутствуют все новые строки лога | OK |
+
+**Не покрыто офлайн [UNRESOLVED до live-теста]:** проводка `ServerGC`/`steam_hook.cpp` (событие, `Tick` в pump, хуки `Begin/EndAuthSession`, чтение конфига) — компилируется в DLL, но без игры не исполняется; реальное поведение `engine.dll` 1352 (модель построена по утёкшему исходнику).
+
+### 60.5 Ограничения и побочные эффекты — **HIGH CONFIDENCE (по коду/исходнику), live не проверялось**
+
+1. Пока lease активен (сервер пуст < 30 мин или есть игроки), сервер **зарезервирован**: прямой `connect 192.168.1.150:27017` без cookie движок отклоняет `#Valve_Reject_Reserved_For_Lobby` (`baseserver.cpp:1042-1050`); зарезервированный сервер не уходит в hibernate. Для отладки прямым connect: остановить lease (`reservation_idle_seconds` малым значением) или запускать без Casual-поиска до истечения.
+2. Backend по-прежнему не знает, жива ли резервация, и не сообщает srcds о конце назначения (`heartbeat` — вне области). Сервер, пустой дольше idle-lease, теряет резервацию; поиск, назначенный после этого, снова получит `awaiting=127`, пока клиент не подключится (re-arm по входу игрока — прямой connect). Значение idle меняется в `config.txt` srcds (`reservation_idle_seconds`, 0 = без лимита).
+3. Интервал 8 с рассчитан на дефолт 21 с; при понижении `sv_mmqueue_reservation_timeout` ниже ≈9 с потребуется другой интервал (диапазон движка 5..180).
+4. Несбалансированные `BeginAuthSession`/`EndAuthSession` (сбой без `End`) оставят счётчик клиентов > 0 и lease без idle-остановки до выхода процесса.
+5. Listen-сервер csgo.exe: прежняя разовая резервация (осознанно не менялась).
+6. Pump `Hk_SteamGameServer_RunCallbacks` работал у hibernating srcds и раньше (первая резервация и keep-alive `FakeRoster` отрабатывали) — **HIGH CONFIDENCE**, что refresh идёт и на «пустом» сервере.
+
+### 60.6 Live-тест (запускает пользователь; Claude не может запускать CS:GO/srcds)
+
+**Подготовка.** Скопировать собранную DLL в игру (это шаг пользователя): `D:\csgo2021_gc\Build\release\csgo_gc\csgo_gc.dll` → `C:\Program Files (x86)\Steam\steamapps\common\csgo legacy\csgo_gc\csgo_gc.dll` (SHA-256 `74BFD178…A665`). Порядок запуска — **сначала клиент, потом srcds** (`gc_log.txt` общий и удаляется при старте процесса), лог копировать сразу после теста. Команда srcds — **ваша, без изменений**:
+
+```
+srcds.exe -game csgo -console -usercon -insecure -ip 192.168.1.150 -port 27017 +game_type 0 +game_mode 1 +map de_vertigo
+```
+
+**Тест A (положительный).**
+1. Запустить srcds, дождаться загрузки карты. В `gc_log.txt`: `[MM] Queueing server reservation keep-alive on host thread`, `Reservation keep-alive started cookie=293a206f6c6c6548 refresh=8s idle-lease=1800s`, первая пара `Calling IVEngineServer::ReserveServerForQueuedGame / result: 1`, затем строка `Reservation keep-alive refresh cookie=293a206f6c6c6548 result=1 (#N)` примерно раз в 8 с. В консоли srcds `-> Reservation cookie 293a…` печатается один раз (обновление с тем же cookie новых строк не даёт).
+2. Подождать **не меньше 40 с** (лучше 2–3 мин): строки `refresh … #N` продолжают идти.
+3. Backend запущен, сервер 27017 в реестре (категория Casual, как сейчас). Запустить Casual matchmaking.
+4. Проверить в `gc_log.txt`/`console.log`: `UDP 0x21 SENT to 192.168.1.150:27017: stage=2`; **`UDP 0x25 RECV … stage=2 awaiting=0 total=0`** (раньше `awaiting=127`); `QueueConnect RAISED (… variant=1 …)` затем `variant=2`; в `console.log` `Connecting to public(192.168.1.150:27017)` → `Connected to 192.168.1.150:27017`; нет попапа «Failed to connect to the match».
+5. Повторить поиск ещё 2–3 раза (в т.ч. после выхода с сервера): каждый раз `awaiting=0`.
+
+**Тест B (отрицательный жизненный цикл — keep-alive прекращается).** В `csgo_gc\config.txt` (тот же файл читает и клиент, это безвредно) добавить в блок `matchmaking`: `"reservation_idle_seconds" "90"`.
+1. Клиент → srcds, **никого не подключать**. Через ~90 с в логе: `Reservation keep-alive stopped cookie=293a206f6c6c6548: server empty for the idle lease, reservation released`; строки `refresh` **больше не появляются** (наблюдать ≥ 1 мин). В консоли srcds ожидается `-> Reservation cookie 0: reason …` в пределах ~5–26 с после освобождения.
+2. Запустить Casual-поиск: ожидаемо `awaiting=127` (резервации нет) — это подтверждает, что остановка реальна.
+3. Прямой `connect 192.168.1.150:27017` с клиента: сервер принимает (не зарезервирован); в логе `Reservation keep-alive re-armed by client activity cookie=…`, затем `started`, `refresh…` возобновляются; пока клиент на сервере — остановок нет (даже дольше 90 с). После выхода клиента через 90 с — снова `stopped … released`.
+4. Завершение: `quit` в консоли srcds → в `gc_log.txt` `Reservation keep-alive stopped … server shutting down` (если сервер был Active), затем `ServerGC destroyed`.
+После теста вернуть/удалить `reservation_idle_seconds` (по умолчанию 1800).
+
+**Тест C (регрессия `-gc_mode`).** srcds `-gc_mode competitive` (как в §53): в логе **нет** ни одной строки `Reservation keep-alive`; Q-roster/fake-flow как раньше (`[MM-ACCEPT]`, `[FAKE-MM]`). Запуск локальной игры с ботами (listen-сервер) — тоже без строк `keep-alive`.
+
+### 60.7 Открыто / не входит в этот фикс
+
+- Сигнал «назначение закончилось/сервер больше не нужен» от backend (heartbeat/`release`) — не реализовывался (по запросу без изменений Java); idle-lease — его локальное приближение [UNRESOLVED как полное решение].
+- `ClientGC::StartServerFlow` клиентская резервация (§59.5) — оставлена.
+- Accept/Wingman/inventory/§58 — без изменений.
+
+### §60 STATUS
+
+| Вывод | Статус |
+|---|---|
+| Keep-alive реализован на существующем host-потоке/per-frame pump и существующем `ReserveServerForQueuedGame`-мосте, без нового потока и без изменений Java | **CONFIRMED** (код, сборка) |
+| Payload/cookie идентичны прежним; второй независимый контур невозможен; `-gc_mode` и listen-сервер не затронуты (lease `Inactive`) | **CONFIRMED** (код + офлайн-тесты) |
+| Lease по модели правил движка держит резервацию через 40 с и 10 мин; разовая — нет (воспроизведён §59) | **CONFIRMED** (офлайн-модель), **HIGH CONFIDENCE** для реального `engine.dll` |
+| Idle/останов/re-arm/отказ/shutdown работают как описано; игроки на сервере продлевают lease | **CONFIRMED** (офлайн, 78 проверок, мутационная проверка) |
+| `FakeRoster`/`controller_test` не сломаны сменой константы | **CONFIRMED** (controller_test, e2e legacy) |
+| Проводка в `ServerGC`/`steam_hook.cpp` исполняется в игре, Casual после ≥ 40 с простоя получает `awaiting=0` и подключается | **UNRESOLVED** до live-теста 60.6 (A) |
+| Отрицательный lifecycle (idle-остановка, re-arm, shutdown) в игре | **UNRESOLVED** до live-теста 60.6 (B) |
+| Сервер, пустой дольше idle-lease, снова даёт `awaiting=127` до входа клиента; прямой connect отклоняется, пока резервация активна | **HIGH CONFIDENCE** (исходник движка), live не проверялось |
+
+---
+
+## §61. READ-ONLY АУДИТ: Training / тренировка с ботами — «Invalid User Info» (код, конфиги и Git не менялись)
+
+Область: локальная игра с ботами (listen-сервер внутри `csgo.exe`), отдельный от matchmaking путь. Не исследовались: Accept/fake/popup/keep-alive (§58–§60), Wingman, inventory/skins, Panorama. Источники: `csgo\console.log` (2 отказа: строки 19346 и 23618), `gc_log.txt` (00:01), утёкший исходник движка (`engine\baseserver.cpp`, `sv_main.cpp`, `net_support.cpp`), `csgo_gc\gc_client.cpp` / `gc_server.cpp`, `bin\engine.dll` (строковые константы).
+
+### 61.1 Observed failure — **CONFIRMED**
+
+Первый запуск Training в сессии `csgo.exe`, где до этого был **не-Accept** matchmaking-поиск, всегда даёт (обе сессии в `console.log`, 2 из 2):
+
+```
+[GC] ServerGC spawned                                   (listen-сервер тренировки)
+[GC] Using SteamGameServer014
+Could not establish connection to Steam servers.        (анонимный listen-GS без логона — как и раньше)
+[GC] SendMessageToUser failed for 76561199010432725: 2  (клиент шлёт NetworkConnect сам себе, §57)
+mismatching cookie from loopback, client 0, server 293a206f6c6c6548!
+RejectConnection: loopback - Invalid user info.
+Invalid user info.                                       → ChangeGameUIState … LOADINGSCREEN -> MAINMENU
+```
+
+Повторный запуск Training в той же сессии проходит (`Executing server command … map de_mirage reserved dontmodifylocalsession` → `Host_NewGame` → `INGAME`, без `mismatching cookie`).
+
+### 61.2 Exact source of the string — **CONFIRMED**
+
+`CBaseServer::ConnectClient` (`baseserver.cpp:686-726`): если у сервера `GetReservationCookie() != 0`, то `cl_session` из userinfo подключающегося клиента (`"$<cookie>"`, его ставит `QueueConnect`/`UpdateClientReservation`) **обязан совпасть** с cookie сервера; при несовпадении `Warning("mismatching cookie from %s, client %llx, server %llx!")` и `RejectConnection(adr, "Invalid user info.\n")`. В этой проверке (`ConnectClient`) нет исключения для локального игрока; исключение «на listen-сервере локальный игрок проходит при любом cookie» (`baseserver.cpp:~1029`) относится к более ранней проверке в обработчике connect-запроса и не отменяет валидацию в `ConnectClient` (её лог мы и видим: `mismatching cookie from loopback`), поэтому loopback тоже отклоняется. Обе строки есть в установленном `bin\engine.dll` (`mismatching cookie from`, `Invalid user info`, по 1 вхождению). Клиент тренировки не проходит `QueueConnect` → его `cl_session` = 0 (в логе `client 0`). То есть отказ рождается в **`engine.dll`**, не в `client.dll`/`server.dll`, и не в GC-сообщениях.
+
+### 61.3 Whose cookie — **HIGH CONFIDENCE (источник), CONFIRMED (значение)**
+
+`server 293a206f6c6c6548` = `GameServerCookieId` (константа сборки csgo_gc). Пути, которыми этот cookie мог оказаться на `sv` процесса `csgo.exe`:
+
+1. **`ClientGC::StartServerFlow` для non-Accept режимов** (`gc_client.cpp:732-741`, `BuildReservationPayload:459` → `G<cookie>,<cookie>,1:[<account>]`) — вызывает `IVEngineServer::ReserveServerForQueuedGame` **в самом csgo.exe**. В `console.log` это видно строкой `-> Reservation cookie 293a206f6c6c6548: reason ReserveServerForQueuedGame: G293a…,293a…,1:[3e9846d5]` (движок клиента) — она есть в **обоих** отказавших сессиях и **до** отказа (стр. 18731 → отказ 19346; 22945 → отказ 23618). Для Accept-режимов эта ветка не выполняется (`return` раньше, `gc_client.cpp:729`) — в сессиях, где были только Accept-поиски, строки нет. Клиентский `sv` — тот же глобальный объект, который потом становится listen-сервером тренировки.
+2. `ServerGC::ReserveServerForOurCookie` **listen-сервера** (одноразовая резервация при ServerHello, §60 её сохранил для `!dedicated`): в отказавших запусках **не** наблюдается — между `ServerGC spawned` и отказом нет ни `[MM] Queueing server reservation`, ни `Calling IVEngineServer…` (а обработка host-событий вообще требует `BLoggedOn`, у listen-GS логона нет). Это второй потенциальный источник в игре, где GS залогинился быстро — **HYPOTHESIS**, логов такого запуска нет.
+
+**Почему cookie «живёт»:** в исходнике очистку/просрочку резервации (`UpdateReservedState`) вызывает только `SV_Think` для **dedicated** (`sv_main.cpp:3331-3333`, `if (sv.IsDedicated())`); конструктор `CBaseServer` обнуляет cookie один раз при старте процесса (`baseserver.cpp:346`). Поэтому cookie, поставленный клиентской резервацией, остаётся на `sv` до явного `SetReservationCookie(0…)` — **HIGH CONFIDENCE**. Второй запуск тренировки проходит, то есть cookie к тому времени сброшен (наблюдается); чем именно (`SetHibernating(true)` при остановке провалившегося сервера, `CNetSupportImpl::UpdateServerReservation(0)` при закрытии matchmaking-сессии) — **UNRESOLVED**.
+
+### 61.4 Сравнение Training с Casual/обычным матчем — **CONFIRMED**
+
+| | Casual (удалённый srcds) | Training (listen) |
+|---|---|---|
+| цель | чужой `srcds`, cookie проверяет **тот** сервер | `sv` того же процесса `csgo.exe` |
+| `cl_session` клиента | `$293a…` (QueueConnect → `PrepareClientForConnect`, §38.9) | 0 |
+| cookie сервера | тот же (`G` keep-alive, §60) | остаточный из `StartServerFlow` |
+| результат | принимается | `Invalid user info` |
+| роль клиентской резервации | **не нужна** (резервирует srcds сам) | вредит |
+
+### 61.5 Что НЕ является причиной — **CONFIRMED / HIGH CONFIDENCE**
+
+- Не `-gc_mode` и не keep-alive §60: `Lease` живёт только на srcds (`m_dedicated=true`); в csgo.exe он `Inactive`. Отказ есть и в сессии **до** §60 (стр. 19346, DLL до 20:43) — поэтому «регрессия последних изменений» **не подтверждена**: механизм существует с §33 (клиентская резервация), а проявляется в сессии после любого non-Accept поиска (Casual/Deathmatch/Arms Race/Demolition/Skirmish).
+- Не `CMsgClientHello/ClientWelcome`, не `CMsgGCCStrike15_v2_*`, не `ServerHello`, не SteamID/AccountID: `Could not establish connection to Steam servers` и `SendMessageToUser failed … 2` присутствуют и в успешных тренировках (§57: listen-сервер шлёт `NetworkConnect` самому себе), user-info-подмены нашим GC нет (`ServerGC` ничего не отдаёт в `ConnectClient`).
+- Наши хуки, вмешивающиеся в путь: `SteamHookInstall`/`Hk_SteamGameServer_RunCallbacks` (pump listen-GC), `BeginAuthSession`/`EndAuthSession`, `DispatchReserveServerForQueuedGame` (единственный, что реально пишет cookie в `sv`) — вызывается для клиентской резервации из `Hk_SteamAPI_RunCallbacks`.
+
+### 61.6 Minimal fix concept (только концепция; код не менялся)
+
+Клиентский процесс не должен резервировать свой `sv` для удалённого сервера: (a) убрать/выключить клиентскую резервацию в `ClientGC::StartServerFlow` (`gc_client.cpp:732-741`, вместе с `BuildReservationPayload`) — `csgo_gc/gc_client.cpp`; (b) страховка: перед стартом listen-сервера/при входе в Training отправлять `Unreserve` (`G…,0:`) через тот же мост, либо не резервировать listen-сервер в `ServerGC::ReserveServerForOurCookie` для `!m_dedicated` (`csgo_gc/gc_server.cpp`) — закрывает гипотетический путь 2. Затрагивать не нужно: srcds keep-alive (§60), Accept-flow, `Hk_SteamGameServer_RunCallbacks` для dedicated.
+
+### 61.7 Live tests
+
+1. Свежий `csgo.exe` → Training сразу (без поиска): ожидается успех (проверка «без leftover-cookie» — в логах такого прогона нет).
+2. Свежий `csgo.exe` → Casual-поиск (любой) → Training: ожидается отказ `mismatching cookie … server 293a…` (воспроизведение), затем повтор Training — успех.
+3. Свежий `csgo.exe` → только Accept-поиск (Competitive) → Training: ожидается успех (строки `-> Reservation cookie` в клиенте нет).
+4. В консоли клиента перед Training: `sv_mmqueue_reservation` (значение cvar) — ожидается `G293a…` после Casual-поиска, пусто в остальных случаях.
+
+### §61 STATUS
+
+| Вывод | Статус |
+|---|---|
+| Строка рождается в `CBaseServer::ConnectClient` (`engine.dll`): cookie сервера ≠ `cl_session` клиента (0) → `Invalid user info` | **CONFIRMED** (исходник + строки в `engine.dll` + лог) |
+| Cookie сервера = `GameServerCookieId`, остаточный из клиентской резервации non-Accept `StartServerFlow` | **HIGH CONFIDENCE** (совпадение по 2 из 2 сессий, отсутствие иного источника в логе; прямого чтения `sv_mmqueue_reservation` нет) |
+| Cookie переживает до явного сброса, т.к. просрочку делает только dedicated-`SV_Think` | **HIGH CONFIDENCE** (исходник) |
+| Второй запуск проходит, потому что cookie сброшен; чем именно | **UNRESOLVED** |
+| Регрессия из-за §59/§60 | **опровергнуто логом** (отказ до §60); Training ранее работал/не работал после non-Accept поиска — **UNRESOLVED** (в старых логах нет запусков Training) |
+| Резервация самого listen-`ServerGC` тоже может дать этот отказ | **HYPOTHESIS** |
+
+---
+
+## §62. READ-ONLY АУДИТ: как убрать War Games («Военные игры») из Panorama UI (ничего не менялось и не паковалось)
+
+Область: только UI выбора режима. Не удалять protobuf/GC/`mm_modes`/backend/серверную поддержку. Источники: текущий `csgo\panorama\code.pbin` (4 505 846 B, SHA-256 `d160aca2…`, **идентичен** `panorama_originals_backup_20260913_004021\code.pbin` → не модифицирован; извлечён целиком в scratchpad: 705 записей, все stored, `PAN\x02` + 512-байтный RSA-блок + `PK`-записи), `csgo\gamemodes.txt`, `csgo\resource\csgo_english.txt`, `pbin_source.py` из `Downloads\csgo_gc-master` (reference; рабочие каталоги `panorama_workspace`, `panorama_workspace2` **идентичны** текущим `mainmenu_play.js/.xml`).
+
+### 62.1 Где находится War Games — **CONFIRMED**
+
+- «War Games» = `#SFUI_GameModeSkirmish` (`csgo_english.txt`: `"SFUI_GameModeSkirmish" "War Games"`, `SFUI_GameMode_skirmish` «War Games», описания `…DescList` «Each War Game has custom rules»).
+- **Единственная точка выбора режима в меню Play** — кнопка в статичном XML: `panorama\layout\mainmenu_play.xml`, панель `#GameModeSelectionRadios`, `<RadioButton id='skirmish' group="gamemodes"><Label text="#SFUI_GameModeSkirmish"/></RadioButton>` (строки 318-321; рядом `competitive`, `scrimcomp2v2`, `casual`, `deathmatch`, `survival`, `cooperative`, `coopmission`). Список режимов **не hardcoded в JS и не строится из `items_game.txt`/`gamemodes.txt`**: набор радиокнопок — это дети `#GameModeSelectionRadios` (`mainmenu_play.js:172-173`, `m_arrGameModeRadios = elGameModeSelectionRadios.Children()`).
+- Содержимое War Games (плитки карт/режимов) приходит из **`GameTypesAPI.GetConfig()`** (native, читает `csgo\gamemodes.txt`): `_Init` (`mainmenu_play.js:~118`) собирает `m_gameModeConfigs[mode]`, `_GetAvailableMapGroups(gameMode, isOfficial)` (`:1216`) отдаёт `mapgroupsMP` (online) / `mapgroupsSP` (offline). Для `skirmish` в этой сборке (`gamemodes.txt:738-741` и `754-757`): `mg_skirmish_armsrace`, `mg_skirmish_demolition`, `mg_skirmish_flyingscoutsman`, `mg_skirmish_retakes` (остальные — закомментированы). Каждая плитка — map group; выбранный «single skirmish» уходит в session settings как `mapgroupname` (`mainmenu_play.js:2784-2786`, `2839-2849`).
+- Радиокнопки вида `skirmish_<id>` (single-skirmish) JS поддерживает (`_IsSingleSkirmishString`, `m_arrSingleSkirmishMapGroups`), но в этом XML их **нет** — только общий `skirmish`.
+
+### 62.2 Какие места завязаны на режим `skirmish` в UI — **CONFIRMED**
+
+| Файл / функция | Роль | Нужно менять? |
+|---|---|---|
+| `layout\mainmenu_play.xml:318-321` | сама радиокнопка War Games | удалить/скрыть (вариант A) |
+| `scripts\mainmenu_play.js` `_IsGameModeAvailable(serverType, gameMode)` (`:~620-680`) | вызывается для КАЖДОЙ радиокнопки при обновлении (`m_arrGameModeRadios[i].enabled = isAvailable && isEnabled`, `:843`) и в `_ValidateSessionSettings`; уже содержит прецедент: для `cooperative`/`coopmission` делает `_SetGameModeRadioButtonVisible(gameMode, bAvailable)` (скрывает кнопку, `visible=false`) и возвращает `false`; в `isAvailable = (deathmatch \|\| casual \|\| survival \|\| skirmish)` (`:676`, ветка «новый игрок») | **точка минимального изменения (вариант B)** |
+| `mainmenu_play.js` `_ValidateSessionSettings` (`:2676-2722`) | если текущий режим недоступен → берёт `ui_playsettings_mode_<server>` → если и он недоступен → перебирает список `deathmatch, casual, survival, skirmish, scrimcomp2v2, competitive` и берёт первый доступный | не менять: при `_IsGameModeAvailable(…, 'skirmish') == false` `skirmish` пропускается сам; «застрявший» сохранённый режим уходит на `deathmatch/casual` |
+| `mainmenu_play.js` `_UpdateMapGroupButtons`/`_GetRotatingMapGroupStatus`/`k_workshopModes` | плитки карт, workshop-режимы (`armsrace`, `demolition`, `retakes`… как теги workshop-карт, `:38-54`) | не менять (workshop — отдельный путь) |
+| `popups\popup_workshop_mode_select.js`, `popups\popup_activate_mission.js` (`mg_skirmish_*`) | режим для workshop-карт / операционные миссии | не менять (не Play-меню) |
+| `endofmatch-voting.js` (`type == "skirmish"`), `scoreboard.js` | **внутри игры**: голосование за следующий War Game, табло | не менять (не выбор режима в меню; серверный матч Arms Race/Demolition) |
+| `popups\popup_accept_match.js` | `#SFUI_GameMode_<mode>` — подпись режима в Accept | не менять |
+
+### 62.3 Не используется ли тот же список для внутренней логики matchmaking — **HIGH CONFIDENCE**
+
+Радиокнопки — только представление: выбор пишет `m_gameModeSetting`/`m_singleSkirmishMapGroup` → `_ApplySessionSettings` (`:2758-2860`) → `LobbyAPI.UpdateSessionSettings(game.mode, mapgroupname…)`. Нативный композитор `game_type` в `MatchmakingStart` (`sub_10288A90`/`sub_10288960`, §44.5/§54) читает **session settings**, а не Panorama-список. Скрытие кнопки не затрагивает: GC-декодер skirmish (`mm_modes.cpp`, `gc_client.cpp`), backend variants/категории `armsrace/demolition/skirmish`, `gamemodes.txt`. Единственное UI-побочное: `ui_playsettings_mode_<server> = skirmish` в сохранённых настройках/лобби у тех, кто раньше выбирал War Games — обрабатывается `_ValidateSessionSettings` (см. выше); проверять live.
+
+### 62.4 Что делать (предложение, не выполнялось)
+
+- **Вариант B (рекомендуется, минимальный): один JS-фрагмент** в `scripts\mainmenu_play.js`, функция `_IsGameModeAvailable`, по образцу co-op: в начало добавить условие `if ( gameMode === "skirmish" ) { _SetGameModeRadioButtonVisible( gameMode, false ); return false; }`. Радиокнопка скрывается и отключается при каждом обновлении, XML не трогается, логика fallback работает штатно, откат — вернуть файл. Плюс, по желанию, убрать `"skirmish"` из перечислений (`:676`, `:2708`) — не обязательно.
+- Вариант A: удалить блок `<RadioButton id='skirmish'>` (4 строки) из `mainmenu_play.xml`. JS устойчив к отсутствию кнопки (`FindChildInLayoutFile(...)`→`null` проверяется), но остаточный `skirmish`-режим в сессии без радио-кнопки остаётся, пока не сработает fallback (для этого всё равно понадобится правка B) — поэтому A — не самостоятельное решение.
+- Не менять `gamemodes.txt` (его `mg_skirmish_*` читает и наш GC для декодирования/сервер-категорий: правка сломала бы backend-matching, §54).
+- Что исчезнет у пользователя: War Games в Online **и** Offline (bots) режимах меню Play (radio общий); Arms Race/Demolition/Retakes/Flying Scoutsman через меню станут недоступны (кроме workshop и серверного голосования). Competitive, Wingman, Casual, Deathmatch, Danger Zone (`survival`), Cooperative не затрагиваются.
+
+### 62.5 Безопасность упаковки — что надо знать до `pbin pack` — **HIGH CONFIDENCE (по исходнику инструмента), не запускалось**
+
+1. `pbin_source.py` `pbin_pack`: файл-запись **не может стать больше исходной** (`return 2` при `file_size > file_original_size`), меньший дополняется пробелами; порядок и размеры записей фиксированы. `mainmenu_play.js` (115 050 B) содержит длинные пробельные комментарии — размер можно компенсировать обрезкой пробелов.
+2. `pack` требует `code.pbin.table` (создаётся при `unpack`) и запускается из `csgo\panorama` игры; RSA-блок (512 B) пишется **нулями** — то есть модифицированный `code.pbin` не подписан.
+3. Для этого нужен патч `bin\panorama.dll` (`pbin_patch_panorama`: байт `0xEB` по фиксированному смещению для 4 известных md5). **Установленный `bin\panorama.dll` (md5 `6edc2bffbeb57bf8a29b2afd0fcf478b`, 2 533 096 B, 11.09) не входит в список инструмента, `.bak` нет, по смещению 1308935 стоит `0x53` (`push ebx`), а не условный переход** — патч этим инструментом к данной сборке, скорее всего, не применяется (`return 1`), а в самой DLL есть проверка подписи (Crypto++ `RSA/EMSA-PKCS1-v1_5.SHA-1`, строка `panorama/code.pbin`). Как пользователь ранее запускал изменённый `code.pbin` — из этих данных **не видно [UNRESOLVED]**; `project446\bin\panorama.dll` (патченный, 2 545 000 B) — другая сборка.
+4. Перед упаковкой сохранить оригинал (`code.pbin` уже имеет бэкап `panorama_originals_backup_20260913_004021`).
+
+### 62.6 Что проверить live после правки (когда будет разрешено)
+
+Меню Play → режимы: Competitive, Wingman, Casual, Deathmatch, Danger Zone видны и работают; War Games не виден ни в Online, ни в Offline; у пользователя с сохранённым `ui_playsettings_mode_official=skirmish` меню открывается на Casual/Deathmatch; запуск Casual-поиска → `MatchmakingStart game_type` как раньше; отсутствуют ошибки JS в `console.log`.
+
+### §62 STATUS
+
+| Вывод | Статус |
+|---|---|
+| War Games = радиокнопка `id='skirmish'` в `mainmenu_play.xml:318-321` (`#SFUI_GameModeSkirmish` = «War Games») | **CONFIRMED** |
+| Список режимов — статичные дети `#GameModeSelectionRadios`, содержимое War Games — `GameTypesAPI.GetConfig()` (`gamemodes.txt`: armsrace, demolition, flyingscoutsman, retakes) | **CONFIRMED** |
+| Минимальное место: `_IsGameModeAvailable` в `mainmenu_play.js` по образцу co-op (`_SetGameModeRadioButtonVisible(…, false); return false`) | **HIGH CONFIDENCE** (по коду, live не проверялось) |
+| Тот же UI-список не питает нативный композитор `MatchmakingStart` | **HIGH CONFIDENCE** |
+| Скрытие безопасно для Competitive/Wingman/Casual/Deathmatch/Danger Zone; stale-`skirmish` в сохранённых настройках корректно отрабатывает fallback | **HIGH CONFIDENCE** (код), live — **UNRESOLVED** |
+| Текущий `code.pbin` не модифицирован (= бэкап) | **CONFIRMED** |
+| `pbin pack` работает с установленным `panorama.dll` (подпись/патч) | **UNRESOLVED** (md5/смещение не совпадают с инструментом) |
+
+---
+
+## §63. READ-ONLY АУДИТ: lifecycle Accept-матча — timeout Match Found, момент резервации сервера, гонки, fake roster (ничего не менялось)
+
+Область: Accept-режимы (Competitive 10, Wingman 4, Danger Zone 16), Java backend + C++ GC + srcds. Не переписывалось; Wingman как режим отдельно не тестировался (общий код). Источники: `SearchService.java`, `GameServerRepository.java`, `MatchRepository.java`, `FakeSearchRepository.java`, `SearchReaper.java`, `BackendProperties.java`; `gc_client.cpp`, `backend_client.cpp`, `server_roster.cpp`, `test_accept.cpp`, `gc_server.cpp`; копия БД backend (`target\data\matchmaking.db`), логи прогона §58/§60; IDA-разбор `client_panorama.dll` (`sub_103D9900` → `sub_103D9E70`); §38–§40, §51, §54–§60.
+
+### 63.1 Current lifecycle (что реально происходит) — **CONFIRMED (код)**
+
+| Шаг | Где | Что происходит |
+|---|---|---|
+| 1. search создаётся | `SearchService.start` (`:108`) | вставка `matchmaking_search` (SEARCHING); `releaseAbandonedMatches` (новый поиск отпускает прежний READY-матч, если игрок в нём один) |
+| 2. matcher | `runMatcher` (каждый `start`/`poll`/`cancel` и `SearchReaper.tick` раз в 1 с) → `place` (`:291`) | для Accept-категории сначала ищет FORMING-матч той же категории с совместимой картой (`findForming` + `mapCompatible`) и **входит в него** |
+| 3. server выбирается | `place` → `pickServer` (`:325-360`) | если формирующегося матча нет — берётся свободный сервер категории (`findFree`: `enabled ∧ state='AVAILABLE'`, порядок по `last_assigned_at`), карта сервера ∈ карт игрока |
+| 4. **backend reservation** | `createMatch` → **`servers.reserve(...)`** (`:377`, SQL `UPDATE … SET state='RESERVED', reserved_match_id … WHERE id=? AND state='AVAILABLE'`) | **происходит здесь: в момент создания матча, то есть когда ПЕРВЫЙ игрок начал поиск**, матч имеет статус FORMING и `players=1/N`. Для non-Accept — `markAssigned` без резервации (§54) |
+| 5. match | `matches.insert(FORMING)`; `join` → search `MATCHED` | лог `match … created … server … is RESERVED` |
+| 6. набор | `join` (реальные), `fillFormingMatches` (`:504`, fake: не создают матч и не берут сервер, только входят в FORMING, якорь — живой реальный поиск) | `playerCount ≥ requiredPlayers` → `completeMatch` |
+| 7. match complete | `completeMatch` (`:409`) | `matches.markReady` (READY); если srcds читает roster с backend (`serverReadsRoster`: опрос ≤ 10 с назад) — игроки остаются MATCHED, пока srcds не подтвердит (`POST /servers/roster/ready`) или не пройдёт `roster-ack-timeout` PT25S (`promoteMatchesWaitingForTheirServer`, `:444`); иначе — сразу `assignMembers` → **WAITING_ACCEPT** |
+| 8. Match Found | C++ GC (`backend_client.cpp` poll 1 с → `Deliver` → `ClientGC::StartServerFlow`) | 9107 #1 с `reservation.game_type` → client.dll создаёт callback `(1,0)` → 0x21 stage 1 |
+| 9. **engine reservation** | srcds, `-gc_mode` (`gc_server.cpp` `StartAcceptTestRoster`, `server_roster.cpp` `Controller::Apply`) | **не при поиске и не при FORMING**: backend-путь взводит `Q<cookie>,<cookie>,1:[roster]` только когда snapshot roster сервера `Complete()` (`state==Match ∧ status=="READY"`, `server_roster.h:45`); legacy-путь — по первому `0x21` реального игрока (после выдачи назначения). FORMING-матч srcds виден в `GET /servers/roster`, но `Apply` его игнорирует (`return`) |
+| 10. keep-alive engine | `FakeRoster` (§46/§55): `Q` повторяется каждые 8 с | стартует с armReservation (`postReserve`) и до Paused/Cooldown; для classic-srcds — `ReservationKeepAlive::Lease` с ServerHello (§60) |
+
+**Ответ на гипотезу пользователя.** «Сервер резервируется слишком рано» — **подтверждается для backend-резервации** (`game_server.state='RESERVED'` с первого игрока, `SearchService.java:371-380` + `place:291-315`): сервер = «слот очереди», и вместе с матчем FORMING он недоступен другим поискам. **Не подтверждается для engine-резервации** (`ReserveServerForQueuedGame`): она идёт только после READY (backend-roster) или после выдачи назначения (legacy). §51/§54 разделили только «Accept → reserve / non-Accept → markAssigned»; момент вызова `reserve` для Accept не менялся с §49.
+
+Подтверждение по БД (прогон §58): search 23 создан в `1789840556406` мс (epoch), матч `m-dc9b3b6e` создан `556457` (через 51 мс), READY `556569` (через 112 мс — fake вошли); a5: search 24 → матч `m-1866d194` создан при старте поиска (сервер RESERVED), без fake остался FORMING «1/10», затем CANCELLED.
+
+Практические следствия раннего резервирования (не причина timeout-проблем): (а) при N серверах одной категории одновременно могут формироваться максимум N матчей; (б) сервер числится RESERVED всё время поиска первого игрока (живой поиск обновляется опросом GC раз в секунду; `staleSearchTimeout` PT15M), в админке он «занят», хотя матча ещё нет; (в) компенсация: `dissolve` при уходе всех игроков FORMING-матча возвращает сервер в AVAILABLE (`releaseMatchIfEmpty`, `:570-590`).
+
+### 63.2 Timeout lifecycle — **CONFIRMED / HIGH CONFIDENCE**
+
+**Кто сейчас обрабатывает timeout Accept: никто.** По компонентам:
+
+| Компонент | Что делает при истечении таймера | Статус |
+|---|---|---|
+| **Panorama** (`popup_accept_match.js`) | таймер = 20 с от показа popup'а (`GetReadyTimeRemainingSeconds`, §58.5), по нулю только скрывает метку; закрыть popup может лишь `PanoramaComponent_Lobby_ReadyUpForMatch(false,…)` → `CloseAcceptPopup`/`UIPopupButtonClicked` | **CONFIRMED** (JS из `code.pbin`, §58) |
+| **client.dll** (`sub_103DF430`) | после нажатия Accept: движковый запрос stage 2 живёт 21×1 с (`baseclientstate.cpp:337`) → `AOS_FAILED` → callback уничтожается; для Accept-callback `mode 0` `RaiseReadyUp(false)` **не вызывается**; без нажатия Accept активного запроса нет — ничего не происходит | **CONFIRMED** |
+| **Accept → GC** | `LobbyAPI.SetLocalPlayerReady('accept')` → `sub_10580C20` → `sub_103DF3A0` (stage 2 + UDP `0x21`); **GC-сообщения нет** (§39.2). `MatchmakingStop` (9102, поле `abandon`) клиент шлёт при ручной отмене и при подключении (§53.5); наш `ClientGC::OnMatchmakingStop` **не читает `abandon`**, лишь `BackendClient::SearchCancelled` + очистка `m_pendingAccept` | **CONFIRMED** |
+| **9104** (`MatchmakingGC2ClientUpdate`) | наш GC **никогда не шлёт**. Retail-обработчик `sub_103D9900`: `matchmaking==3` → `RaiseReadyUp(false,0,0)` (закрыть popup) + маркер `searching`; поле `failready_account_id_sessions` разбирается `sub_103D9E70` (7260 байт, вызывается из `sub_103D9900`): для своего аккаунта показывает диалог `#SFUI_QMM_ERROR_1_FailReadyUp_Title` «YOU FAILED TO ACCEPT» / `…_1_FailReadyUp` («…failed to accept it. You have been removed from the matchmaking queue»), для чужого — `#SFUI_QMM_ERROR_X_FailReadyUp` («A match was found for you, but %s1 failed to accept it») | **HIGH CONFIDENCE** (декомпиляция + локализация; точное сопоставление поля proto ↔ список в декомпиляции не проверялось побайтово) |
+| **9112** (`GC2ClientAbandon`) | только уведомление-попап (§39.2), popup ready-up не закрывает | **CONFIRMED** |
+| **C++ GC клиента** | после `StartServerFlow` `m_activeSearch.active=false`; воркер `BackendClient` прекращает опрос на `IsAssigned()`/`IsEnded()` (`backend_client.cpp:1656`) — **GC перестаёт видеть backend после Match Found**; `AcceptTest::ArmClient` живёт 180 с и только следит за `0x25 stage 2 awaiting 0` | **CONFIRMED** |
+| **backend** | дедлайна Accept нет. Search WAITING_ACCEPT → `COMPLETED` через `assigned-search-timeout` PT2M (`expire`, `:250`), молча; READY-матч и RESERVED-сервер живут до `server-reservation-ttl` PT10M (`:255-266`) или до нового поиска единственного игрока (`releaseAbandonedMatches` → `ENDED`). **Отмена единственным игроком READY-матча сервер не освобождает** (`cancel` → `releaseMatchIfEmpty` работает только для `FORMING`) | **CONFIRMED** |
+| **srcds** (`-gc_mode`) | `FakeRoster`: фаза WaitPopup **без таймаута**; Accept-фаза без таймаута; keep-alive 8 с идёт во всех фазах кроме Paused; `Done` → через 90 с Unreserve + 12 с + новая `Q` **с тем же ростером**; `GaveUp` → 30 с; `Controller::Apply` на `NoMatch` ничего не делает — **при исчезновении/отмене матча srcds свою резервацию не снимает** | **CONFIRMED** |
+
+Отсюда: **popup остаётся** — потому что единственный путь закрытия (`RaiseReadyUp(false)`) вызывается лишь 9104 `matchmaking==3` (GC его не шлёт) или ветками `mode≠0`. **Поиск не продолжается** — GC не следит за backend и не перерегистрирует поиск, клиентский `mmqueue=reserved` остаётся, а backend-search уходит в `COMPLETED`. **Reservation не освобождается** — backend держит RESERVED до TTL/нового поиска, а srcds — Q-резервацию до собственных таймеров (Done 90 с) или замены ростера.
+
+### 63.3 Кто должен владеть timeout — вывод — **HIGH CONFIDENCE (архитектура), HYPOTHESIS (retail-семантика)**
+
+Retail-GC (отсутствует в наших бинарниках) владел бы дедлайном, знал бы кто принял (через `ReportGCQueuedMatchStart`, в retail-`server.dll` заглушка, §40) и слал бы клиентам 9104 (`failready…`/`matchmaking`); что именно делает с принявшими игроками (возврат в очередь) — по коду клиента **не восстанавливается** [UNRESOLVED]. Для нас естественное разделение: **backend** — единственный источник истины для match/server/fake и часов дедлайна; **srcds** — исполнитель engine-резервации и источник факта «все приняли» (stage-счётчики roster движка, `FakeRoster` видит `0x25 stage 2 awaiting 0`); **client GC** — единственный, кто может донести состояние до client.dll (9104, повтор 9101/поиска); **Panorama** — пассивен (закрывается только native-событием).
+
+### 63.4 Race conditions — что есть и чего нет — **CONFIRMED (код)**
+
+Есть: (1) все публичные методы `SearchService` — `synchronized` на одном мониторе (`start/poll/cancel/remove/tick/serversChanged/freeServer/confirmRoster/rosterForServer/fake-API`), `SearchReaper` вызывает `tick()` раз в 1 с через тот же монитор; (2) захват сервера — атомарный условный `UPDATE … WHERE state='AVAILABLE'` (`GameServerRepository.reserve`, `false` → `createMatch` возвращает `null`, поиск остаётся неразмещённым) — два поиска не получают один сервер; `dissolve/releaseAbandonedMatches` освобождают только «свой» матч (`match.id().equals(server.reservedMatchId())`); (3) единственное соединение SQLite.
+Нет: (а) транзакции вокруг `reserve` + `matches.insert` (падение между ними оставляет сервер RESERVED без матча); (б) reaper «сирот»: `GameServerRepository.findReservedBefore` **объявлен, но нигде не используется** — RESERVED-сервер без живого READY/FORMING-матча возвращается только по TTL READY-матча; (в) записи `GameServerService.setState/…` (админ/отчёт сервера) идут не через монитор `SearchService` (защищает только условие SQL); (г) при отложенной резервации (63.6) нужна атомарность «набрано → сервер выбран → RESERVED → assignment» в одном synchronized-участке и обработка «набрано, свободных серверов нет».
+
+### 63.5 Fake roster lifecycle — **CONFIRMED (не исправлено после §60)**
+
+`SearchService.endMatch` (`:281-290`): статус `CANCELLED` → `fakes.unplaceByMatch` (fake обратно в SEARCHING); любой другой (`ENDED`) → `fakes.completeByMatch` (fake навсегда `COMPLETED`, возвращаются только ручным «включить»). Матч, у которого Accept **не удался**, сейчас заканчивается через `ENDED` (новый поиск единственного игрока → `releaseAbandonedMatches`; TTL; `freeServer`), а не `CANCELLED` — поэтому fake после timeout/отмены **COMPLETED** и следующий матч не собирается («MATCHED 1/10», прогон a5 §58). Backend после §60 не менялся (§60 — только srcds keep-alive), то есть **проблема из §58 не исправлена**. `CANCELLED` (fake возвращаются) сейчас возникает только при `dissolve` FORMING-матча.
+
+### 63.6 Proposed minimal architecture (без кода; только переходы)
+
+**Match** (единая машина, backend):
+```
+GATHERING (без сервера; members = real + fake; mapPool = ∩ карт участников)
+   │  required reached
+   ▼
+FULL ──(нет свободного совместимого сервера)──► FULL_WAITING_SERVER (ждёт освобождения)
+   │  атомарно: выбрать server ∈ AVAILABLE, карта ∈ mapPool  →  servers.reserve(server, match)   ← RESERVED только здесь
+   ▼
+ASSIGNED / ACCEPTING   (assignment выдан всем; acceptDeadline = assignedAt + ≈25 с; srcds получает roster)
+   ├── все приняли (сигнал — см. ниже) ──► ACCEPTED ──► connect ──► RUNNING ──► ENDED (fake COMPLETED)
+   ├── acceptDeadline истёк ──┐
+   └── любой участник отменил ─┴──► CANCELLED: сервер → AVAILABLE, fake → SEARCHING (unplace), реальные, принявшие/не отменившие → SEARCHING (unplace), не принявшие → сняты/штраф-заглушка; матч не переиспользуется — следующий поиск создаёт НОВЫЙ GATHERING
+```
+**Server:** `AVAILABLE →(reserve при FULL) RESERVED(match) →(ENDED|CANCELLED|orphan reaper) AVAILABLE`; ничего не резервируется при GATHERING. **Search:** `SEARCHING → MATCHED (в GATHERING) → WAITING_ACCEPT (после ASSIGNED) → READY_TO_CONNECT/COMPLETED`; при CANCELLED матча — обратно `SEARCHING`. **Fake:** `SEARCHING → MATCHED → (успех) COMPLETED | (любой неуспех) SEARCHING`.
+**Кто что делает:** backend — дедлайн, все переходы, освобождение сервера и fake; srcds — при `GET roster` без матча/с другим матчем **снимает** engine-резервацию (Unreserve; сейчас не делает) и (нужно решить) сообщает «все приняли»; GC клиента — **продолжает опрос после Match Found**, при CANCELLED/timeout шлёт 9104 (закрыть popup + `failready`/`matchmaking=3`) и перерегистрирует поиск, при «все приняли» — 9107 #2 (как сейчас); Panorama — без изменений.
+**Открытое решение (нужен ответ пользователя):** источник сигнала «все приняли» для backend — (а) srcds (`FakeRoster`/движок уже знает `0x25 stage 2 awaiting 0`) `POST` в backend, или (б) GC клиента по `OnReservationFullyAccepted`; без него backend не отличит «принято» от «таймаут» (сейчас косвенный признак — 9102 клиента при подключении).
+**Порядок внедрения (минимальные независимые шаги):** 1) fake: любой неуспешный конец → SEARCHING (`endMatch`/`unplace`); 2) backend: дедлайн Accept + CANCELLED-путь + освобождение READY при отмене; 3) srcds: `Controller` снимает резервацию при `NoMatch`/смене матча; 4) GC: опрос после назначения + 9104/перерегистрация; 5) (самое крупное, не нужно для timeout) отложенная резервация сервера до FULL с `mapPool`. Транзакция вокруг reserve+insert и reaper сирот (`findReservedBefore`) — вместе с шагом 2 или 5.
+
+### 63.7 Live-проверки после реализации (не сейчас)
+
+Competitive + fake: не принять до конца таймера → popup закрывается, сервер `AVAILABLE` в админке, fake `SEARCHING`, следующий поиск создаёт новый матч; принять — как сейчас; ручная отмена при popup; два клиента/два поиска с разными картами на двух серверах (гонка); проверка, что engine-резервация на srcds снята (`-> Reservation cookie 0` в консоли srcds).
+
+### §63 STATUS
+
+| Вывод | Статус |
+|---|---|
+| Backend-резервация (`RESERVED`) ставится при СОЗДАНИИ матча, т.е. при старте поиска первого игрока (`place`→`createMatch`→`servers.reserve`), до набора N игроков | **CONFIRMED** (код, лог `is RESERVED`, БД §58) |
+| Engine-резервация (`ReserveServerForQueuedGame`, `Q`) ставится только после READY (backend-roster) / после назначения (legacy); гипотеза «слишком рано» для неё неверна | **CONFIRMED** (код `Controller::Apply`, `StartAcceptTestRoster`) |
+| Non-Accept: `AVAILABLE → assigned` без резервации (§51/§54) — сохранено | **CONFIRMED** |
+| Timeout Accept сейчас не обрабатывает ни один компонент (Panorama, client.dll, GC, backend, srcds) | **CONFIRMED** |
+| Popup остаётся: закрывается только `RaiseReadyUp(false)`, его шлёт лишь 9104 `matchmaking==3` (GC не шлёт) | **CONFIRMED** (§58 + код GC) |
+| Retail 9104 `failready_account_id_sessions` → диалог «YOU FAILED TO ACCEPT» | **HIGH CONFIDENCE** |
+| Как retail возвращает принявших игроков в очередь | **UNRESOLVED** |
+| GC перестаёт опрашивать backend после назначения | **CONFIRMED** |
+| Отмена единственным игроком READY-матча не освобождает сервер/fake; TTL 10 мин или новый поиск | **CONFIRMED** |
+| srcds не снимает engine-резервацию при исчезновении/отмене backend-матча; WaitPopup/Accept без таймаута | **CONFIRMED** (код `Controller::Apply`, `FakeRoster::Impl::Run`) |
+| Fake после неуспешного матча: `ENDED` → `COMPLETED` (не исправлено после §60), `CANCELLED` → SEARCHING | **CONFIRMED** |
+| Атомарность захвата сервера: один монитор + условный `UPDATE`; нет транзакции reserve+insert, `findReservedBefore` не используется | **CONFIRMED** |
+| Предложенная схема (GATHERING без сервера → FULL → reserve → ACCEPTING с дедлайном → ACCEPTED/CANCELLED) | **HIGH CONFIDENCE** как направление; источник сигнала «все приняли» — **UNRESOLVED (решение пользователя)** |
+
+---
+
+## §64. РЕАЛИЗАЦИЯ §61–§63 (Training cookie, War Games в Panorama, Accept lifecycle). Аудиты §61–§63 выше сохранены без изменений
+
+Что сделано по порядку заказа; live-проверки делает пользователь. Git не трогался. Артефакты: `Build\release\csgo_gc\csgo_gc.dll` SHA-256 `6CF45708404E8ABA478724971B0D1FE061E00D9D34E9C6006B66AD94ACC552A7` (собран 01:15, **не установлен**: ставится и в клиент, и в srcds, обе стороны одной сборкой); `java-backend\target\matchmaking-backend.jar` SHA-256 `6D4A3D64D0643CD30AB02DFEE646E7841242315BD221F43EDA173B30823E671E` (собран 01:26, БД мигрирует на месте при старте, ниже); `csgo\panorama\code.pbin` установлен (SHA-256 `7765F934…6271`), оригинал `d160aca2…` сохранён как `code.pbin.bak_pre_s62` рядом.
+
+### 64.1 §61 Training / `Invalid User Info` — исправлено (клиентская резервация убрана)
+
+**Граф вызовов (проверен перед правкой) — CONFIRMED.** `ClientGC::StartServerFlow` вызывается **ровно из одного места**: `OnBackendSearchResult` при назначении сервера backend'ом (`gc_client.cpp`). Training (listen-сервер в `csgo.exe`) через него никогда не идёт: он не проходит 9101/backend, т.е. эти три потока разделены так: (а) dedicated matchmaking — назначение backend → `StartServerFlow`; резервацию **делает сам srcds** (`ServerGC`: keep-alive §60 для classic, `Q`-ростер для Accept), клиент лишь шлёт 9107 и потом QueueConnect; (б) Accept — `StartServerFlow` возвращался **до** клиентской резервации (`return` в ветке `acceptRequired`), т.е. клиентская резервация никогда не была частью Accept-флоу; (в) Training — `StartServerFlow` не вызывается, cookie на его `sv` попадал только от предыдущего non-Accept поиска в том же процессе.
+
+**Изменено.**
+- `gc_client.cpp`: из non-Accept ветки `StartServerFlow` удалены `BuildReservationPayload` (функция удалена как неиспользуемая) и `PostToHost(HostEvent::ReserveServerForQueuedGame…)`. Резервация чужого dedicated-сервера в **другом процессе** этим вызовом не делалась никогда (он писал cookie в `sv` самого `csgo.exe`), поэтому для Casual/Deathmatch/... ничего не теряется: они работают за счёт резервации srcds (§59/§60, подтверждено live: «§60 уже работает»). Комментарий в коде объясняет причину.
+- `gc_server.cpp` `ReserveServerForOurCookie`: **страховка добавлена** — listen-сервер (`!m_dedicated`) больше не резервирует себя. Обоснование: call graph показывает, что этот путь достижим только когда listen-GS залогинен в Steam (события обрабатываются после `BLoggedOn`), в наблюдавшихся отказах он не срабатывал (`Could not establish connection to Steam servers`), но при логоне дал бы **тот же** отказ (`connect` локального игрока с `cl_session 0` против cookie), а потребителя у такой резервации нет (backend выдаёт только dedicated-серверы). dedicated-ветка (keep-alive §60) и `-gc_mode`/FakeRoster не затронуты (проверено тестом порядка `StartAcceptTestRoster` → `m_dedicated`).
+
+**Тест:** `offline_tests\reservation\client_flow_test.cpp` (+`build.bat`): модель `CBaseServer::ConnectClient` (старое поведение → отказ, новое → Training принимается; Accept и dedicated-cookie не затронуты) + граф вызовов по реальным исходникам. **23 проверки, 0 failed**; мутация (вернуть `PostToHost` в `StartServerFlow`) даёт 2 FAILED. `keepalive_test` (§60) по-прежнему 78/78.
+
+### 64.2 §62 War Games убраны из Panorama UI (только UI)
+
+- `scripts\mainmenu_play.js`, `_IsGameModeAvailable`: одна строка `if ( gameMode === "skirmish" ) { _SetGameModeRadioButtonVisible( gameMode, false ); return false; }` (по образцу co-op). Размер файла сохранён (115 050 B; лишнее взято из пробельных строк, число строк не изменилось; `node --check` — OK). Скрипт правки: `tools\panorama\hide_war_games.py`, результат `tools\panorama\mainmenu_play.js.patched`. `gamemodes.txt`, `mm_modes.cpp`, GC-обработчики War Games, backend, `mainmenu_play.xml` **не менялись**.
+- Порядок: бэкап `code.pbin` (→ `code.pbin.bak_pre_s62`, хеши совпадают) → `pbin.exe unpack` в scratchpad → правка → **`pbin.exe pack`: завершился с кодом 0**, размер 4 505 846 B как у оригинала → сравнение структуры: 705 записей, тело отличается **только** у `mainmenu_play.js`, хвост идентичен, RSA-блок обнулён (ожидаемо для инструмента), заголовки записей получили константный CRC инструмента → установлен в `csgo\panorama\code.pbin`.
+- **panorama.dll:** по вашему сообщению «panorama.dll не патчь, у меня уже есть готовый» — я его **не трогал и не патчил**. Установленная `bin\panorama.dll` (md5 `6edc2bff…`) не входит в список инструмента, поэтому «упаковка работает с установленной DLL» мною **не доказана**: проверяет только запуск игры. IDA-анализ установленной DLL (scratchpad `re\panorama_installed.dll.i64`) показал, что функция загрузки `panorama/code.pbin` (`sub_10141680`) сама подпись не проверяет; где она проверяется, не искалось (остановлено вашей репликой). Если игра при старте покажет пустое меню — восстановить: скопировать `code.pbin.bak_pre_s62` поверх `code.pbin`.
+- **Тест:** `offline_tests\panorama\war_games_test.js` (node): берёт **реальные** функции `_IsGameModeAvailable`/`_ValidateSessionSettings` из `code.pbin` и гоняет их в vm со стабами Panorama API. **53 проверки, 0 failed**: skirmish недоступен и скрыт для Online и Offline (в т.ч. новичок), остальные режимы как раньше (включая блокировку competitive для нового игрока, `survival` только online), сохранённый `skirmish` / `skirmish_armsrace` → fallback на `deathmatch` (или на сохранённый casual/competitive), `casual` остаётся, пакет = оригинал + отличие только в `mainmenu_play.js`; на оригинальном pbin те же проверки дают 18 FAILED (стенд чувствителен).
+
+### 64.3 §63 Accept lifecycle — реализовано
+
+**Архитектура (как согласовано; owner дедлайна — backend, сигнал «все приняли» — GC клиента).**
+
+```
+SEARCHING → FORMING (набор, сервера нет) → FULL → READY (server RESERVED) → ACCEPTING (deadline) → ACCEPTED → ENDED
+                                                              └─ любое состояние до ACCEPTED → CANCELLED
+```
+Классические режимы (Casual и др.) без изменений: `FORMING`→`READY` мгновенно, без резервации, без Accept, без дедлайна.
+
+**Java backend** (`SearchService`, `MatchStatus`, `MatchRepository`, `GameServerRepository`, `SearchRepository`, `SearchApiController`, `SecurityConfig`, `SchemaInitializer`, `BackendProperties`, панель):
+1. **Сервер НЕ резервируется при первом поиске.** Первый поиск создаёт `FORMING`-матч без сервера (`server_id=0, host='', port=0` — колонки остались `NOT NULL`, миграция схемы не нужна). Присоединение — по пересечению выбранных карт участников (`mapPool`) при условии, что есть включённый сервер категории с такой картой (иначе поиск, как раньше, остаётся `SEARCHING`).
+2. **FULL → RESERVED атомарно:** условный `UPDATE game_server … WHERE state='AVAILABLE'` (`reserve`) + `UPDATE matchmaking_match SET server_*, status='READY'` **в одной транзакции** (`TransactionTemplate`, откат при неудаче любого шага) внутри монитора `SearchService`. Свободного подходящего сервера нет → матч остаётся `FULL`, повтор каждый тик матчера (одна лог-строка на матч). Игрок, ушедший из `FULL`, возвращает матч в `FORMING`.
+3. **Дедлайн:** матч → `ACCEPTING` в момент выдачи assignment (после подтверждения ростра srcds, если он читает ростер у backend, иначе сразу), `accept_deadline_at = now + backend.accept-timeout` (**PT25S**: retail popup 20 с от показа + ≈5 с на опрос GC/9107/первый `0x21`; регулируется). Реальный дедлайн проверяет `expire()` каждую секунду (`SearchReaper`).
+4. **`POST /api/v1/matchmaking/accepted {account_id, request_id}`** (X-Api-Key, разрешено в `SecurityConfig`): игрок обязан состоять в `ACCEPTING`-матче и иметь поиск `WAITING_ACCEPT`, иначе `accepted:false` с причиной (`no_active_search`, `request_id_mismatch`, `not_in_a_match`, `match_not_accepting`); когда приняли все `gc`-игроки (поиски из админ-панели принимать не могут и считаются принявшими) → `ACCEPTED`, поиски → `READY_TO_CONNECT`. Повтор идемпотентен.
+5. **Отмена (`dissolve`)** — по дедлайну, при уходе участника до его Accept (отмена/замена/истечение поиска/новый поиск единственного игрока/админ забрал сервер): **все** реальные игроки → `SEARCHING` (тот же поиск, тот же `request_id`, `match_id` сброшен → старый assignment не выдаётся), fake → `SEARCHING` (`endMatch(CANCELLED)` → `unplaceByMatch`; и сами входят в следующий матч, кнопка Start не нужна), сервер → `AVAILABLE`, но с `available_after = now + backend.server-release-cooldown` (PT15S: srcds должен снять резервацию; fake-драйвер ждёт 12 с). Принявший игрок, ушедший при подключении (9102), матч не отменяет.
+6. **Housekeeping:** старый `FORMING`-матч с резервацией сервера (от предыдущей версии) и «пустой» `FORMING/FULL` матч разбираются на тике; `GameServerRepository.findReservedBefore`, ранее нигде не использовавшийся, теперь **используется**: `RESERVED`-сервер, которого не держит ни один живой матч дольше 1 мин, возвращается (`AVAILABLE`); метод не удалялся. Heartbeat `AVAILABLE` теперь только `BUSY→AVAILABLE` (не сбрасывает cooldown).
+7. Провода для srcds: `GET /servers/roster` возвращает `status="READY"` для READY/ACCEPTING/ACCEPTED (то, что ждёт `Snapshot::Complete()`) + новое поле `phase` с реальным состоянием; после отмены — `404` (нет матча на сервере).
+8. Схема: `ensureColumn` добавляет `matchmaking_search.accepted_at`, `matchmaking_match.accept_deadline_at`, `matchmaking_match.accepted_at`, `game_server.available_after` (существующая БД пользователя мигрирует при старте; `SchemaMigrationTest` расширен). Панель: новые статусы, «no server yet».
+
+**C++ (`csgo_gc.dll`)**:
+- `backend_client`: опрос поиска **продолжается после Accept-назначения** (раньше `Done` на `IsAssigned`), изменение match id тоже считается сменой состояния; `ReportAccepted()` (+ 3 попытки при сети/5xx) шлёт `accepted` и **останавливает опрос**.
+- `gc_client`: `OnReservationFullyAccepted` (0x25 stage 2, awaiting 0) → `BackendClient::ReportAccepted()` (до 9107 #2). Результат backend'а при активном Accept: тот же match — игнор; другой assignment — `WithdrawAccept`+новый `StartServerFlow`; SEARCHING/MATCHED — `WithdrawAccept`; завершение поиска — `EndAccept`. `WithdrawAccept`: сброс `m_pendingAccept`, `DisarmClient`, поиск снова активен, клиенту уходит **существующий** `9104 MatchmakingGC2ClientUpdate` `matchmaking=3` (по декомпиляции `sub_103D9900`: `RaiseReadyUp(false,0,0)` = штатное закрытие Match Found popup + маркер `searching`); `EndAccept` — 3, затем 0 (очистить очередь). Никакого нового Panorama-механизма, protobuf не менялся.
+- srcds: `RosterFeed::Controller` — `NoMatch` при взведённом **backend**-матче и без игрока на сервере → `host.release`; `ServerGC::ReleaseRoster` → `FakeRoster::Release()` (новая команда: **один** Unreserve и пауза, keep-alive не идёт, заново не взводится, `OnMatchEnded` не оживляет; следующий матч взводится с нуля без `unreserveFirst`). Не срабатывает при игроке на сервере, для legacy-ростера и при `Unavailable`. Keep-alive §60 не менялся (для Accept-сервера резервирует FakeRoster; для classic-srcds — `Lease`).
+
+### 64.4 Тесты — что прошло
+
+| Набор | Результат |
+|---|---|
+| Java backend (`mvnw test`) | **109 tests, 0 failures** (было 82). `AcceptLifecycleTest` — 26 новых: 1/10 и 9/10 → сервер AVAILABLE; 10/10 → RESERVED и матч `ACCEPTING` с дедлайном 25 с; все приняли → `ACCEPTED` (и дедлайн потом не отменяет); нужны отчёты всех реальных игроков и проверка участия; timeout → `CANCELLED`, сервер `AVAILABLE` (с `available_after`), fake `SEARCHING` (вернулись в следующий матч сами / остались `SEARCHING` без реального игрока); новый поиск после timeout собирается нормально, принимается; принявший тоже возвращается в очередь; дедлайн стартует при выдаче assignment, не при резервации; srcds видит `READY/ACCEPTING` и после отмены `404`; два полных матча не получают один сервер (последовательно, второй сервер, атомарность `reserve`, 8 параллельных потоков на 3 сервера); orphan-резервации; legacy-`FORMING`+сервер; пустой gathering; classic без Accept; API-ключ/валидация. |
+| Изменённые старые тесты (encode-ли «сервер резервируется при первом игроке»; изменены сознательно) | `MatchmakingIntegrationTest` (7: gathering не резервирует, RESERVED только при FULL, удаление/правка/heartbeat-сервера — теперь с 2 игроками, «leaving a shared match» → gathering), `FakePlayersIntegrationTest` (4 переписаны под ACCEPTED/CANCELLED + 1 новый), `BackendDrivenRosterTest` (1: второй матч на том же сервере после cooldown), `SchemaMigrationTest`, `BackendTestBase` |
+| `controller_test.exe` (C++, реальный `server_roster.cpp`) | ALL PASSED: + release после NoMatch (один раз), не при игроке/legacy/Unavailable, смена match id не release |
+| `roster_e2e.exe … timeout` (реальный `backend_client`+`Poller`+`Controller`+`FakeRoster` **против реального jar**, backend `accept-timeout=PT6S`, `cooldown=PT4S`) | **RESULT: OK**: popup с первой попытки (stage 1, awaiting 0) → backend отменил матч → клиент увидел SEARCHING/MATCHED → srcds снял резервацию через 0.3 с (поздний Accept = `awaiting=127`) → через cooldown **тот же поиск** получил НОВЫЙ матч → popup с первой попытки → Accept → `accepted → HTTP 200 match_accepted:true` → матч `ACCEPTED`. Happy path (`e2e` без сценария) без регрессий: assignment, stage 1/2 awaiting 0 |
+| `client_flow_test` §61 / `keepalive_test` §60 / `war_games_test.js` §62 | 23 / 78 / 53 проверок, 0 failed |
+
+Не запускалось (нельзя без игры): реальный `engine.dll`, реальный client.dll/Panorama, Wingman/Danger Zone на живых процессах.
+
+### 64.5 Live smoke test (для пользователя)
+
+Подготовка: остановить backend, запустить **новый** jar (БД мигрирует; логи `database migrated: … added`); поставить `csgo_gc.dll` (SHA `6CF457…`) в клиент и в srcds; `code.pbin` уже установлен. Все srcds-команды без изменений.
+1. **Training:** свежий `csgo.exe` → Casual-поиск (любой, отменить) → Training с ботами: должен запуститься (в `console.log` нет `mismatching cookie`; строки `-> Reservation cookie 293a…` в клиенте больше нет).
+2. **Casual:** поиск → `Connecting`/подключение как в §60.
+3. **Меню:** War Games нет в Online и Offline; у режима, ранее выбранного как War Games, меню открывается на Deathmatch/Casual; в `console.log` нет ошибок JS.
+4. **Competitive + fake (srcds `-gc_mode competitive`, fake 9):** в панели во время поиска сервер `AVAILABLE`, матч `FORMING`; после полного набора сервер `RESERVED`, матч `ACCEPTING`; принять → `ACCEPTED`, подключение как раньше; лог клиента: `[MM-ACCEPT] everybody accepted … reporting match … to the backend`, `[BACKEND] accepted -> HTTP 200 … "match_accepted":true`.
+5. **Не принимать:** ≈25 с после popup он должен закрыться; лог клиента `the backend withdrew match … closing the Accept popup`, панель: матч `CANCELLED`, сервер `AVAILABLE`, fake снова в новом матче (не COMPLETED); лог srcds: `backend match … is gone … releasing its reservation`, `[FAKE-MM] the backend match of this roster is gone`, в консоли srcds `-> Reservation cookie 0`; примерно через 15 с (cooldown + 1.5 с) новый матч и новый popup, его можно принять.
+6. Нажать Cancel на popup → матч `CANCELLED` (принявшие не нужны), сервер свободен.
+
+### 64.6 UNRESOLVED / риски
+
+- **9104 `matchmaking=3` закрывает popup в живом клиенте** — HIGH CONFIDENCE по декомпиляции §35/§37, live не проверено; побочный эффект «searching» и то, что делает клиент с висящим engine-запросом stage 1/2 (`AOS_FAILED` по 127) и с его callback (mode 0) до следующего 9107 (он его заменяет) — проверить в п.5. Если popup не закроется — открыто, что ещё нужно (ветка `failready_account_id_sessions`, §63.2).
+- Значение `accept-timeout` PT25S подобрано по Panorama-таймеру 20 с + запас; live-наблюдение «popup показал 0, но не закрылся ещё N секунд» подскажет корректировку.
+- Как retail возвращает **принявших** игроков в очередь — по-прежнему не восстановлено (§63.6): здесь по требованию вернулись **все**, включая принявших.
+- Реальная задержка очистки cookie в `engine.dll` после Unreserve (мы полагаемся на cooldown 15 с > 12 с драйвера и hibernate-delay 5 с): если новый матч всё же виснет со «старыми» stage — увеличить `server-release-cooldown`.
+- Совместимость: клиентская DLL **без** отчёта `accepted` (старая сборка) при новом backend будет отменять матч по дедлайну и при `MatchmakingStop`; ставить DLL и jar вместе. srcds старой сборки (без `release`) не снимает резервацию при отмене, но следующий матч заменит её штатно (replacing).
+- `ACCEPTED ≠ CONNECTED`: подключение/активность/конец матча backend по-прежнему не отслеживает (heartbeat srcds нет), матч живёт до TTL 10 мин или нового поиска.
+- Wingman и Danger Zone — общий код, покрыты Java-тестами (4 и 16 игроков), живьём не проверялись; Skirmish/classic — как раньше.
+- Тест `roster_e2e` использует свою копию srcds-склейки (`Srcds` в тесте), а не `ServerGC` (нужен движок); сам `ServerGC::ReleaseRoster` — 4 строки, собирается в DLL.
+- `panorama.dll` (§62) — см. 64.2; не проверено запуском.
+
+### §64 STATUS
+
+| Вывод | Статус |
+|---|---|
+| `StartServerFlow` имеет один call site (назначение backend); Training и Accept клиентскую резервацию не используют | **CONFIRMED** (код) |
+| Удаление клиентской резервации + отказ резервировать listen-сервер устраняет причину §61 | **HIGH CONFIDENCE** (модель + граф вызовов, 23 проверки); live Training — ожидает |
+| War Games скрыты в Panorama, остальное не тронуто; `pack` отработал, структура pbin сохранена | **CONFIRMED** (53 проверки + сравнение pbin); загрузка игрой с вашей panorama.dll — ожидает |
+| Сервер резервируется только при FULL, атомарно; два полных матча не получают один сервер | **CONFIRMED** (Java-тесты, вкл. 8 потоков) |
+| Backend владеет дедлайном; timeout → CANCELLED, сервер AVAILABLE(+cooldown), fake SEARCHING, следующий поиск создаёт новый матч | **CONFIRMED** (Java-тесты + e2e против реального jar) |
+| GC сообщает `accepted`, backend проверяет участие и переводит в ACCEPTED | **CONFIRMED** (Java + e2e `HTTP 200 match_accepted:true`) |
+| srcds снимает резервацию и не держит keep-alive после отмены | **CONFIRMED** на реальных `Controller`/`FakeRoster`/`Poller` (e2e), реальный `engine.dll` — ожидает |
+| Клиентский popup закрывается по 9104 `matchmaking=3` | **HIGH CONFIDENCE** (декомпиляция), live — **UNRESOLVED** |
+| Возврат принявших игроков в очередь как в retail | **UNRESOLVED** |

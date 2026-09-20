@@ -11,6 +11,7 @@
 #include <deque>
 #include <mutex>
 #include <string_view>
+#include <thread>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -53,6 +54,9 @@ constexpr size_t MaxResponseBytes = 64 * 1024;
 
 constexpr const char *SearchPath = "/api/v1/matchmaking/search";
 constexpr const char *CancelPath = "/api/v1/matchmaking/cancel";
+constexpr const char *AcceptedPath = "/api/v1/matchmaking/accepted";
+constexpr int AcceptedAttempts = 3;       // a report that gets lost would let the backend cancel a match everybody accepted
+constexpr int AcceptedRetryMs = 400;
 
 void Log(const char *format, ...)
 {
@@ -1333,6 +1337,42 @@ public:
         m_cv.notify_one();
     }
 
+    void ReportAccepted()
+    {
+        if (!m_enabled)
+        {
+            return;
+        }
+
+        uint32_t accountId;
+        std::string requestId;
+        {
+            std::lock_guard lock{ m_mutex };
+            if (m_activeRequestId.empty())
+            {
+                return;
+            }
+
+            accountId = m_activeAccountId;
+            requestId = m_activeRequestId;
+
+            // the assignment cannot be withdrawn any more: no need to watch it (the request id stays: the client sends its
+            // MatchmakingStop when it connects and that cancel must still name the search)
+            if (m_session.active && m_session.requestId == requestId)
+            {
+                m_serial++;
+                m_session.serial = m_serial;
+                m_session.phase = Phase::Done;
+            }
+        }
+
+        std::string body = "{\"account_id\":" + std::to_string(accountId) + ",\"request_id\":";
+        AppendJsonString(body, requestId);
+        body += '}';
+
+        Enqueue({ "accepted", AcceptedPath, std::move(body), Clock::now() });
+    }
+
     void SearchCancelled()
     {
         if (!m_enabled)
@@ -1381,6 +1421,7 @@ private:
         uint32_t failures{};
         std::string lastStatus;
         uint32_t lastPlayers{};
+        std::string lastMatchId;    // the match of the assignment (a search that gets another match is reported again)
     };
 
     Client()
@@ -1541,6 +1582,19 @@ private:
         Log("POST %s%s %s", m_endpoint.basePath.c_str(), job.path, job.body.c_str());
 
         HttpResult result = HttpRequest(m_endpoint, m_apiKey, "POST", job.path, &job.body);
+        if (std::string_view{ job.kind } == "accepted")
+        {
+            // this one must get through: retry a network failure / a 5xx (an answer of the backend, even a refusal, is final)
+            for (int attempt = 1; attempt < AcceptedAttempts && (result.status == 0 || result.status >= 500); attempt++)
+            {
+                Log("accepted report not delivered (%s), retrying (%d/%d)",
+                    result.status ? ("HTTP " + std::to_string(result.status)).c_str() : result.error.c_str(), attempt,
+                    AcceptedAttempts - 1);
+                std::this_thread::sleep_for(std::chrono::milliseconds(AcceptedRetryMs));
+                result = HttpRequest(m_endpoint, m_apiKey, "POST", job.path, &job.body);
+            }
+        }
+
         const auto tookMs = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - started).count();
 
         if (result.status >= 200 && result.status < 300)
@@ -1649,11 +1703,18 @@ private:
                 return;
             }
 
-            // a state to report: first answer, a status change, more players, or the assignment
-            const bool changed = parsed.status != session.lastStatus || parsed.matchPlayers != session.lastPlayers;
+            // a state to report: first answer, a status change, more players, the assignment, or another match
+            const bool changed = parsed.status != session.lastStatus || parsed.matchPlayers != session.lastPlayers
+                || parsed.assignment.matchId != session.lastMatchId;
             session.lastStatus = parsed.status;
             session.lastPlayers = parsed.matchPlayers;
-            if (parsed.IsAssigned() || parsed.IsEnded())
+            session.lastMatchId = parsed.assignment.matchId;
+
+            // A classic assignment ends the tracking. An Accept assignment does not: the backend owns the Accept deadline and
+            // withdraws the match when it runs out (the search is SEARCHING / MATCHED again), the GC has to hear that to close
+            // the popup. Its polling stops when the GC reports everybody accepted (ReportAccepted) or the search ends.
+            const bool watchAccept = parsed.IsAssigned() && parsed.assignment.acceptRequired;
+            if ((parsed.IsAssigned() && !watchAccept) || parsed.IsEnded())
             {
                 session.phase = Phase::Done;
             }
@@ -1814,6 +1875,17 @@ void SearchCancelled()
     try
     {
         Client::Get().SearchCancelled();
+    }
+    catch (...)
+    {
+    }
+}
+
+void ReportAccepted()
+{
+    try
+    {
+        Client::Get().ReportAccepted();
     }
     catch (...)
     {

@@ -52,10 +52,11 @@ class SchemaMigrationTest {
         try (Connection check = DriverManager.getConnection(url); Statement statement = check.createStatement()) {
 
             assertThat(columns(statement, "game_server")).contains("state", "reserved_match_id", "reserved_at",
-                    "last_assigned_at", "last_heartbeat_at", "max_players");
-            assertThat(columns(statement, "matchmaking_search")).contains("match_id", "matched_at", "variants");
+                    "last_assigned_at", "last_heartbeat_at", "max_players", "available_after");
+            assertThat(columns(statement, "matchmaking_search")).contains("match_id", "matched_at", "variants", "accepted_at");
             assertThat(columns(statement, "fake_search")).contains("category", "players", "maps", "enabled", "status", "match_id");
-            assertThat(columns(statement, "matchmaking_match")).contains("server_id", "required_players", "status");
+            assertThat(columns(statement, "matchmaking_match")).contains("server_id", "required_players", "status",
+                    "accept_deadline_at", "accepted_at");   // the Accept lifecycle of #63
 
             try (ResultSet rs = statement.executeQuery("SELECT host, port, state FROM game_server")) {
                 assertThat(rs.next()).isTrue();

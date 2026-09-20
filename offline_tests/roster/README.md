@@ -16,3 +16,13 @@ fake driver) and `keyvalue.cpp`, with small stand-ins for the parts of the DLL t
 
 The real engine (`engine.dll`) is not part of it: the game test with srcds started with `-ip 192.168.1.150 -gc_mode ...`
 is what proves the reservation against the real engine.
+
+## §63: Accept timeout (`roster_e2e.exe ... timeout`)
+
+`roster_e2e.exe 1050166997 10 40000 timeout` — тот же стенд, но игрок **не принимает**. Запускать против backend с
+`--backend.accept-timeout=PT6S --backend.server-release-cooldown=PT4S`. Проверяет цепочку на реальных классах:
+всплыл popup (stage 1, awaiting 0) → backend отменяет матч по дедлайну → клиент видит, что его поиск снова SEARCHING/MATCHED
+(`BackendClient` продолжает опрос после назначения) → srcds получает `404`, `Controller` вызывает `release`, `FakeRoster::Release`
+снимает резервацию (поздний Accept старого матча = `awaiting=127`) → после cooldown тот же поиск получает НОВЫЙ матч, srcds
+взводит его заново, Accept проходит, `BackendClient::ReportAccepted` → backend `ACCEPTED`. Ожидаемый финал: `RESULT: OK`.
+`controller_test.exe` дополнительно покрывает решения release (нельзя: игрок на сервере / legacy-ростер / backend недоступен).

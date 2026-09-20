@@ -3,6 +3,13 @@
 //   RosterFeed::Poller + RosterFeed::Controller (the srcds decision logic)  ->  AcceptTest::FakeRoster (the fake driver)
 //   -> a stand-in for the engine: a UDP responder that implements the reservation check (0x21 -> 0x25) of a Q roster
 // and a stand-in for the real player: a UDP socket that sends the client's stage 1 / stage 2 checks.
+//
+//   roster_e2e.exe <account> <roster size> <wait ms>            the happy path: assignment, stage 1, stage 2
+//   roster_e2e.exe <account> <roster size> <wait ms> legacy     the srcds-local roster
+//   roster_e2e.exe <account> <roster size> <wait ms> timeout    RESEARCH_FINDINGS.md #63: the player does not accept, the
+//        backend cancels the match at its deadline (run it against a backend with backend.accept-timeout=PT6S and
+//        backend.server-release-cooldown=PT4S): the client hears about it (the search is SEARCHING / MATCHED again), srcds
+//        drops the reservation, the same search gets a NEW match, which is accepted and reported (ReportAccepted).
 #include "stdafx.h"
 #include "config.h"
 #include "keyvalue.h"
@@ -81,6 +88,7 @@ public:
     }
 
     size_t RosterSize() { std::lock_guard l{ m_mutex }; return m_roster.size(); }
+    bool Reserved() { std::lock_guard l{ m_mutex }; return m_reserved; }
     std::string LastPayload() { std::lock_guard l{ m_mutex }; return m_payloads.empty() ? "" : m_payloads.back(); }
     int Reservations() { std::lock_guard l{ m_mutex }; int n = 0; for (auto &p : m_payloads) { size_t c = p.find(':'); n += (c != std::string::npos && p[c - 1] == '1') ? 1 : 0; } return n; }
 
@@ -194,6 +202,7 @@ struct Srcds
             roster = std::make_unique<AcceptTest::FakeRoster>(p, [this](const std::string &payload) { engine.Reserve(payload); });
         };
         host.confirm = [this](const std::string &matchId) { poller->Confirm(matchId); };
+        host.release = [this](const std::string &) { if (roster) { roster->Release(); } };   // ServerGC::ReleaseRoster
         host.playerOnServer = [this] { return playerOnServer; };
         controller = std::make_unique<RosterFeed::Controller>(mode, required, std::move(host));
         poller = std::make_unique<RosterFeed::Poller>("127.0.0.1", EnginePort, [this](const RosterFeed::Snapshot &s)
@@ -220,6 +229,45 @@ static double AssignedAt()
     std::lock_guard l{ g_resultMutex };
     return 0;
 }
+// the next assignment (WAITING_ACCEPT / READY_TO_CONNECT) whose match is not `notMatch`
+static bool WaitAssignedOtherThan(const std::string &notMatch, int ms)
+{
+    auto end = Clock::now() + std::chrono::milliseconds(ms);
+    while (Clock::now() < end)
+    {
+        { std::lock_guard l{ g_resultMutex }; for (auto &r : g_results) if (r.IsAssigned() && r.assignment.matchId != notMatch) return true; }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return false;
+}
+
+// the search is SEARCHING / MATCHED again after `assignedMatch` was assigned: the backend took the match back
+static bool WaitWithdrawn(const std::string &assignedMatch, int ms)
+{
+    auto end = Clock::now() + std::chrono::milliseconds(ms);
+    while (Clock::now() < end)
+    {
+        {
+            std::lock_guard l{ g_resultMutex };
+            bool seenAssigned = false;
+            for (auto &r : g_results)
+            {
+                if (r.IsAssigned() && r.assignment.matchId == assignedMatch) seenAssigned = true;
+                else if (seenAssigned && (r.status == "SEARCHING" || r.status == "MATCHED")) return true;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return false;
+}
+
+static std::string LastAssignedMatch()
+{
+    std::lock_guard l{ g_resultMutex };
+    for (auto it = g_results.rbegin(); it != g_results.rend(); ++it) if (it->IsAssigned()) return it->assignment.matchId;
+    return {};
+}
+
 static bool WaitAssigned(int ms)
 {
     auto end = Clock::now() + std::chrono::milliseconds(ms);
@@ -264,6 +312,8 @@ int main(int argc, char **argv)
     BackendClient::SetResultHandler(OnResult, nullptr);
     std::this_thread::sleep_for(std::chrono::milliseconds(1500));   // srcds polls for a while: the backend learns it reads rosters
 
+    const bool timeoutScenario = argc > 4 && std::string(argv[4]) == "timeout";
+
     BackendClient::SearchInfo info;
     info.accountId = real; info.gameType = 520; info.mode = "competitive"; info.gameMode = "competitive"; info.maps = { "de_dust2" };
     printf("%7.3f [client] starts a Competitive search on de_dust2\n", Now());
@@ -273,6 +323,49 @@ int main(int argc, char **argv)
     const double assignedAt = Now();
     printf("%7.3f [harness] %s\n", assignedAt, assigned ? "the client GOT the assignment" : "NO assignment in time");
     if (!assigned) return 1;
+
+    if (timeoutScenario)
+    {
+        bool ok = true;
+        auto verdict = [&](bool cond, const char *what) { printf("%7.3f [check] %-4s %s\n", Now(), cond ? "OK" : "FAIL", what); ok = ok && cond; };
+
+        const std::string firstMatch = LastAssignedMatch();
+        PlayerCheck popup = Check(real, 1);
+        verdict(popup.got && popup.awaiting == 0, "the popup is up (stage 1, awaiting=0) on the first attempt");
+        verdict(engine.Reserved(), "the srcds reservation is armed");
+
+        printf("%7.3f [client] does NOT accept: waiting for the backend deadline\n", Now());
+        verdict(WaitWithdrawn(firstMatch, 15000), "the client hears that the backend took the match back (its search is SEARCHING / MATCHED again)");
+        const double withdrawnAt = Now();
+
+        // srcds sees no match on its server for the cooldown and drops the reservation
+        bool dropped = false;
+        for (int i = 0; i < 100 && !dropped; i++) { dropped = !engine.Reserved(); std::this_thread::sleep_for(std::chrono::milliseconds(100)); }
+        verdict(dropped, "srcds released the reservation (the engine has no cookie / roster any more)");
+        PlayerCheck late = Check(real, 2);
+        verdict(late.got && late.awaiting == 127, "a late Accept of the old match finds no reservation (awaiting=127)");
+        printf("%7.3f [harness] reservation dropped %.1f s after the client heard of the withdrawal\n", Now(), Now() - withdrawnAt);
+
+        // the same search gets a new match once the server is free again, srcds arms it afresh, this time the player accepts
+        verdict(WaitAssignedOtherThan(firstMatch, waitMs), "the same search is assigned a NEW match after the cooldown");
+        const std::string secondMatch = LastAssignedMatch();
+        verdict(secondMatch != firstMatch && !secondMatch.empty(), "with another match id");
+        PlayerCheck again = Check(real, 1);
+        verdict(again.got && again.awaiting == 0 && again.total == (uint32_t)required, "the new match: popup up on the first attempt (stage 1, awaiting=0)");
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        PlayerCheck accept2;
+        for (int i = 0; i < 40; i++) { accept2 = Check(real, 2); if (accept2.got && accept2.awaiting == 0) break; std::this_thread::sleep_for(std::chrono::milliseconds(250)); }
+        verdict(accept2.got && accept2.awaiting == 0, "everybody accepted (stage 2, awaiting=0)");
+
+        printf("%7.3f [client] reports the Accept to the backend (BackendClient::ReportAccepted)\n", Now());
+        BackendClient::ReportAccepted();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+        BackendClient::SearchCancelled();                                    // the client's stop when it connects
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        printf("[engine] reservations=%d roster=%zu\n", engine.Reservations(), engine.RosterSize());
+        printf("RESULT: %s\n", ok ? "OK" : "FAILED");
+        return ok ? 0 : 3;
+    }
 
     // the client now sends its first reservation check (stage 1): with the roster armed this must already be awaiting=0
     PlayerCheck first = Check(real, 1);

@@ -148,7 +148,8 @@ public class GameServerService {
             if (wanted == ServerState.BUSY) {
                 matchmaker.freeServer(server);
                 repository.setState(server.id(), ServerState.BUSY.name(), clock.instant());
-            } else if (wanted == ServerState.AVAILABLE && !ServerState.RESERVED.name().equals(server.state())) {
+            } else if (wanted == ServerState.AVAILABLE && ServerState.BUSY.name().equals(server.state())) {
+                // BUSY -> AVAILABLE only: an AVAILABLE server keeps its cooldown after a cancelled Accept match (#63)
                 repository.setState(server.id(), ServerState.AVAILABLE.name(), clock.instant());
             }
         }

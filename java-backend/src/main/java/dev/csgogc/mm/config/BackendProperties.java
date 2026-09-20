@@ -42,6 +42,17 @@ public record BackendProperties(
         @DefaultValue("PT25S") Duration rosterAckTimeout,
         /** a game server that asked for its roster this recently counts as "reads its roster from the backend" */
         @DefaultValue("PT10S") Duration rosterPollWindow,
+        /**
+         * Accept modes: how long the players of a complete match have to accept once they were handed the server. The
+         * retail Accept popup runs 20 s from the moment it is up (Panorama popup_accept_match.js), the rest is the delay
+         * until it is up (GC poll, 9107, first reservation check). The backend owns this deadline (RESEARCH_FINDINGS.md #63).
+         */
+        @DefaultValue("PT25S") Duration acceptTimeout,
+        /**
+         * a server released from a cancelled Accept match is not handed out for this long: its game server needs a moment
+         * to drop the old reservation (sv_hibernate_postgame_delay + expiry, the srcds fake driver waits 12 s)
+         */
+        @DefaultValue("PT15S") Duration serverReleaseCooldown,
         /** TEST tool: virtual players added from the admin panel (RESEARCH_FINDINGS.md #54) */
         @DefaultValue FakePlayers fakePlayers) {
 

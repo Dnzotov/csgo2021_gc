@@ -8,6 +8,7 @@ enum class HostEvent
     NetMessage, // id contains the recipient steam id, buffer contains the payload
     MicroTransactionResponse, // runs MicroTxnAuthorizationResponse_t, no arguments
     ReserveServerForQueuedGame, // id unused, buffer contains the IVEngineServer::ReserveServerForQueuedGame payload string (see RESEARCH_FINDINGS.md #28-#30)
+    ReservationKeepAlive, // dedicated server, no -gc_mode: id = the reservation cookie, start reserving it and keep it alive (reservation_keepalive.h, RESEARCH_FINDINGS.md #60)
 };
 
 enum class GCEvent

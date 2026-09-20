@@ -110,6 +110,7 @@ GCConfig::GCConfig()
     if (matchmaking)
     {
         m_testDiag = matchmaking->GetNumber("test_diag", m_testDiag);
+        m_reservationIdleSeconds = matchmaking->GetNumber("reservation_idle_seconds", m_reservationIdleSeconds);
 
         m_backendUrl = std::string(matchmaking->GetString("backend_url", m_backendUrl));
         m_backendApiKey = std::string(matchmaking->GetString("backend_api_key", m_backendApiKey));

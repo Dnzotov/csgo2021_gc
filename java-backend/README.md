@@ -64,6 +64,8 @@ $env:BACKEND_API_KEY        = '...'
 | `backend.finished-search-retention` | … | `PT1H` | сколько завершённые заявки и матчи видны по «show ended» |
 | `backend.matcher-interval` | … | `PT1S` | как часто matcher ищет сервер / игроков, даже если ничего нового не пришло |
 | `backend.server-reservation-ttl` | … | `PT10M` | сервер, выданный завершённому матчу, остаётся RESERVED столько, потом снова AVAILABLE (пока нет heartbeat srcds) |
+| `backend.accept-timeout` | … | `PT25S` | Accept-режимы: сколько у игроков полного матча на Accept с момента, когда они получили сервер (retail popup 20 с + время до его появления). Потом матч `CANCELLED` |
+| `backend.server-release-cooldown` | … | `PT15S` | сервер, освобождённый из отменённого Accept-матча, не выдаётся столько (srcds снимает резервацию, fake-драйверу нужно 12 с) |
 | `backend.assigned-search-timeout` | … | `PT2M` | назначенная заявка (WAITING_ACCEPT / READY_TO_CONNECT) через это время → Completed |
 | `backend.required-players.<mode>` | … | competitive 10, wingman 4, dangerzone 16 | сколько игроков собирает матч Accept-режима. **Только тестовая среда:** пока недостающих участников даёт тестовый ростер srcds (`-gc_mode`) и нет fake-поисков backend, ставят `1`. С fake-поисками (панель → Fake Players) значение не нужно: игроков до 10/4/16 добирают виртуальные участники |
 | `backend.roster-ack-timeout` | … | `PT25S` | Accept-матч на сервере, который сам читает ростер у backend (srcds новой сборки), отдаётся игрокам только после подтверждения «ростер взведён»; если подтверждения нет столько времени — игроки получают сервер всё равно |
@@ -95,12 +97,32 @@ AND  ( maps[] пуст  ИЛИ  server.map ∈ maps[] )
 (на нём играют несколько человек; нагрузка распределяется по `last_assigned_at`, «занят» — только `BUSY` вручную или отчётом
 сервера). Вместимость (`max_players`) backend пока не учитывает (нужен heartbeat srcds).
 
-**Accept-режимы** (Competitive / Wingman / Danger Zone): резервирование — часть Accept-флоу. Первый поиск резервирует сервер
-(`AVAILABLE → RESERVED`) и открывает матч `FORMING`; совместимые
-поиски (та же категория, `server.map` устраивает их карты) присоединяются (`MATCHED`, `match.players / required_players`);
-когда набралось `required_players`, все получают `WAITING_ACCEPT` и **один и тот же** `assignment` — дальше идёт retail-флоу
-(Accept → второй 9107 → QueueConnect), который уже реализован в GC. Если участник ушёл до заполнения, а других нет — матч
-распадается, сервер свободен; если остались другие — они ждут дальше.
+**Accept-режимы** (Competitive / Wingman / Danger Zone) — жизненный цикл матча, RESEARCH_FINDINGS.md §63:
+
+```
+SEARCHING → FORMING (набор, СЕРВЕР НЕ РЕЗЕРВИРУЕТСЯ) → FULL → READY (сервер RESERVED) → ACCEPTING → ACCEPTED → ENDED
+                                                                          └── CANCELLED (сервер свободен, игроки и fake снова ищут)
+```
+
+* Первый поиск открывает матч `FORMING` **без сервера**; совместимые поиски (та же категория, пересечение выбранных карт
+  непусто и есть сервер категории, который такую карту запускает) и fake-игроки присоединяются (`MATCHED`,
+  `match.players / required_players`).
+* Набрались `required_players` → `FULL`. Только теперь берётся свободный сервер (карта ∈ пересечению карт участников):
+  условный `UPDATE … WHERE state='AVAILABLE'` + запись сервера в матч в одной транзакции — один сервер двум полным матчам не
+  достанется. Свободного нет → матч остаётся `FULL` и ждёт (повтор каждую секунду).
+* Сервер зарезервирован → `READY`. Если srcds сам читает ростер у backend, игроки ждут его подтверждения
+  (`POST /servers/roster/ready`, до `backend.roster-ack-timeout`); потом все получают `WAITING_ACCEPT` и **один и тот же**
+  `assignment`, матч → `ACCEPTING` с дедлайном `backend.accept-timeout` (`match.accept_deadline_at`).
+* GC клиента, увидев `0x25 stage 2, awaiting 0`, шлёт `POST /api/v1/matchmaking/accepted {account_id, request_id}`. Backend
+  проверяет, что игрок состоит в `ACCEPTING`-матче; когда приняли все реальные игроки — `ACCEPTED`, поиски `READY_TO_CONNECT`.
+* Дедлайн истёк, либо игрок ушёл до Accept (отмена, замена, новый поиск, истёк) → `CANCELLED`: **все** реальные игроки снова
+  `SEARCHING` (тот же поиск, тем же `request_id`, прежний `assignment` больше не выдаётся), fake-игроки снова `SEARCHING` и сами
+  входят в следующий матч, сервер снова `AVAILABLE`, но `backend.server-release-cooldown` не выдаётся (srcds должен снять старую
+  резервацию: он видит `404` на `GET /servers/roster` и делает Unreserve).
+* Игрок, уже принявший, и ушедший (клиент шлёт `MatchmakingStop` при подключении) матч не отменяет.
+* `ACCEPTED` ≠ подключён: дальше матч живёт до `server-reservation-ttl` или до нового поиска единственного игрока.
+* `RESERVED`-сервер, который не держит ни один живой матч (оборванная передача), возвращается через минуту
+  (`GameServerRepository.findReservedBefore`).
 
 ### Skirmish («War Games»): Arms Race и Demolition — RESEARCH_FINDINGS.md §54
 

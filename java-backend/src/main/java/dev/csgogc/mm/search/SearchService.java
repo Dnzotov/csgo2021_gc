@@ -30,6 +30,7 @@ import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.support.TransactionTemplate;
 
 /**
  * The matchmaker. Searches come in from the GC, the matcher places each one on a free game server of its category
@@ -37,8 +38,12 @@ import org.springframework.stereotype.Service;
  * <ul>
  *   <li>classic modes: a search is pointed at an AVAILABLE server that fits and is READY_TO_CONNECT at once; the server
  *       is NOT reserved (several players can be sent to it, it is spread by least recent assignment);</li>
- *   <li>Accept modes: the first search reserves a server and opens a FORMING match, compatible searches join it
- *       (MATCHED) until required_players are there, then everybody is WAITING_ACCEPT with the same server data.</li>
+ *   <li>Accept modes (RESEARCH_FINDINGS.md #63): the first search opens a FORMING match that has NO server, compatible
+ *       searches (and fake players) join it (MATCHED) until required_players are there (FULL). Only then a free server is
+ *       reserved for it, atomically (READY); once its game server armed the roster everybody is WAITING_ACCEPT with the same
+ *       server data and the match is ACCEPTING, with a deadline the backend owns. Everybody accepted -> ACCEPTED (the GC
+ *       reports it); the deadline passed or a player left -> CANCELLED: the server is free again, players and fake players
+ *       search again.</li>
  * </ul>
  * All state lives in the database (searches, matches, game servers). Every mutation is serialized on this object
  * (single SQLite writer, single backend instance), the matcher runs inside those calls and from a timer.
@@ -51,6 +56,8 @@ public class SearchService {
     private static final long STEAM_ID64_BASE = 76561197960265728L;
     private static final Pattern IPV4 = Pattern.compile("(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})");
     private static final SecureRandom RANDOM = new SecureRandom();
+    /** a RESERVED server that no live match holds is given back after this long (a crash between the steps of a hand-over) */
+    private static final Duration ORPHAN_RESERVATION_GRACE = Duration.ofMinutes(1);
 
     public enum Outcome {
         /** no live search existed */
@@ -73,12 +80,19 @@ public class SearchService {
     public record MatchView(String id, String mode, String modeLabel, long serverId, String serverAddress, int serverPort,
                             String map, String status, int players, int fakePlayers, int requiredPlayers,
                             boolean acceptRequired, List<Long> accountIds, List<RosterEntry> roster, Instant createdAt,
-                            Instant readyAt, Instant endedAt, boolean awaitingServer) {
+                            Instant readyAt, Instant endedAt, boolean awaitingServer, Instant acceptDeadlineAt,
+                            Instant acceptedAt) {
     }
 
     /** what a game server (srcds) asks for: the participants of the match that is on it (GET /api/v1/servers/roster) */
     public record MatchRoster(String matchId, String mode, String status, String map, boolean acceptRequired,
-                              int requiredPlayers, int realPlayers, int fakePlayers, List<RosterEntry> players) {
+                              int requiredPlayers, int realPlayers, int fakePlayers, List<RosterEntry> players,
+                              /** the real state of the match; status is the srcds view (READY while the players accept) */
+                              String phase) {
+    }
+
+    /** POST /api/v1/matchmaking/accepted: what became of the report of a player that accepted */
+    public record AcceptResult(boolean accepted, String reason, boolean matchAccepted, SearchView search) {
     }
 
     private final SearchRepository searches;
@@ -87,6 +101,10 @@ public class SearchService {
     private final FakeSearchRepository fakes;
     private final BackendProperties props;
     private final Clock clock;
+    private final TransactionTemplate tx;
+
+    /** full matches that already logged that no free server fits them (one line per match, not one per second) */
+    private final Set<String> waitingForServerLogged = ConcurrentHashMap.newKeySet();
 
     /** game server id -> when it last asked for its roster: such a server reads the roster from here (RESEARCH_FINDINGS.md #55) */
     private final Map<Long, Instant> rosterPolls = new ConcurrentHashMap<>();
@@ -94,7 +112,8 @@ public class SearchService {
     private final Set<String> rosterAcks = ConcurrentHashMap.newKeySet();
 
     public SearchService(SearchRepository searches, MatchRepository matches, GameServerRepository servers,
-                         FakeSearchRepository fakes, BackendProperties props, Clock clock) {
+                         FakeSearchRepository fakes, BackendProperties props, Clock clock, TransactionTemplate tx) {
+        this.tx = tx;
         this.searches = searches;
         this.matches = matches;
         this.servers = servers;
@@ -140,7 +159,7 @@ public class SearchService {
             } else {
                 searches.replaceLive(id, request.gameType(), category.key(), gameMode, maps, variants, request.requestId(),
                         source, now);
-                releaseMatchIfEmpty(current.matchId());
+                memberLeft(current);
                 log.info("search replaced: account={} {} -> {} maps={}", request.accountId(), current.category(),
                         category.key(), maps);
                 outcome = Outcome.REPLACED;
@@ -176,7 +195,7 @@ public class SearchService {
             return new CancelResult(false, "request_id_mismatch", view(current));
         }
         searches.finish(current.id(), SearchStatus.CANCELLED, clock.instant());
-        releaseMatchIfEmpty(current.matchId());
+        memberLeft(current);
         log.info("search cancelled: account={}", accountId);
         runMatcher();
         return new CancelResult(true, null, view(searches.findById(current.id()).orElseThrow()));
@@ -189,7 +208,7 @@ public class SearchService {
             throw ApiException.conflict("not_searching", "search " + id + " has already ended (" + record.status() + ")");
         }
         searches.finish(id, SearchStatus.REMOVED, clock.instant());
-        releaseMatchIfEmpty(record.matchId());
+        memberLeft(record);
         log.info("search removed by admin: id={} account={}", id, record.accountId());
         runMatcher();
         return view(searches.findById(id).orElseThrow());
@@ -220,9 +239,10 @@ public class SearchService {
             return;
         }
         matches.findById(server.reservedMatchId()).ifPresent(match -> {
-            if (match.status() == MatchStatus.FORMING) {
-                dissolve(match);
-            } else if (match.status() == MatchStatus.READY) {
+            if (match.status() == MatchStatus.FORMING || match.status() == MatchStatus.FULL
+                    || (match.acceptRequired() && (match.status() == MatchStatus.READY || match.status() == MatchStatus.ACCEPTING))) {
+                dissolve(match, "its server was taken away");
+            } else if (match.status().holdsServer()) {
                 endMatch(match.id(), MatchStatus.ENDED, clock.instant());
                 log.info("match {} ended, server {}:{} released", match.id(), match.serverHost(), match.serverPort());
             }
@@ -242,8 +262,25 @@ public class SearchService {
 
         for (SearchRecord stale : searches.listStale(now.minus(props.staleSearchTimeout()))) {
             searches.finish(stale.id(), SearchStatus.EXPIRED, now);
-            releaseMatchIfEmpty(stale.matchId());
+            memberLeft(stale);
             log.info("search of account {} expired after {}", stale.accountId(), props.staleSearchTimeout());
+        }
+
+        // The Accept deadline is owned here (RESEARCH_FINDINGS.md #63): nobody else ends an Accept that ran out of time
+        for (MatchRecord due : matches.findAcceptingDue(now)) {
+            dissolve(due, "accept timeout, the players did not all accept within " + props.acceptTimeout());
+        }
+
+        // a match of an older version: FORMING with a server already reserved. Servers are only reserved for FULL matches now.
+        for (MatchRecord legacy : matches.findFormingWithServer()) {
+            dissolve(legacy, "it reserved a server while still gathering (older version)");
+        }
+
+        // a gathering match nobody is in any more (a restart, a crash between two steps) is not kept around
+        for (MatchRecord gathering : matches.findGathering()) {
+            if (searches.listLiveByMatch(gathering.id()).isEmpty()) {
+                dissolve(gathering, "nobody is in it any more");
+            }
         }
 
         for (SearchRecord assigned : searches.listAssignedBefore(now.minus(props.assignedSearchTimeout()))) {
@@ -251,7 +288,7 @@ public class SearchService {
         }
 
         // a server handed out stays RESERVED for the TTL; with no srcds heartbeat yet that is the only way it comes back
-        for (MatchRecord ready : matches.findReadyBefore(now.minus(props.serverReservationTtl()))) {
+        for (MatchRecord ready : matches.findHoldingServerBefore(now.minus(props.serverReservationTtl()))) {
             endMatch(ready.id(), MatchStatus.ENDED, now);
             servers.findById(ready.serverId()).ifPresent(server -> {
                 if (ready.id().equals(server.reservedMatchId())) {
@@ -260,6 +297,17 @@ public class SearchService {
                             props.serverReservationTtl(), server.host(), server.port());
                 }
             });
+        }
+
+        // a RESERVED server that no live match holds (a hand-over that was cut short) is given back
+        for (GameServer reserved : servers.findReservedBefore(now.minus(ORPHAN_RESERVATION_GRACE))) {
+            boolean held = reserved.reservedMatchId() != null && matches.findById(reserved.reservedMatchId())
+                    .map(m -> m.status().holdsServer() && m.serverId() == reserved.id()).orElse(false);
+            if (!held) {
+                servers.setState(reserved.id(), ServerState.AVAILABLE.name(), now);
+                log.warn("server {}:{} was RESERVED for match {} that does not hold it: AVAILABLE again", reserved.host(),
+                        reserved.port(), reserved.reservedMatchId());
+            }
         }
 
         Instant cutoff = now.minus(props.finishedSearchRetention());
@@ -274,6 +322,7 @@ public class SearchService {
             place(search);
         }
         fillFormingMatches();
+        reserveServersForFullMatches();
         promoteMatchesWaitingForTheirServer();
     }
 
@@ -281,6 +330,7 @@ public class SearchService {
     private void endMatch(String matchId, MatchStatus status, Instant now) {
         matches.end(matchId, status, now);
         rosterAcks.remove(matchId);
+        waitingForServerLogged.remove(matchId);
         if (status == MatchStatus.CANCELLED) {
             fakes.unplaceByMatch(matchId, now);
         } else {
@@ -295,13 +345,18 @@ public class SearchService {
         }
 
         if (category.acceptRequired()) {
-            // Accept modes: join a match that is still gathering on a map the player accepts
+            // Accept modes: players gather first, no server is involved until the match is full
             for (MatchRecord forming : matches.findForming(category.key())) {
-                if (mapCompatible(search.maps(), forming.map())) {
+                if (joinable(forming, category, search.maps())) {
                     join(search, forming);
                     return;
                 }
             }
+            if (anyServerCanServe(category, narrow(Optional.empty(), search.maps()))) {
+                join(search, createGatheringMatch(category));
+            }
+            // else: no game server of the category could ever run one of the maps it selected, it keeps searching
+            return;
         }
 
         Optional<Picked> server = pickServer(search, category);
@@ -310,9 +365,7 @@ public class SearchService {
         }
 
         MatchRecord match = createMatch(server.get());
-        if (match != null) {
-            join(search, match);
-        }
+        join(search, match);
     }
 
     private record Picked(GameServer server, String address, ModeCategory category) {
@@ -345,7 +398,7 @@ public class SearchService {
 
     /** a free server of the category whose map is one of the requested maps (no maps requested = any map) */
     private Optional<Picked> pickServer(ModeCategory category, List<String> requestedMaps) {
-        for (GameServer server : servers.findFree(category.key())) {
+        for (GameServer server : servers.findFree(category.key(), clock.instant())) {
             if (!mapCompatible(requestedMaps, server.map())) {
                 continue;
             }
@@ -368,26 +421,74 @@ public class SearchService {
         return serverMap != null && !serverMap.isEmpty() && requestedMaps.contains(serverMap);
     }
 
+    // ---- the maps a gathering match can still be played on: what every member accepts. Empty Optional = no restriction yet.
+
+    /** the maps every member of the match accepts, empty Optional when nobody named a map */
+    private Optional<Set<String>> mapPool(String matchId) {
+        Optional<Set<String>> pool = Optional.empty();
+        for (SearchRecord member : searches.listLiveByMatch(matchId)) {
+            pool = narrow(pool, member.maps());
+        }
+        for (FakeSearch fake : fakes.listByMatch(matchId)) {
+            pool = narrow(pool, fake.maps());
+        }
+        return pool;
+    }
+
+    /** the pool after a member that accepts {@code maps} joined (no maps = accepts any map = no change) */
+    static Optional<Set<String>> narrow(Optional<Set<String>> pool, List<String> maps) {
+        if (maps.isEmpty()) {
+            return pool;
+        }
+        Set<String> wanted = new LinkedHashSet<>(maps);
+        pool.ifPresent(wanted::retainAll);
+        return Optional.of(wanted);
+    }
+
+    /** a pool with no map left means the members cannot play together */
+    static boolean poolUsable(Optional<Set<String>> pool) {
+        return pool.isEmpty() || !pool.get().isEmpty();
+    }
+
+    static boolean serverFits(Optional<Set<String>> pool, String serverMap) {
+        return pool.isEmpty() || (serverMap != null && !serverMap.isEmpty() && pool.get().contains(serverMap));
+    }
+
+    /** some enabled server of the category runs one of the maps (free or not: only whether the match could ever be served) */
+    private boolean anyServerCanServe(ModeCategory category, Optional<Set<String>> pool) {
+        return servers.list().stream()
+                .anyMatch(server -> server.enabled() && category.key().equals(server.category()) && serverFits(pool, server.map()));
+    }
+
+    private boolean joinable(MatchRecord forming, ModeCategory category, List<String> maps) {
+        Optional<Set<String>> pool = narrow(mapPool(forming.id()), maps);
+        return poolUsable(pool) && anyServerCanServe(category, pool);
+    }
+
+    /** an Accept match that only gathers: it has no server, and none is reserved for it */
+    private MatchRecord createGatheringMatch(ModeCategory category) {
+        Instant now = clock.instant();
+        String id = "m-" + String.format("%08x", RANDOM.nextInt());
+        MatchRecord match = new MatchRecord(id, category.key(), MatchRecord.NO_SERVER, "", 0, "", requiredPlayers(category), true,
+                MatchStatus.FORMING, now, null, null, null, null);
+        matches.insert(match);
+        log.info("match {} created: {} gathering {} player(s), no server yet", id, category.key(), match.requiredPlayers());
+        return match;
+    }
+
+    /** a classic mode just points the player at a server that fits; it stays AVAILABLE for the next player */
     private MatchRecord createMatch(Picked picked) {
         ModeCategory category = picked.category();
         Instant now = clock.instant();
         String id = "m-" + String.format("%08x", RANDOM.nextInt());
-        if (category.acceptRequired()) {
-            // reservation belongs to the Accept flow only: the server is held for the match until Accept / connect is over
-            if (!servers.reserve(picked.server().id(), id, now)) {
-                return null;
-            }
-        } else {
-            // a classic mode just points the player at a server that fits; it stays AVAILABLE for the next player
-            servers.markAssigned(picked.server().id(), now);
-        }
+        servers.markAssigned(picked.server().id(), now);
 
         MatchRecord match = new MatchRecord(id, category.key(), picked.server().id(), picked.address(), picked.server().port(),
-                picked.server().map(), requiredPlayers(category), category.acceptRequired(), MatchStatus.FORMING, now, null, null);
+                picked.server().map(), requiredPlayers(category), false, MatchStatus.FORMING, now, null, null, null, null);
         matches.insert(match);
-        log.info("match {} created: {} on {}:{} map={} needs {} player(s), server {} {}", id, category.key(), picked.address(),
-                picked.server().port(), picked.server().map(), match.requiredPlayers(), picked.server().id(),
-                category.acceptRequired() ? "is RESERVED" : "is assigned (classic mode: no reservation)");
+        log.info("match {} created: {} on {}:{} map={} needs {} player(s), server {} is assigned (classic mode: no reservation)",
+                id, category.key(), picked.address(), picked.server().port(), picked.server().map(), match.requiredPlayers(),
+                picked.server().id());
         return match;
     }
 
@@ -402,23 +503,95 @@ public class SearchService {
     }
 
     /**
-     * The match has all its players (real + virtual). Everybody gets the server data - except when the game server reads
-     * its roster from this backend: then the players wait (MATCHED, match READY) until that server confirmed it armed
-     * the roster (or rosterAckTimeout passed), so the reservation check succeeds on the first try.
+     * The match has all its players (real + virtual). A classic match is READY at once: everybody gets the server. An
+     * Accept match is FULL and now looks for a free server, see {@link #reserveServer}.
      */
     private void completeMatch(MatchRecord match, int players) {
         Instant now = clock.instant();
-        matches.markReady(match.id(), now);
-        if (match.acceptRequired() && serverReadsRoster(match.serverId())) {
+        if (!match.acceptRequired()) {
+            matches.markReady(match.id(), now);
+            assignMembers(match);
+            log.info("match {} complete ({}/{}): {} -> {}:{} map={}", match.id(), players, match.requiredPlayers(),
+                    SearchStatus.READY_TO_CONNECT, match.serverHost(), match.serverPort(), match.map());
+            return;
+        }
+        matches.markFull(match.id());
+        log.info("match {} is full ({}/{}, {} virtual): looking for a free {} server", match.id(), players, match.requiredPlayers(),
+                fakes.countPlayersInMatch(match.id()), match.category());
+        matches.findById(match.id()).ifPresent(this::reserveServer);
+    }
+
+    /** the full matches that had no free server the last time: try again */
+    private void reserveServersForFullMatches() {
+        for (MatchRecord full : matches.findFull()) {
+            reserveServer(full);
+        }
+    }
+
+    /**
+     * FULL -> READY. The one place where an Accept match gets its server. The server is taken with the conditional
+     * {@code UPDATE ... WHERE state = 'AVAILABLE'} (GameServerRepository.reserve), together with the match row in one
+     * transaction, so two full matches can never hold the same server and a server is never RESERVED without its match.
+     * Nothing free that fits: the match stays FULL and is tried again by the next matcher run.
+     */
+    private void reserveServer(MatchRecord match) {
+        if (match.status() != MatchStatus.FULL) {
+            return;
+        }
+        ModeCategory category = ModeCategory.fromKey(match.category()).orElse(null);
+        if (category == null) {
+            return;
+        }
+        Instant now = clock.instant();
+        Optional<Set<String>> pool = mapPool(match.id());
+
+        for (GameServer server : servers.findFree(category.key(), now)) {
+            if (!serverFits(pool, server.map())) {
+                continue;
+            }
+            Optional<String> address = resolveIpv4(server.host());
+            if (address.isEmpty()) {
+                continue;
+            }
+            boolean reserved = Boolean.TRUE.equals(tx.execute(status -> {
+                if (!servers.reserve(server.id(), match.id(), now)
+                        || !matches.assignServer(match.id(), server.id(), address.get(), server.port(), server.map(), now)) {
+                    status.setRollbackOnly();
+                    return false;
+                }
+                return true;
+            }));
+            if (!reserved) {
+                continue;   // taken meanwhile: the next candidate
+            }
+            waitingForServerLogged.remove(match.id());
+            log.info("match {}: server {}:{} map={} is RESERVED", match.id(), address.get(), server.port(), server.map());
+            matches.findById(match.id()).ifPresent(this::serverReserved);
+            return;
+        }
+
+        if (waitingForServerLogged.add(match.id())) {
+            log.info("match {} is full but no free {} server runs {}: it waits for one", match.id(), category.key(),
+                    pool.map(p -> "one of " + p).orElse("a map"));
+        }
+    }
+
+    /**
+     * The match has its server. Everybody gets the server data - except when the game server reads its roster from this
+     * backend: then the players wait (MATCHED, match READY) until that server confirmed it armed the roster (or
+     * rosterAckTimeout passed), so the reservation check succeeds on the first try.
+     */
+    private void serverReserved(MatchRecord match) {
+        if (serverReadsRoster(match.serverId())) {
             log.info("match {} complete ({}/{}, {} virtual) on {}:{}: waiting for the game server to arm the roster", match.id(),
-                    players, match.requiredPlayers(), fakes.countPlayersInMatch(match.id()), match.serverHost(),
+                    match.requiredPlayers(), match.requiredPlayers(), fakes.countPlayersInMatch(match.id()), match.serverHost(),
                     match.serverPort());
             return;
         }
         assignMembers(match);
-        log.info("match {} complete ({}/{}, {} virtual): {} -> {}:{} map={}", match.id(), players, match.requiredPlayers(),
-                fakes.countPlayersInMatch(match.id()), match.acceptRequired() ? SearchStatus.WAITING_ACCEPT
-                        : SearchStatus.READY_TO_CONNECT, match.serverHost(), match.serverPort(), match.map());
+        log.info("match {} complete ({}/{}, {} virtual): {} -> {}:{} map={}", match.id(), match.requiredPlayers(),
+                match.requiredPlayers(), fakes.countPlayersInMatch(match.id()), SearchStatus.WAITING_ACCEPT, match.serverHost(),
+                match.serverPort(), match.map());
     }
 
     /** the real players of a complete match get the assignment */
@@ -432,7 +605,78 @@ public class SearchService {
                 promoted++;
             }
         }
+        if (match.acceptRequired()) {
+            startAccepting(match, now);
+        }
         return promoted;
+    }
+
+    /**
+     * READY -> ACCEPTING: the players have the server data, the Accept clock starts. A match with nobody who can accept (only
+     * searches added from the admin panel) has nothing to wait for and is ACCEPTED at once.
+     */
+    private void startAccepting(MatchRecord match, Instant now) {
+        if (!matches.markAccepting(match.id(), now.plus(props.acceptTimeout()))) {
+            return;   // already accepting
+        }
+        List<SearchRecord> members = searches.listLiveByMatch(match.id());
+        if (members.stream().noneMatch(SearchService::mustAccept)) {
+            matches.markAccepted(match.id(), now);
+            searches.promoteAccepted(match.id(), now);
+            log.info("match {}: nobody has to accept, ACCEPTED", match.id());
+            return;
+        }
+        log.info("match {} is ACCEPTING: {} player(s) have until {} ({})", match.id(), members.size(),
+                now.plus(props.acceptTimeout()), props.acceptTimeout());
+    }
+
+    /** a search that comes from the GC accepts through it; one added from the admin panel has nobody to accept for it */
+    private static boolean mustAccept(SearchRecord search) {
+        return "gc".equals(search.source());
+    }
+
+    /**
+     * The GC of a player says the game server reported everybody accepted (reservation stage 2, awaiting 0): POST
+     * /api/v1/matchmaking/accepted. The backend does not take it on trust: the player must be in a match that is ACCEPTING
+     * and be one of its members. When every real player of the match reported, the match is ACCEPTED.
+     */
+    public synchronized AcceptResult accept(long accountId, String requestId) {
+        Optional<SearchRecord> existing = searches.findLiveByAccount(accountId);
+        if (existing.isEmpty()) {
+            return new AcceptResult(false, "no_active_search", false, null);
+        }
+        SearchRecord current = existing.get();
+        if (requestId != null && current.requestId() != null && !requestId.equals(current.requestId())) {
+            return new AcceptResult(false, "request_id_mismatch", false, view(current));
+        }
+        if (current.matchId() == null) {
+            return new AcceptResult(false, "not_in_a_match", false, view(current));
+        }
+        Optional<MatchRecord> found = matches.findById(current.matchId());
+        if (found.isEmpty()) {
+            return new AcceptResult(false, "not_in_a_match", false, view(current));
+        }
+        MatchRecord match = found.get();
+        if (match.status() == MatchStatus.ACCEPTED && current.acceptedAt() != null) {
+            return new AcceptResult(true, "already_accepted", true, view(current));   // a repeated report
+        }
+        if (match.status() != MatchStatus.ACCEPTING || current.status() != SearchStatus.WAITING_ACCEPT) {
+            return new AcceptResult(false, "match_not_accepting", false, view(current));
+        }
+
+        Instant now = clock.instant();
+        searches.markAccepted(current.id(), now);
+        boolean everybody = searches.listLiveByMatch(match.id()).stream()
+                .allMatch(member -> !mustAccept(member) || member.id() == current.id() || member.acceptedAt() != null);
+        if (everybody) {
+            matches.markAccepted(match.id(), now);
+            searches.promoteAccepted(match.id(), now);
+            log.info("match {}: everybody accepted, ACCEPTED (last: account {})", match.id(), accountId);
+        } else {
+            log.info("match {}: account {} accepted, the others are still to accept", match.id(), accountId);
+        }
+        runMatcher();
+        return new AcceptResult(true, null, everybody, view(searches.findById(current.id()).orElseThrow()));
     }
 
     private boolean serverReadsRoster(long serverId) {
@@ -474,7 +718,7 @@ public class SearchService {
         }
         rosterPolls.put(server.get().id(), clock.instant());
         Optional<MatchRecord> match = matches.findById(matchId)
-                .filter(m -> m.serverId() == server.get().id() && (m.status() == MatchStatus.READY || m.status() == MatchStatus.FORMING));
+                .filter(m -> m.serverId() == server.get().id() && m.status().holdsServer());
         if (match.isEmpty()) {
             return Optional.empty();
         }
@@ -494,7 +738,7 @@ public class SearchService {
      * everybody it was made of (the client sends a stop when it connects, that must not make the match look smaller)
      */
     private int displayedPlayers(MatchRecord m) {
-        return m.status() == MatchStatus.FORMING ? playerCount(m.id()) : roster(m).size();
+        return m.status().isGathering() ? playerCount(m.id()) : roster(m).size();
     }
 
     /**
@@ -522,8 +766,8 @@ public class SearchService {
                     if (players >= forming.requiredPlayers()) {
                         break;
                     }
-                    if (!fake.category().equals(category.key()) || !mapCompatible(fake.maps(), forming.map())
-                            || fake.players() > forming.requiredPlayers() - players) {
+                    if (!fake.category().equals(category.key()) || fake.players() > forming.requiredPlayers() - players
+                            || !joinable(forming, category, fake.maps())) {
                         continue;
                     }
                     fakes.place(fake.id(), forming.id(), clock.instant());
@@ -541,18 +785,22 @@ public class SearchService {
     /**
      * A player who starts a new search has left the server the previous search gave them (a failed Accept / connect and
      * "search again" is the normal case, the client also does not tell the backend when a match is over). When they were
-     * alone in that complete match, the match ends and its server is AVAILABLE again right away instead of after the
-     * reservation TTL. A match shared with other players is left alone.
+     * alone in that match, an Accept that was still running is cancelled, any other match ends and its server is AVAILABLE
+     * again right away instead of after the reservation TTL. A match shared with other players is left alone.
      */
     private void releaseAbandonedMatches(long accountId) {
         Instant now = clock.instant();
         for (String matchId : searches.findMatchIdsByAccount(accountId)) {
             Optional<MatchRecord> found = matches.findById(matchId);
-            if (found.isEmpty() || found.get().status() != MatchStatus.READY) {
+            if (found.isEmpty() || !found.get().status().holdsServer()) {
                 continue;
             }
             MatchRecord match = found.get();
             if (searches.listByMatch(matchId).stream().anyMatch(member -> member.accountId() != accountId)) {
+                continue;
+            }
+            if (match.acceptRequired() && match.status() != MatchStatus.ACCEPTED) {
+                dissolve(match, "account " + accountId + " started a new search");
                 continue;
             }
             endMatch(matchId, MatchStatus.ENDED, now);
@@ -566,31 +814,70 @@ public class SearchService {
         }
     }
 
-    /** a participant left: if a forming match has nobody left it is dissolved and its server freed */
-    private void releaseMatchIfEmpty(String matchId) {
-        if (matchId == null) {
+    /**
+     * A participant left the match (cancelled, replaced or expired search). What that means depends on how far it is:
+     * gathering - the match only ends when nobody real is left, a full one gathers again; a match whose server is handed out
+     * and still to be accepted falls apart (the rest of the players search again); one that was accepted goes on (the player
+     * is connecting - the client sends its stop when it does).
+     */
+    private void memberLeft(SearchRecord leaver) {
+        if (leaver.matchId() == null) {
             return;
         }
-        matches.findById(matchId).ifPresent(match -> {
-            if (match.status() == MatchStatus.FORMING && searches.listLiveByMatch(matchId).isEmpty()) {
-                dissolve(match);
+        matches.findById(leaver.matchId()).ifPresent(match -> {
+            switch (match.status()) {
+                case FORMING, FULL -> {
+                    if (searches.listLiveByMatch(match.id()).isEmpty()) {
+                        dissolve(match, "nobody is in it any more");
+                    } else {
+                        revertIfUnderfilled(match);
+                    }
+                }
+                case READY, ACCEPTING -> {
+                    if (match.acceptRequired() && leaver.acceptedAt() == null) {
+                        dissolve(match, "account " + leaver.accountId() + " left before the Accept was over");
+                    }
+                }
+                default -> {
+                }
             }
         });
     }
 
-    /** a forming match falls apart: players back to SEARCHING, server AVAILABLE */
-    private void dissolve(MatchRecord match) {
+    /** a member (real or virtual) of a full match went: it gathers again until the missing players are there */
+    private void revertIfUnderfilled(MatchRecord match) {
+        if (match.status() == MatchStatus.FULL && playerCount(match.id()) < match.requiredPlayers()) {
+            matches.revertToForming(match.id());
+            waitingForServerLogged.remove(match.id());
+            log.info("match {} is not full any more ({}/{}), gathering again", match.id(), playerCount(match.id()),
+                    match.requiredPlayers());
+        }
+    }
+
+    /**
+     * The match falls apart: real players back to SEARCHING (a new match is made for them), virtual players back to
+     * SEARCHING, the server free again. A server whose game server was already told about the match is not handed out
+     * for serverReleaseCooldown: it needs that long to drop the reservation.
+     */
+    private void dissolve(MatchRecord match, String reason) {
         Instant now = clock.instant();
+        int members = 0;
         for (SearchRecord member : searches.listLiveByMatch(match.id())) {
             searches.unplace(member.id());
+            members++;
         }
         endMatch(match.id(), MatchStatus.CANCELLED, now);
-        servers.findById(match.serverId()).ifPresent(server -> {
-            if (match.id().equals(server.reservedMatchId())) {
-                servers.setState(server.id(), ServerState.AVAILABLE.name(), now);
-            }
-        });
-        log.info("match {} dissolved, server {} is AVAILABLE again", match.id(), match.serverId());
+        if (match.hasServer()) {
+            boolean handedOut = match.status() == MatchStatus.READY || match.status() == MatchStatus.ACCEPTING;
+            Instant availableAfter = handedOut ? now.plus(props.serverReleaseCooldown()) : null;
+            servers.findById(match.serverId()).ifPresent(server -> {
+                if (match.id().equals(server.reservedMatchId())) {
+                    servers.release(server.id(), match.id(), availableAfter, now);
+                }
+            });
+        }
+        log.info("match {} cancelled ({}): {} player(s) search again{}", match.id(), reason, members,
+                match.hasServer() ? ", server " + match.serverHost() + ":" + match.serverPort() + " is AVAILABLE again" : "");
     }
 
     private int requiredPlayers(ModeCategory category) {
@@ -665,11 +952,14 @@ public class SearchService {
         int fake = roster.size() - real.size();
         return new MatchView(m.id(), category.key(), category.label(), m.serverId(), m.serverHost(), m.serverPort(), m.map(),
                 m.status().name(), roster.size(), fake, m.requiredPlayers(), m.acceptRequired(), real, roster, m.createdAt(),
-                m.readyAt(), m.endedAt(), awaitingServer(m));
+                m.readyAt(), m.endedAt(), awaitingServer(m), m.acceptDeadlineAt(), m.acceptedAt());
     }
 
-    /** complete, but the players are still held until the game server confirms its roster */
+    /** complete, but the players are still held until a server is found / the game server confirms its roster */
     private boolean awaitingServer(MatchRecord m) {
+        if (m.status() == MatchStatus.FULL) {
+            return true;
+        }
         return m.status() == MatchStatus.READY && m.acceptRequired()
                 && searches.listLiveByMatch(m.id()).stream().anyMatch(r -> r.status() == SearchStatus.MATCHED);
     }
@@ -679,7 +969,7 @@ public class SearchService {
      * made of) and the virtual ones, numbered in the order they joined (RosterEntry.fakeAccountId).
      */
     private List<RosterEntry> roster(MatchRecord m) {
-        List<SearchRecord> members = m.status() == MatchStatus.FORMING ? searches.listLiveByMatch(m.id()) : searches.listByMatch(m.id());
+        List<SearchRecord> members = m.status().isGathering() ? searches.listLiveByMatch(m.id()) : searches.listByMatch(m.id());
         List<RosterEntry> roster = new ArrayList<>();
         for (Long accountId : new LinkedHashSet<>(members.stream().map(SearchRecord::accountId).toList())) {
             roster.add(new RosterEntry(accountId, false));
@@ -695,7 +985,9 @@ public class SearchService {
 
     /**
      * The roster of the match that is on a game server, for the srcds side (GET /api/v1/servers/roster): the newest
-     * forming / ready match of the registered server host:port. Empty when the server is unknown or has no match.
+     * match that holds the registered server host:port (READY / ACCEPTING / ACCEPTED, all READY to the srcds side). Empty when
+     * the server is unknown or has no match - for a server that armed a roster that means the match is gone (cancelled,
+     * ended) and its reservation has to be dropped.
      */
     public synchronized Optional<MatchRoster> rosterForServer(String address, int port) {
         Optional<GameServer> server = servers.findByHostPort(address.trim().toLowerCase(java.util.Locale.ROOT), port);
@@ -706,8 +998,8 @@ public class SearchService {
         return matches.findActiveByServer(server.get().id()).map(m -> {
             List<RosterEntry> roster = roster(m);
             int fake = (int) roster.stream().filter(RosterEntry::fake).count();
-            return new MatchRoster(m.id(), m.category(), m.status().name(), m.map(), m.acceptRequired(), m.requiredPlayers(),
-                    roster.size() - fake, fake, roster);
+            return new MatchRoster(m.id(), m.category(), m.status().serverView(), m.map(), m.acceptRequired(), m.requiredPlayers(),
+                    roster.size() - fake, fake, roster, m.status().name());
         });
     }
 
@@ -723,7 +1015,8 @@ public class SearchService {
             if (found.isPresent()) {
                 MatchRecord m = found.get();
                 progress = new SearchView.MatchProgress(m.id(), m.status().name(), displayedPlayers(m),
-                        fakes.countPlayersInMatch(m.id()), m.requiredPlayers(), m.map(), m.serverId(), awaitingServer(m));
+                        fakes.countPlayersInMatch(m.id()), m.requiredPlayers(), m.map(), m.serverId(), awaitingServer(m),
+                        m.acceptDeadlineAt());
                 if (r.status().isAssigned()) {
                     List<RosterEntry> roster = roster(m);
                     int fake = (int) roster.stream().filter(RosterEntry::fake).count();
@@ -804,18 +1097,25 @@ public class SearchService {
             }
         } else if (current.status() != FakeStatus.STOPPED) {
             boolean forming = current.matchId() != null && matches.findById(current.matchId())
-                    .map(m -> m.status() == MatchStatus.FORMING).orElse(false);
+                    .map(m -> m.status().isGathering()).orElse(false);
             fakes.stop(id, forming, clock.instant());
             log.info("fake search {} stopped{}", id, forming ? " (left the forming match " + current.matchId() + ")" : "");
+            if (forming) {
+                matches.findById(current.matchId()).ifPresent(this::revertIfUnderfilled);
+            }
         }
         return fakeView(fakes.findById(id).orElseThrow());
     }
 
     public synchronized void deleteFakeSearch(long id) {
+        Optional<FakeSearch> current = fakes.findById(id);
         if (!fakes.delete(id)) {
             throw ApiException.notFound("fake search " + id);
         }
         log.info("fake search {} deleted", id);
+        current.map(FakeSearch::matchId).flatMap(matches::findById)
+                .filter(m -> m.status().isGathering())
+                .ifPresent(this::revertIfUnderfilled);
     }
 
     private void requireFakePlayers() {

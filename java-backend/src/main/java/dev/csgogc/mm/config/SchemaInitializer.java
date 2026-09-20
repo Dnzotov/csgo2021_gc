@@ -36,6 +36,13 @@ final class SchemaInitializer {
             ensureColumn(connection, "matchmaking_search", "matched_at", "INTEGER");
             // Skirmish: the modes the player selected (RESEARCH_FINDINGS.md #54)
             ensureColumn(connection, "matchmaking_search", "variants", "TEXT");
+            // Accept lifecycle (RESEARCH_FINDINGS.md #63): when the player accepted, the deadline of the Accept phase of a
+            // match, when it was accepted by everybody, and the moment a server that was released from a cancelled match
+            // may be handed out again (the srcds side needs that long to drop the old reservation)
+            ensureColumn(connection, "matchmaking_search", "accepted_at", "INTEGER");
+            ensureColumn(connection, "matchmaking_match", "accept_deadline_at", "INTEGER");
+            ensureColumn(connection, "matchmaking_match", "accepted_at", "INTEGER");
+            ensureColumn(connection, "game_server", "available_after", "INTEGER");
         } catch (SQLException e) {
             throw new IllegalStateException("database migration failed", e);
         }

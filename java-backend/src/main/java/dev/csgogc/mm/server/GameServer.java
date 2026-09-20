@@ -27,5 +27,10 @@ public record GameServer(
         /** srcds maxplayers, informational */
         Integer maxPlayers,
         Instant createdAt,
-        Instant updatedAt) {
+        Instant updatedAt,
+        /**
+         * a server released from a cancelled Accept match is not handed out before this moment: its game server has to
+         * drop the old reservation first (RESEARCH_FINDINGS.md #63); null = free at once
+         */
+        Instant availableAfter) {
 }
