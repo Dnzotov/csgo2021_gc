@@ -42,6 +42,9 @@ private:
     // backend-driven roster (server_roster.h, RESEARCH_FINDINGS.md #55)
     void OnBackendRoster(const std::string &text);
     void OnBackendSkins();
+    void OnBackendEquipment();
+    void TakePendingEquipment();
+    void ApplyToUnappliedPlayers();
     void OnClientAuthenticated(uint64_t steamId);
     void ApplySkins(uint64_t steamId);
     void ReleaseRoster(const std::string &matchId);
@@ -73,10 +76,18 @@ public:
     // GC thread only.
     const SkinSync::MatchSnapshots &MatchSkins() const { return m_matchSkins; }
 
+    // equipment sync: the EquipmentSnapshots of the match on this server as the backend delivered them. GC thread only.
+    const EquipmentSync::MatchSnapshots &MatchEquipment() const { return m_matchEquipment; }
+
 private:
     std::mutex m_skinMutex;                    // the poller thread hands the newest snapshots over here
     SkinSync::MatchSnapshots m_pendingSkins;
     SkinSync::MatchSnapshots m_matchSkins;     // GC thread
+
+    // equipment sync: the EquipmentSnapshots of the match (type 43 data). The poller thread hands them over under m_skinMutex.
+    EquipmentSync::MatchSnapshots m_pendingEquipment;
+    bool m_pendingEquipmentSet{};
+    EquipmentSync::MatchSnapshots m_matchEquipment;   // GC thread
 
     // Phase D (GC thread): players BeginAuthSession accepted, and those whose snapshot was already handed to the game
     std::unordered_set<uint64_t> m_authenticated;

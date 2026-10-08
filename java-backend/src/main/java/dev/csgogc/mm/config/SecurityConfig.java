@@ -27,7 +27,7 @@ import org.springframework.security.web.util.matcher.RequestMatcher;
  * Access rules:
  * <ul>
  *   <li>/admin/** and everything the panel calls: logged-in admin (session cookie, CSRF protected);</li>
- *   <li>POST /api/v1/matchmaking/search|cancel|accepted|skin-snapshot: the GC, X-Api-Key (open only if backend.api-key is empty);</li>
+ *   <li>POST /api/v1/matchmaking/search|cancel|accepted|skin-snapshot|equipment-snapshot: the GC, X-Api-Key (open only if backend.api-key is empty);</li>
  *   <li>GET /api/v1/matchmaking/searches: admin session or API key;</li>
  *   <li>POST /api/v1/servers/state, GET /api/v1/servers/roster: a game server, X-Api-Key;</li>
  *   <li>GET /api/v1/health: public.</li>
@@ -61,11 +61,11 @@ public class SecurityConfig {
             auth.requestMatchers("/api/v1/health", "/error", "/admin/login", "/admin/assets/**", "/").permitAll();
             if (apiKeyConfigured) {
                 auth.requestMatchers(HttpMethod.POST, "/api/v1/matchmaking/search", "/api/v1/matchmaking/cancel",
-                                "/api/v1/matchmaking/accepted", "/api/v1/matchmaking/skin-snapshot")
+                                "/api/v1/matchmaking/accepted", "/api/v1/matchmaking/skin-snapshot", "/api/v1/matchmaking/equipment-snapshot")
                         .hasAnyRole("API", "ADMIN");
             } else {
                 auth.requestMatchers(HttpMethod.POST, "/api/v1/matchmaking/search", "/api/v1/matchmaking/cancel",
-                                "/api/v1/matchmaking/accepted", "/api/v1/matchmaking/skin-snapshot")
+                                "/api/v1/matchmaking/accepted", "/api/v1/matchmaking/skin-snapshot", "/api/v1/matchmaking/equipment-snapshot")
                         .permitAll();
             }
             auth.requestMatchers(HttpMethod.GET, "/api/v1/matchmaking/searches", "/api/v1/matchmaking/search/*",

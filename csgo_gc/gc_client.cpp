@@ -44,7 +44,28 @@ ClientGC::ClientGC(uint64_t steamId)
     // skin sync: a member's snapshot is sent when it adopts the leader's search; it is the loadout this client started with
     // (a solo / leader search takes a fresh one at MatchmakingStart)
     BackendClient::SetSkinSnapshot(m_inventory.CollectEquippedSkins());
+    SyncEquipmentSnapshot();
     BackendClient::WatchAccount(AccountId());
+}
+
+// Equipment sync: the base weapons the player picked (m_defaultEquips), checked against the game's items_game.txt here as well as on
+// the game server. An unreadable items_game.txt sends nothing: the game server then uses the mode's normal base loadout.
+void ClientGC::SyncEquipmentSnapshot()
+{
+    const EquipmentSync::LoadoutTable *table = EquipmentSync::LoadoutTable::Shared();
+    if (!table)
+    {
+        Platform::Print("[EQUIP_SYNC] items_game.txt could not be read: no equipment snapshot is sent\n");
+        return;
+    }
+
+    EquipmentSync::Checked checked = EquipmentSync::Check(m_inventory.CollectDefaultEquips(), *table);
+    for (const std::string &rejected : checked.rejected)
+    {
+        Platform::Print("[EQUIP_SYNC] loadout entry not sent: %s\n", rejected.c_str());
+    }
+
+    BackendClient::SetEquipmentSnapshot(std::move(checked.accepted));
 }
 
 ClientGC::~ClientGC()
@@ -630,6 +651,7 @@ void ClientGC::OnMatchmakingStart(GCMessageRead &messageRead)
     // skin sync (research/backend_skin_sync_design.md): the backend gets what this player has equipped, sent by the backend worker
     // right after it registered the search; the game server of the match receives it from the backend, not over P2P
     BackendClient::SetSkinSnapshot(m_inventory.CollectEquippedSkins());
+    SyncEquipmentSnapshot();   // equipment sync: the base weapons picked now, sent right after the search is registered
 
     BackendClient::SearchStarted(info, m_steamId);
 

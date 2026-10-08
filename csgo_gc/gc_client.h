@@ -61,6 +61,9 @@ private:
     void ProcessCasketItemExtract(GCMessageRead &messageRead);
 
     void BuildMatchmakingHello(CMsgGCCStrike15_v2_MatchmakingGC2ClientHello &message);
+
+    // equipment sync: reads the base weapons picked in the loadout, validates them against items_game.txt and hands them to the backend client
+    void SyncEquipmentSnapshot();
     void BuildClientWelcome(CMsgClientWelcome &message, const CMsgCStrike15Welcome &csWelcome,
         const CMsgGCCStrike15_v2_MatchmakingGC2ClientHello &matchmakingHello);
     void SendRankUpdate();

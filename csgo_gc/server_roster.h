@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "skin_snapshot.h"
+#include "equipment_snapshot.h"
 
 // srcds side of the backend-driven roster (RESEARCH_FINDINGS.md #55).
 //
@@ -127,7 +128,11 @@ public:
     // in late, was replaced, the match is gone: matchId empty). Independent of Handler: the roster decision logic never sees it.
     using SkinHandler = std::function<void(const SkinSync::MatchSnapshots &snapshots)>;
 
-    Poller(std::string address, uint16_t port, Handler handler, SkinHandler skinHandler = {});
+    // equipment sync: the same for the EquipmentSnapshots (reported only when they change). `skinsFollow` is true when the skin
+    // handler is called right after this one in the same poll: the receiver then waits for it and applies both together.
+    using EquipmentHandler = std::function<void(const EquipmentSync::MatchSnapshots &snapshots, bool skinsFollow)>;
+
+    Poller(std::string address, uint16_t port, Handler handler, SkinHandler skinHandler = {}, EquipmentHandler equipmentHandler = {});
     ~Poller(); // stops and joins
 
     Poller(const Poller &) = delete;
@@ -143,6 +148,7 @@ private:
     const uint16_t m_port;
     const Handler m_handler;
     const SkinHandler m_skinHandler;
+    const EquipmentHandler m_equipmentHandler;
 
     std::mutex m_mutex;
     std::condition_variable m_cv;

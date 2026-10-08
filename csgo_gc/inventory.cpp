@@ -407,6 +407,46 @@ void Inventory::BuildCacheSubscription(CMsgSOCacheSubscribed &message, int level
     }
 }
 
+std::vector<EquipmentSync::Entry> Inventory::CollectDefaultEquips() const
+{
+    std::vector<EquipmentSync::Entry> result;
+    for (const CSOEconDefaultEquippedDefinitionInstanceClient &equip : m_defaultEquips)
+    {
+        if (equip.item_definition() == 0)
+        {
+            continue;   // an unequip marker
+        }
+        result.push_back({ equip.item_definition(), equip.class_id(), equip.slot_id() });
+    }
+
+    std::sort(result.begin(), result.end(), [](const EquipmentSync::Entry &a, const EquipmentSync::Entry &b)
+    {
+        return a.classId != b.classId ? a.classId < b.classId : a.slotId < b.slotId;
+    });
+    return result;
+}
+
+size_t Inventory::AppendEquipmentCache(const EquipmentSync::ApplyPlan &plan, CMsgSOCacheSubscribed &message)
+{
+    if (!plan.playerMatched || plan.accountId == 0 || plan.entries.empty())
+    {
+        return 0;
+    }
+
+    CMsgSOCacheSubscribed_SubscribedType *object = message.add_objects();
+    object->set_type_id(SOTypeDefaultEquippedDefinitionInstanceClient);
+    for (const EquipmentSync::Entry &entry : plan.entries)
+    {
+        CSOEconDefaultEquippedDefinitionInstanceClient equip;
+        equip.set_account_id(plan.accountId);   // key field of the SO object
+        equip.set_item_definition(entry.defIndex);
+        equip.set_class_id(entry.classId);      // key field
+        equip.set_slot_id(entry.slotId);        // key field
+        object->add_object_data(equip.SerializeAsString());
+    }
+    return plan.entries.size();
+}
+
 std::vector<SkinSync::Item> Inventory::CollectEquippedSkins() const
 {
     // deterministic order (the map is unordered)

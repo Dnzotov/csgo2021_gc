@@ -39,6 +39,7 @@ add_library(csgo_gc SHARED
     networking_server.cpp
     server_roster.cpp
     skin_snapshot.cpp
+    equipment_snapshot.cpp
     steam_hook.cpp
     test_accept.cpp
     test_diag.cpp

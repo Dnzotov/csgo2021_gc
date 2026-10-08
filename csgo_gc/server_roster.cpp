@@ -276,11 +276,12 @@ void Controller::ConfirmIfReady()
 
 // ---- Poller -------------------------------------------------------------------------------------------------
 
-Poller::Poller(std::string address, uint16_t port, Handler handler, SkinHandler skinHandler)
+Poller::Poller(std::string address, uint16_t port, Handler handler, SkinHandler skinHandler, EquipmentHandler equipmentHandler)
     : m_address{ std::move(address) }
     , m_port{ port }
     , m_handler{ std::move(handler) }
     , m_skinHandler{ std::move(skinHandler) }
+    , m_equipmentHandler{ std::move(equipmentHandler) }
 {
     m_thread = std::thread{ &Poller::Run, this };
 }
@@ -322,6 +323,7 @@ void Poller::Run()
 
     std::string lastKey;
     std::string lastSkinKey;
+    std::string lastEquipmentKey;
     while (true)
     {
         // 1. tell the backend which rosters are armed (before the next poll: the players are waiting for it)
@@ -376,26 +378,52 @@ void Poller::Run()
             snapshot.state = Snapshot::State::Unavailable;
         }
 
-        // skin sync: the snapshots of the match, reported when they change (independent of the roster key below)
-        if (m_skinHandler)
+        // skin sync + equipment sync: the snapshots of the match, each reported when it changes (independent of the roster key below).
+        // Both keys are worked out first: when both changed, the equipment is handed over without an event of its own and the skin
+        // event (called right after) makes the server apply the two together.
         {
             SkinSync::MatchSnapshots skins;
+            EquipmentSync::MatchSnapshots equipment;
             if (result == BackendClient::RosterResult::Ok)
             {
                 skins.matchId = roster.matchId;
                 skins.players = roster.skinSnapshots;
                 skins.missing = roster.skinMissing;
+                equipment.matchId = roster.matchId;
+                equipment.players = roster.equipmentSnapshots;
+                equipment.missing = roster.equipmentMissing;
             }
 
             // a backend that merely did not answer must not wipe what the server already has
-            if (result == BackendClient::RosterResult::Ok || result == BackendClient::RosterResult::NoMatch)
+            const bool answered = result == BackendClient::RosterResult::Ok || result == BackendClient::RosterResult::NoMatch;
+            bool skinChanged = false;
+            bool equipmentChanged = false;
+            if (m_skinHandler && answered)
             {
                 const std::string skinKey = skins.matchId.empty() ? std::string{} : SkinSync::Signature(skins);
                 if (skinKey != lastSkinKey)
                 {
                     lastSkinKey = skinKey;
-                    m_skinHandler(skins);
+                    skinChanged = true;
                 }
+            }
+            if (m_equipmentHandler && answered)
+            {
+                const std::string equipmentKey = equipment.matchId.empty() ? std::string{} : EquipmentSync::Signature(equipment);
+                if (equipmentKey != lastEquipmentKey)
+                {
+                    lastEquipmentKey = equipmentKey;
+                    equipmentChanged = true;
+                }
+            }
+
+            if (equipmentChanged)
+            {
+                m_equipmentHandler(equipment, skinChanged);
+            }
+            if (skinChanged)
+            {
+                m_skinHandler(skins);
             }
         }
 

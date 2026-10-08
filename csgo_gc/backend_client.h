@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "skin_snapshot.h"
+#include "equipment_snapshot.h"
 
 // Client of the Java matchmaking backend (java-backend/, RESEARCH_FINDINGS.md #47/#48/#49).
 //
@@ -129,6 +130,14 @@ void StopPolling();
 // matchmaking. Does nothing when the backend is not configured.
 void SetSkinSnapshot(std::vector<SkinSync::Item> items);
 
+// ---- equipment sync (research/equipment_sync_phase0_type43.md) ----
+// The base weapons this player picked (Inventory::CollectDefaultEquips, already validated against items_game.txt). Sent exactly
+// like the skin snapshot, as a separate POST /api/v1/matchmaking/equipment-snapshot {account_id, request_id, entries[]}, by the
+// worker thread right after the tracked search was registered (again) or a party member's search was adopted. Call it before
+// SearchStarted / WatchAccount. Do not call it when the loadout could not be read: nothing is then sent and the game server uses
+// the mode's normal base loadout. A failure never affects matchmaking.
+void SetEquipmentSnapshot(std::vector<EquipmentSync::Entry> entries);
+
 // A party member's client never sends a search: the leader's does. From now on the worker asks the backend once a second
 // whether this account has a search (GET /matchmaking/account/<id>) whenever it tracks none of its own; a search that belongs
 // to a party is adopted: it is tracked like a search this client started, and the result handler gets it first with
@@ -161,6 +170,10 @@ struct ServerRoster
     // skin sync: the EquippedSkinSnapshot of every REAL player of the match that sent one, and the real players that did not
     std::vector<SkinSync::PlayerSnapshot> skinSnapshots;
     std::vector<uint32_t> skinMissing;
+
+    // equipment sync: the EquipmentSnapshot of every REAL player of the match that sent one, and the real players that did not
+    std::vector<EquipmentSync::PlayerSnapshot> equipmentSnapshots;
+    std::vector<uint32_t> equipmentMissing;
 };
 
 // the body of GET /servers/roster (exposed for the offline tests): false when it is not a roster

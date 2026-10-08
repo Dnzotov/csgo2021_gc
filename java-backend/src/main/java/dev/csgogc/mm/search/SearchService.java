@@ -10,6 +10,8 @@ import dev.csgogc.mm.mode.ModeCategory;
 import dev.csgogc.mm.server.GameServer;
 import dev.csgogc.mm.server.GameServerRepository;
 import dev.csgogc.mm.server.ServerState;
+import dev.csgogc.mm.equipment.EquipmentSnapshotRequest;
+import dev.csgogc.mm.equipment.EquipmentSnapshotStore;
 import dev.csgogc.mm.skin.SkinSnapshotRequest;
 import dev.csgogc.mm.skin.SkinSnapshotStore;
 import dev.csgogc.mm.web.ApiException;
@@ -94,7 +96,20 @@ public class SearchService {
                               /** the equipped skins of the REAL players of this match that sent a snapshot (research/backend_skin_sync_design.md) */
                               List<SkinSnapshotView> skinSnapshots,
                               /** the real players of this match without a snapshot: they get no custom skins, the match is not affected */
-                              List<Long> skinMissing) {
+                              List<Long> skinMissing,
+                              /** the base weapons (type 43 data) the REAL players of this match chose and sent; keyed by account_id */
+                              List<EquipmentSnapshotView> equipmentSnapshots,
+                              /** the real players of this match without an equipment snapshot: the mode's normal base loadout applies */
+                              List<Long> equipmentMissing) {
+    }
+
+    /** one player's EquipmentSnapshot as the game server sees it */
+    public record EquipmentSnapshotView(long accountId, String steamId64, Instant receivedAt,
+                                        List<EquipmentSnapshotRequest.Entry> entries) {
+    }
+
+    /** POST /api/v1/matchmaking/equipment-snapshot: stored; matchId is set once the search is in a match */
+    public record EquipmentStoreResult(int entries, String matchId) {
     }
 
     /** one player's EquippedSkinSnapshot as the game server sees it */
@@ -118,6 +133,7 @@ public class SearchService {
     private final Clock clock;
     private final TransactionTemplate tx;
     private final SkinSnapshotStore skins;
+    private final EquipmentSnapshotStore equipment;
 
     /** a snapshot nobody removed (a bug, a crash between two steps) is dropped after this long anyway */
     private static final Duration SKIN_SNAPSHOT_MAX_AGE = Duration.ofHours(6);
@@ -131,14 +147,17 @@ public class SearchService {
     private final Set<String> rosterAcks = ConcurrentHashMap.newKeySet();
     /** "match@snapshots" that already logged "snapshot attached" (once per change, not per poll) */
     private final Set<String> skinAttachLogged = ConcurrentHashMap.newKeySet();
+    /** the same for the equipment snapshots */
+    private final Set<String> equipmentAttachLogged = ConcurrentHashMap.newKeySet();
     /** "match@fill time" that already logged that its fake players wait for the gather window (once, not every second) */
     private final Set<String> fillWaitLogged = ConcurrentHashMap.newKeySet();
 
     public SearchService(SearchRepository searches, MatchRepository matches, GameServerRepository servers,
                          FakeSearchRepository fakes, FakeSettingsRepository fakeSettings, BackendProperties props, Clock clock,
-                         TransactionTemplate tx, SkinSnapshotStore skins) {
+                         TransactionTemplate tx, SkinSnapshotStore skins, EquipmentSnapshotStore equipment) {
         this.tx = tx;
         this.skins = skins;
+        this.equipment = equipment;
         this.fakeSettings = fakeSettings;
         this.searches = searches;
         this.matches = matches;
@@ -320,6 +339,7 @@ public class SearchService {
         memberLeft(current);
         log.info("search cancelled: account={}", accountId);
         purgeSkinSnapshots();
+        purgeEquipmentSnapshots();
         runMatcher();
         return new CancelResult(true, null, view(searches.findById(current.id()).orElseThrow()));
     }
@@ -440,6 +460,7 @@ public class SearchService {
         searches.deleteFinishedBefore(cutoff);
         matches.deleteEndedBefore(cutoff);
         purgeSkinSnapshots();
+        purgeEquipmentSnapshots();
     }
 
     // ------------------------------------------------------------------------------------------- skin snapshots
@@ -498,6 +519,69 @@ public class SearchService {
         return skins.size();
     }
 
+    // ------------------------------------------------------------------------------------------- equipment snapshots
+
+    /**
+     * POST /api/v1/matchmaking/equipment-snapshot: the GC of a player says which base weapons it picked. Same proof as the
+     * skin snapshot: a LIVE search of the account with this request_id (404 = none, 409 = another search, i.e. stale). The
+     * entries are checked again here (class 2/3, slot 2..7 / 14..19, no (class, slot) twice); the weapon rules of
+     * items_game.txt are applied by the game server, which has the file. Nothing about the matchmaking itself changes.
+     */
+    public synchronized EquipmentStoreResult submitEquipmentSnapshot(EquipmentSnapshotRequest request) {
+        Set<Long> keys = new java.util.HashSet<>();
+        for (EquipmentSnapshotRequest.Entry entry : request.entries()) {
+            if (!EquipmentSnapshotRequest.allowedSlot(entry.slotId())) {
+                throw ApiException.badRequest("invalid_slot", "slot " + entry.slotId() + " is not a pistol (2..7) or rifle (14..19) slot");
+            }
+            if (!keys.add(((long) entry.classId() << 32) | entry.slotId())) {
+                throw ApiException.badRequest("duplicate_slot",
+                        "class " + entry.classId() + " slot " + entry.slotId() + " appears twice");
+            }
+        }
+        log.info("[EQUIP_SYNC] snapshot received: account={} request_id={} entries={}", request.accountId(), request.requestId(),
+                request.entries().size());
+        SearchRecord live = searches.findLiveByAccount(request.accountId())
+                .orElseThrow(() -> ApiException.notFound("no live search for account " + request.accountId()));
+        if (live.requestId() == null || !live.requestId().equals(request.requestId())) {
+            throw ApiException.conflict("request_id_mismatch",
+                    "the live search of account " + request.accountId() + " is not request_id " + request.requestId());
+        }
+        equipment.put(request);
+        log.info("[EQUIP_SYNC] snapshot stored: account={} request_id={} entries={}{}", request.accountId(), request.requestId(),
+                request.entries().size(), live.matchId() == null ? "" : " match=" + live.matchId());
+        for (EquipmentSnapshotRequest.Entry entry : request.entries()) {
+            log.info("[EQUIP_SYNC]   def={} class={} slot={}", entry.itemDefinition(), entry.classId(), entry.slotId());
+        }
+        return new EquipmentStoreResult(request.entries().size(), live.matchId());
+    }
+
+    /** same lifecycle as purgeSkinSnapshots: live search with that request_id, or its match still alive; absolute age limit */
+    synchronized void purgeEquipmentSnapshots() {
+        Instant now = clock.instant();
+        for (EquipmentSnapshotStore.Stored stored : equipment.all()) {
+            boolean keep = false;
+            if (stored.receivedAt().plus(SKIN_SNAPSHOT_MAX_AGE).isAfter(now)) {
+                Optional<SearchRecord> live = searches.findLiveByAccount(stored.accountId());
+                if (live.isPresent() && stored.requestId().equals(live.get().requestId())) {
+                    keep = true;
+                } else {
+                    Optional<SearchRecord> own = searches.findByRequestId(stored.requestId());
+                    keep = own.isPresent() && own.get().matchId() != null
+                            && matches.findById(own.get().matchId()).map(m -> m.status().isLive()).orElse(false);
+                }
+            }
+            if (!keep && equipment.remove(stored.accountId())) {
+                log.info("[EQUIP_SYNC] snapshot removed: account={} request_id={} (search / match over)", stored.accountId(),
+                        stored.requestId());
+            }
+        }
+    }
+
+    /** stored equipment snapshots, for tests */
+    public int equipmentSnapshotCount() {
+        return equipment.size();
+    }
+
     // ------------------------------------------------------------------------------------------- the matcher
 
     private void runMatcher() {
@@ -516,6 +600,7 @@ public class SearchService {
         waitingForServerLogged.remove(matchId);
         fillWaitLogged.removeIf(key -> key.startsWith(matchId + "@"));
         skinAttachLogged.removeIf(key -> key.startsWith(matchId + "@"));
+        equipmentAttachLogged.removeIf(key -> key.startsWith(matchId + "@"));
     }
 
     private void place(SearchRecord search) {
@@ -1293,8 +1378,28 @@ public class SearchService {
                 log.info("[SKIN_SYNC] snapshot attached to match {}: {} player(s) with a snapshot, {} without", m.id(),
                         snapshots.size(), missing.size());
             }
+            // equipment (type 43 data): keyed by account_id exactly like the skin snapshots, never by position
+            List<EquipmentSnapshotView> equipmentSnapshots = new ArrayList<>();
+            List<Long> equipmentMissing = new ArrayList<>();
+            for (RosterEntry entry : roster) {
+                if (entry.fake()) {
+                    continue;
+                }
+                Optional<EquipmentSnapshotStore.Stored> stored = equipment.get(entry.accountId());
+                if (stored.isPresent()) {
+                    equipmentSnapshots.add(new EquipmentSnapshotView(entry.accountId(),
+                            Long.toString(STEAM_ID64_BASE + entry.accountId()), stored.get().receivedAt(), stored.get().entries()));
+                } else {
+                    equipmentMissing.add(entry.accountId());
+                }
+            }
+            if (!equipmentSnapshots.isEmpty() && equipmentAttachLogged.add(m.id() + "@" + equipmentSnapshots.size())) {
+                log.info("[EQUIP_SYNC] roster equipment attached to match {}: {} player(s) with a snapshot, {} without", m.id(),
+                        equipmentSnapshots.size(), equipmentMissing.size());
+            }
             return new MatchRoster(m.id(), m.category(), m.status().serverView(), m.map(), m.acceptRequired(), roster.size(),
-                    roster.size() - fake, fake, roster, m.status().name(), List.copyOf(snapshots), List.copyOf(missing));
+                    roster.size() - fake, fake, roster, m.status().name(), List.copyOf(snapshots), List.copyOf(missing),
+                    List.copyOf(equipmentSnapshots), List.copyOf(equipmentMissing));
         });
     }
 

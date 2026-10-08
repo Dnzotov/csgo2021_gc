@@ -56,6 +56,7 @@ constexpr const char *SearchPath = "/api/v1/matchmaking/search";
 constexpr const char *CancelPath = "/api/v1/matchmaking/cancel";
 constexpr const char *AcceptedPath = "/api/v1/matchmaking/accepted";
 constexpr const char *SkinSnapshotPath = "/api/v1/matchmaking/skin-snapshot";
+constexpr const char *EquipmentSnapshotPath = "/api/v1/matchmaking/equipment-snapshot";
 constexpr const char *AccountPath = "/api/v1/matchmaking/account";
 constexpr int WatchIntervalMs = 1000;     // GET /account/<id> while this client has no search of its own (party members)
 constexpr int WatchFailureIntervalMs = 5000;
@@ -623,6 +624,42 @@ bool ParseRosterResponse(const std::string &body, ServerRoster &roster)
             if (id.type == Json::Type::Number && id.number >= 1 && id.number <= 4294967295.0)
             {
                 roster.skinMissing.push_back(static_cast<uint32_t>(id.number));
+            }
+        }
+    }
+
+    // equipment sync: optional, an older backend does not send them
+    if (const Json *snapshots = root.Get("equipment_snapshots"))
+    {
+        for (const Json &entry : snapshots->array)
+        {
+            const double id = entry.Number("account_id", -1);
+            if (id < 1 || id > 4294967295.0)
+            {
+                continue;
+            }
+
+            EquipmentSync::PlayerSnapshot snapshot;
+            snapshot.accountId = static_cast<uint32_t>(id);
+            snapshot.steamId64 = strtoull(entry.String("steam_id64").c_str(), nullptr, 10);
+            if (const Json *entries = entry.Get("entries"))
+            {
+                for (const Json &e : entries->array)
+                {
+                    snapshot.entries.push_back({ static_cast<uint32_t>(e.Number("item_definition")),
+                        static_cast<uint32_t>(e.Number("class_id")), static_cast<uint32_t>(e.Number("slot_id")) });
+                }
+            }
+            roster.equipmentSnapshots.push_back(std::move(snapshot));
+        }
+    }
+    if (const Json *missing = root.Get("equipment_missing"))
+    {
+        for (const Json &id : missing->array)
+        {
+            if (id.type == Json::Type::Number && id.number >= 1 && id.number <= 4294967295.0)
+            {
+                roster.equipmentMissing.push_back(static_cast<uint32_t>(id.number));
             }
         }
     }
@@ -1505,6 +1542,19 @@ public:
         m_skinSet = true;
     }
 
+    // the current EquipmentSnapshot; sent by QueueEquipmentSnapshot at the same moments as the skin snapshot
+    void SetEquipmentSnapshot(std::vector<EquipmentSync::Entry> entries)
+    {
+        if (!m_enabled)
+        {
+            return;
+        }
+
+        std::lock_guard lock{ m_mutex };
+        m_equipEntries = std::move(entries);
+        m_equipSet = true;
+    }
+
     void WatchAccount(uint32_t accountId)
     {
         if (!m_enabled || accountId == 0)
@@ -1584,6 +1634,33 @@ private:
         }
 
         Enqueue({ "skin-snapshot", SkinSnapshotPath, SkinSync::BuildSnapshotBody(accountId, requestId, items), Clock::now(), note });
+    }
+
+    // POST /matchmaking/equipment-snapshot for the same search (called without the lock held); a separate request, so a failure of
+    // one snapshot never touches the other
+    void QueueEquipmentSnapshot(uint32_t accountId, const std::string &requestId)
+    {
+        std::vector<EquipmentSync::Entry> entries;
+        {
+            std::lock_guard lock{ m_mutex };
+            if (!m_equipSet || accountId == 0 || requestId.empty())
+            {
+                return;
+            }
+
+            entries = m_equipEntries;
+        }
+
+        const std::string note = "account=" + std::to_string(accountId) + " request_id=" + requestId + " entries="
+            + std::to_string(entries.size());
+        Log("[EQUIP_SYNC] snapshot created: %s", note.c_str());
+        for (const EquipmentSync::Entry &entry : entries)
+        {
+            Log("[EQUIP_SYNC]   %s", EquipmentSync::Describe(entry).c_str());
+        }
+
+        Enqueue({ "equipment-snapshot", EquipmentSnapshotPath, EquipmentSync::BuildSnapshotBody(accountId, requestId, entries),
+            Clock::now(), note });
     }
 
     // the account of this client: asks whether the leader of a party started a search for it
@@ -1783,10 +1860,12 @@ private:
             return;
         }
 
-        const bool skin = std::string_view{ job.kind } == "skin-snapshot";
+        const bool equipment = std::string_view{ job.kind } == "equipment-snapshot";
+        const bool skin = std::string_view{ job.kind } == "skin-snapshot" || equipment;   // both are snapshots with the same delivery rules
+        const char *tag = equipment ? "[EQUIP_SYNC]" : "[SKIN_SYNC]";
         if (skin)
         {
-            Log("[SKIN_SYNC] snapshot sent: POST %s%s %s", m_endpoint.basePath.c_str(), job.path, job.note.c_str());
+            Log("%s snapshot sent: POST %s%s %s", tag, m_endpoint.basePath.c_str(), job.path, job.note.c_str());
         }
         else
         {
@@ -1813,12 +1892,12 @@ private:
         {
             if (result.status >= 200 && result.status < 300)
             {
-                Log("[SKIN_SYNC] snapshot accepted by the backend (HTTP %d in %lld ms): %s", result.status,
+                Log("%s snapshot accepted by the backend (HTTP %d in %lld ms): %s", tag, result.status,
                     static_cast<long long>(tookMs), OneLine(result.body, 200).c_str());
             }
             else
             {
-                Log("[SKIN_SYNC] snapshot NOT accepted (%s in %lld ms): %s -- matchmaking is not affected",
+                Log("%s snapshot NOT accepted (%s in %lld ms): %s -- matchmaking is not affected", tag,
                     result.status ? ("HTTP " + std::to_string(result.status)).c_str() : result.error.c_str(),
                     static_cast<long long>(tookMs), OneLine(result.body, 200).c_str());
             }
@@ -1961,6 +2040,7 @@ private:
                 if (sendSkin)
                 {
                     QueueSkinSnapshot(skinAccount, step.requestId);
+                    QueueEquipmentSnapshot(skinAccount, step.requestId);
                 }
                 return;
             }
@@ -1969,6 +2049,7 @@ private:
         if (sendSkin)
         {
             QueueSkinSnapshot(skinAccount, step.requestId);
+            QueueEquipmentSnapshot(skinAccount, step.requestId);
         }
 
         if (parsed.requestId.empty())
@@ -2046,6 +2127,7 @@ private:
             parsed.mode.c_str(), parsed.status.c_str(), accountId);
 
         QueueSkinSnapshot(accountId, parsed.requestId);
+        QueueEquipmentSnapshot(accountId, parsed.requestId);
 
         parsed.discovered = true;
         Deliver(parsed);
@@ -2085,6 +2167,10 @@ private:
     // the EquippedSkinSnapshot of this player (SetSkinSnapshot)
     std::vector<SkinSync::Item> m_skinItems;
     bool m_skinSet{};
+
+    // the EquipmentSnapshot of this player (SetEquipmentSnapshot)
+    std::vector<EquipmentSync::Entry> m_equipEntries;
+    bool m_equipSet{};
 
     // the search being tracked (its request id lets the backend tell searches apart); cleared by SearchCancelled
     uint32_t m_activeAccountId{};
@@ -2199,6 +2285,17 @@ void SetSkinSnapshot(std::vector<SkinSync::Item> items)
     try
     {
         Client::Get().SetSkinSnapshot(std::move(items));
+    }
+    catch (...)
+    {
+    }
+}
+
+void SetEquipmentSnapshot(std::vector<EquipmentSync::Entry> entries)
+{
+    try
+    {
+        Client::Get().SetEquipmentSnapshot(std::move(entries));
     }
     catch (...)
     {

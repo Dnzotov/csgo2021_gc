@@ -4,6 +4,7 @@
 #include "item_schema.h"
 #include "random.h"
 #include "skin_snapshot.h"
+#include "equipment_snapshot.h"
 
 class KeyValue;
 
@@ -26,6 +27,16 @@ public:
     // BuildCacheSubscription(server = true): owner SteamID, equipped items with their equipped_state and attributes (paint kit 6,
     // seed 7, wear 8, StatTrak 80/81, name 111, stickers 113+), persona data. Returns the number of items written.
     static size_t BuildServerCache(const ItemSchema &schema, const SkinSync::ApplyPlan &plan, int level, CMsgSOCacheSubscribed &message);
+
+    // Equipment Sync, client side: the base weapons the player picked (m_defaultEquips: the CSOEconDefaultEquippedDefinitionInstanceClient
+    // the loadout screen creates), ordered by class then slot. Raw: the caller validates them (EquipmentSync::Check). An item with a
+    // skin is an inventory item with an equipped_state and travels in CollectEquippedSkins, not here.
+    std::vector<EquipmentSync::Entry> CollectDefaultEquips() const;
+
+    // Equipment Sync, game server side: appends ONE SO object of type 43 (CSOEconDefaultEquippedDefinitionInstanceClient, one
+    // object_data per accepted entry, account_id = the plan's account) to a CacheSubscribed that BuildServerCache already filled.
+    // Only adds; the objects already in `message` are not read or changed. Returns the number of entries written (0: nothing added).
+    static size_t AppendEquipmentCache(const EquipmentSync::ApplyPlan &plan, CMsgSOCacheSubscribed &message);
 
     const ItemSchema &Schema() const { return m_itemSchema; }
 

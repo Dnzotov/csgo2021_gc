@@ -2,6 +2,7 @@ package dev.csgogc.mm.search;
 
 import dev.csgogc.mm.server.GameServer;
 import dev.csgogc.mm.server.GameServerService;
+import dev.csgogc.mm.equipment.EquipmentSnapshotRequest;
 import dev.csgogc.mm.skin.SkinSnapshotRequest;
 import dev.csgogc.mm.web.ApiException;
 import jakarta.validation.Valid;
@@ -179,6 +180,23 @@ public class SearchApiController {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("stored", true);
         body.put("items", result.items());
+        if (result.matchId() != null) {
+            body.put("match_id", result.matchId());
+        }
+        return body;
+    }
+
+    /**
+     * The GC of a player reports the base weapons it picked (EquipmentSnapshot, research/equipment_sync_phase0_type43.md).
+     * Separate from the skin snapshot; same proof (live search with this request_id). The snapshots of a match are handed to
+     * its game server inside GET /servers/roster (equipment_snapshots / equipment_missing). Does not affect matchmaking.
+     */
+    @PostMapping("/matchmaking/equipment-snapshot")
+    public Map<String, Object> equipmentSnapshot(@Valid @RequestBody EquipmentSnapshotRequest request) {
+        SearchService.EquipmentStoreResult result = searches.submitEquipmentSnapshot(request);
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("stored", true);
+        body.put("entries", result.entries());
         if (result.matchId() != null) {
             body.put("match_id", result.matchId());
         }

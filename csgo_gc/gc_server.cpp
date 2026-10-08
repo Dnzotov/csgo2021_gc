@@ -68,6 +68,10 @@ void ServerGC::HandleEvent(GCEvent type, uint64_t id, const std::vector<uint8_t>
         OnBackendSkins();
         break;
 
+    case GCEvent::BackendEquipment:
+        OnBackendEquipment();
+        break;
+
     case GCEvent::ClientAuthenticated:
         OnClientAuthenticated(id);
         break;
@@ -490,6 +494,19 @@ bool ServerGC::StartAcceptTestRoster()
                     m_pendingSkins = snapshots;
                 }
                 PostToGC(GCEvent::BackendSkins, 0, nullptr, 0);
+            },
+            [this](const EquipmentSync::MatchSnapshots &snapshots, bool skinsFollow)
+            {
+                {
+                    std::lock_guard lock{ m_skinMutex };
+                    m_pendingEquipment = snapshots;
+                    m_pendingEquipmentSet = true;
+                }
+                // with skinsFollow the skin event (called right after) takes this hand-over too: one application with both
+                if (!skinsFollow)
+                {
+                    PostToGC(GCEvent::BackendEquipment, 0, nullptr, 0);
+                }
             });
     }
 
@@ -583,6 +600,9 @@ void ServerGC::OnTestRealPlayerSeen(uint32_t accountId)
 // kept per player for the weapon/skin phase; nothing is applied here. Only safe identifiers are logged.
 void ServerGC::OnBackendSkins()
 {
+    // equipment sync: the equipment of the same roster answer is taken first, so one application below carries both
+    TakePendingEquipment();
+
     SkinSync::MatchSnapshots skins;
     {
         std::lock_guard lock{ m_skinMutex };
@@ -619,7 +639,12 @@ void ServerGC::OnBackendSkins()
 
     m_matchSkins = std::move(skins);
 
-    // a snapshot that arrived after its player connected is applied now (once per connection)
+    ApplyToUnappliedPlayers();
+}
+
+// a snapshot that arrived after its player connected is applied now (once per connection)
+void ServerGC::ApplyToUnappliedPlayers()
+{
     for (uint64_t steamId : std::vector<uint64_t>(m_authenticated.begin(), m_authenticated.end()))
     {
         if (!m_skinsApplied.count(steamId))
@@ -627,6 +652,59 @@ void ServerGC::OnBackendSkins()
             ApplySkins(steamId);
         }
     }
+}
+
+// Equipment sync: takes the EquipmentSnapshots the poller handed over (the base weapons of the real players, keyed by account id).
+// Nothing is applied here. Only safe identifiers are logged.
+void ServerGC::TakePendingEquipment()
+{
+    EquipmentSync::MatchSnapshots equipment;
+    {
+        std::lock_guard lock{ m_skinMutex };
+        if (!m_pendingEquipmentSet)
+        {
+            return;
+        }
+        equipment = std::move(m_pendingEquipment);
+        m_pendingEquipment = {};
+        m_pendingEquipmentSet = false;
+    }
+
+    if (equipment.matchId.empty())
+    {
+        if (!m_matchEquipment.matchId.empty())
+        {
+            Platform::Print("[EQUIP_SYNC] match %s is gone: its %zu equipment snapshot(s) are dropped\n", m_matchEquipment.matchId.c_str(),
+                m_matchEquipment.players.size());
+        }
+        m_matchEquipment = {};
+        return;
+    }
+
+    Platform::Print("[EQUIP_SYNC] roster equipment delivered: match=%s players_with_snapshot=%zu players_without=%zu\n",
+        equipment.matchId.c_str(), equipment.players.size(), equipment.missing.size());
+    for (const EquipmentSync::PlayerSnapshot &player : equipment.players)
+    {
+        Platform::Print("[EQUIP_SYNC] roster equipment delivered account=%u steamid=%llu entries=%zu\n", player.accountId,
+            static_cast<unsigned long long>(player.steamId64), player.entries.size());
+        for (const EquipmentSync::Entry &entry : player.entries)
+        {
+            Platform::Print("[EQUIP_SYNC]   %s\n", EquipmentSync::Describe(entry).c_str());
+        }
+    }
+    for (uint32_t account : equipment.missing)
+    {
+        Platform::Print("[EQUIP_SYNC]   account=%u has no equipment snapshot (the mode's normal base loadout)\n", account);
+    }
+
+    m_matchEquipment = std::move(equipment);
+}
+
+// The equipment changed while the skins did not: a player that connected before it arrived gets it now (once per connection)
+void ServerGC::OnBackendEquipment()
+{
+    TakePendingEquipment();
+    ApplyToUnappliedPlayers();
 }
 
 void ServerGC::OnClientAuthenticated(uint64_t steamId)
@@ -645,22 +723,42 @@ void ServerGC::ApplySkins(uint64_t steamId)
     Platform::Print("[SKIN_SYNC] applying snapshot: steamid=%llu account=%u match=%s\n", static_cast<unsigned long long>(steamId),
         plan.accountId, m_matchSkins.matchId.empty() ? "(none yet)" : m_matchSkins.matchId.c_str());
 
-    if (!plan.playerMatched)
+    // Equipment sync: the same player, matched the same way (account id from the authenticated SteamID64, never a position), with
+    // every entry re-checked against items_game.txt. Skin Sync above does not depend on it.
+    const EquipmentSync::ApplyPlan equipment = EquipmentSync::PlanForPlayer(m_matchEquipment, steamId, EquipmentSync::LoadoutTable::Shared());
+    if (equipment.playerMatched)
+    {
+        Platform::Print("[EQUIP_SYNC] player matched: account=%u steamid=%llu\n", equipment.accountId,
+            static_cast<unsigned long long>(equipment.steamId64));
+        for (const std::string &rejected : equipment.rejected)
+        {
+            Platform::Print("[EQUIP_SYNC] entry rejected: %s\n", rejected.c_str());
+        }
+    }
+
+    if (!plan.playerMatched && !equipment.playerMatched)
     {
         // either the player has no snapshot, or the roster has not reached this server yet (it is applied when it does)
         Platform::Print("[SKIN_SYNC] application result=skipped (%s)\n", plan.reason.c_str());
         return;
     }
 
-    Platform::Print("[SKIN_SYNC] player matched: account=%u steamid=%llu\n", plan.accountId, static_cast<unsigned long long>(plan.steamId64));
-    for (const std::string &rejected : plan.rejected)
+    if (plan.playerMatched)
     {
-        Platform::Print("[SKIN_SYNC] item rejected: %s\n", rejected.c_str());
+        Platform::Print("[SKIN_SYNC] player matched: account=%u steamid=%llu\n", plan.accountId, static_cast<unsigned long long>(plan.steamId64));
+        for (const std::string &rejected : plan.rejected)
+        {
+            Platform::Print("[SKIN_SYNC] item rejected: %s\n", rejected.c_str());
+        }
     }
 
-    if (plan.items.empty())
+    if (plan.items.empty() && equipment.entries.empty())
     {
-        Platform::Print("[SKIN_SYNC] application result=skipped (%s)\n", plan.reason.c_str());
+        Platform::Print("[SKIN_SYNC] application result=skipped (%s)\n", plan.playerMatched ? plan.reason.c_str() : "no skin snapshot");
+        if (equipment.playerMatched)
+        {
+            Platform::Print("[EQUIP_SYNC] application result=skipped (%s)\n", equipment.reason.c_str());
+        }
         m_skinsApplied.insert(steamId);   // nothing to apply for this connection
         return;
     }
@@ -688,6 +786,19 @@ void ServerGC::ApplySkins(uint64_t steamId)
     CMsgSOCacheSubscribed message;
     const size_t written = Inventory::BuildServerCache(*m_skinSchema, plan, GetConfig().Level(), message);
 
+    // Equipment sync: the chosen base weapons are appended as ONE SO type 43 object, after the objects Skin Sync built and before the
+    // message is serialized below; nothing that BuildServerCache wrote is touched.
+    for (const EquipmentSync::Entry &entry : equipment.entries)
+    {
+        Platform::Print("[EQUIP_SYNC] applying default equip account=%u def=%u class=%u slot=%u\n", equipment.accountId, entry.defIndex,
+            entry.classId, entry.slotId);
+    }
+    const size_t type43 = Inventory::AppendEquipmentCache(equipment, message);
+    if (type43 != 0)
+    {
+        Platform::Print("[EQUIP_SYNC] type 43 appended account=%u entries=%zu\n", equipment.accountId, type43);
+    }
+
     if (!m_sentWelcome)
     {
         SendServerWelcome();
@@ -699,6 +810,12 @@ void ServerGC::ApplySkins(uint64_t steamId)
 
     Platform::Print("[SKIN_SYNC] application result=posted to server.dll as SOCache: %zu item(s), %u bytes, owner %llu\n", written,
         write.Size(), static_cast<unsigned long long>(steamId));
+    if (type43 != 0)
+    {
+        // only the sending is known here: whether server.dll hands out the weapons is visible in the game, not in this process
+        Platform::Print("[EQUIP_SYNC] application result=posted: %zu type 43 entr%s in the SOCache sent to server.dll (the game applies them, not confirmed here)\n",
+            type43, type43 == 1 ? "y" : "ies");
+    }
 }
 
 void ServerGC::OnBackendRoster(const std::string &text)
