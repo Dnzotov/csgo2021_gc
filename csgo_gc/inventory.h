@@ -3,6 +3,7 @@
 #include "gc_const_csgo.h"
 #include "item_schema.h"
 #include "random.h"
+#include "skin_snapshot.h"
 
 class KeyValue;
 
@@ -15,6 +16,16 @@ public:
     ~Inventory();
 
     void BuildCacheSubscription(CMsgSOCacheSubscribed &message, int level, bool server);
+
+    // The EQUIPPED items of the player as an EquippedSkinSnapshot (skin_snapshot.h): what the Java backend gets so the game
+    // server of the match knows the loadout without the P2P SOCache. Ordered by item id, at most SkinSync::MaxItems.
+    std::vector<SkinSync::Item> CollectEquippedSkins() const;
+
+    // Game server side (skin sync Phase D): the SOCache the game server (server.dll) reads a player's items from, built from the
+    // accepted items of an ApplyPlan instead of a client's P2P SOCache. Same message and content rules as
+    // BuildCacheSubscription(server = true): owner SteamID, equipped items with their equipped_state and attributes (paint kit 6,
+    // seed 7, wear 8, StatTrak 80/81, name 111, stickers 113+), persona data. Returns the number of items written.
+    static size_t BuildServerCache(const ItemSchema &schema, const SkinSync::ApplyPlan &plan, int level, CMsgSOCacheSubscribed &message);
 
     const ItemSchema &Schema() const { return m_itemSchema; }
 

@@ -276,10 +276,11 @@ void Controller::ConfirmIfReady()
 
 // ---- Poller -------------------------------------------------------------------------------------------------
 
-Poller::Poller(std::string address, uint16_t port, Handler handler)
+Poller::Poller(std::string address, uint16_t port, Handler handler, SkinHandler skinHandler)
     : m_address{ std::move(address) }
     , m_port{ port }
     , m_handler{ std::move(handler) }
+    , m_skinHandler{ std::move(skinHandler) }
 {
     m_thread = std::thread{ &Poller::Run, this };
 }
@@ -320,6 +321,7 @@ void Poller::Run()
         BackendClient::Enabled() ? "the backend" : "(backend not configured)", m_address.c_str(), m_port);
 
     std::string lastKey;
+    std::string lastSkinKey;
     while (true)
     {
         // 1. tell the backend which rosters are armed (before the next poll: the players are waiting for it)
@@ -372,6 +374,29 @@ void Poller::Run()
         else
         {
             snapshot.state = Snapshot::State::Unavailable;
+        }
+
+        // skin sync: the snapshots of the match, reported when they change (independent of the roster key below)
+        if (m_skinHandler)
+        {
+            SkinSync::MatchSnapshots skins;
+            if (result == BackendClient::RosterResult::Ok)
+            {
+                skins.matchId = roster.matchId;
+                skins.players = roster.skinSnapshots;
+                skins.missing = roster.skinMissing;
+            }
+
+            // a backend that merely did not answer must not wipe what the server already has
+            if (result == BackendClient::RosterResult::Ok || result == BackendClient::RosterResult::NoMatch)
+            {
+                const std::string skinKey = skins.matchId.empty() ? std::string{} : SkinSync::Signature(skins);
+                if (skinKey != lastSkinKey)
+                {
+                    lastSkinKey = skinKey;
+                    m_skinHandler(skins);
+                }
+            }
         }
 
         // only a change is reported (and logged): the roster of a running match is polled every second for minutes

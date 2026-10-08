@@ -1,5 +1,6 @@
 #include "stdafx.h"
 #include "gc_client.h"
+#include "networking_shared.h"
 #include "backend_client.h"
 #include "graffiti.h"
 #include "keyvalue.h"
@@ -40,6 +41,9 @@ ClientGC::ClientGC(uint64_t steamId)
     // A party member's client never sends a search, the lobby leader's does (its 9101 carries every member). The backend keeps a
     // search for each member; this finds it and follows it like an own one: assignment, 9107, Match Found, Accept
     // (RESEARCH_FINDINGS.md #65).
+    // skin sync: a member's snapshot is sent when it adopts the leader's search; it is the loadout this client started with
+    // (a solo / leader search takes a fresh one at MatchmakingStart)
+    BackendClient::SetSkinSnapshot(m_inventory.CollectEquippedSkins());
     BackendClient::WatchAccount(AccountId());
 }
 
@@ -220,8 +224,24 @@ void ClientGC::HandleNetMessage(const void *data, uint32_t size)
 
 void ClientGC::HandleSOCacheRequest()
 {
+    P2P_PRINT("[P2P][CLIENT] HandleSOCacheRequest channel=%d\n", NetMessageChannel);
+    P2P_PRINT("[P2P][CLIENT] Preparing SOCache response channel=%d\n", NetMessageChannel);
+
     CMsgSOCacheSubscribed message;
     m_inventory.BuildCacheSubscription(message, GetConfig().Level(), true);
+
+    {
+        // passive: how many items the response carries
+        int itemCount = 0;
+        for (const auto &object : message.objects())
+        {
+            if (object.type_id() == SOTypeItem)
+            {
+                itemCount += object.object_data_size();
+            }
+        }
+        P2P_PRINT("[P2P][CLIENT] SOCache response built item_count=%d message_size=%zu\n", itemCount, message.ByteSizeLong());
+    }
 
     GCMessageWrite messageWrite{ k_ESOMsg_CacheSubscribed, message };
     PostToHost(HostEvent::NetMessage, 0, messageWrite.Data(), messageWrite.Size());
@@ -606,6 +626,10 @@ void ClientGC::OnMatchmakingStart(GCMessageRead &messageRead)
     {
         info.variants.push_back({ variant.name, variant.gameMode, variant.maps });
     }
+
+    // skin sync (research/backend_skin_sync_design.md): the backend gets what this player has equipped, sent by the backend worker
+    // right after it registered the search; the game server of the match receives it from the backend, not over P2P
+    BackendClient::SetSkinSnapshot(m_inventory.CollectEquippedSkins());
 
     BackendClient::SearchStarted(info, m_steamId);
 

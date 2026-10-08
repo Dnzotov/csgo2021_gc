@@ -5,6 +5,8 @@
 #include <string_view>
 #include <vector>
 
+#include "skin_snapshot.h"
+
 // Client of the Java matchmaking backend (java-backend/, RESEARCH_FINDINGS.md #47/#48/#49).
 //
 // The backend decides which dedicated server a search gets; the GC only reports the search and waits for the answer:
@@ -12,6 +14,7 @@
 //   GET  <backend_url>/api/v1/matchmaking/search/<id>  polled once a second while the search runs (also its heartbeat)
 //   POST <backend_url>/api/v1/matchmaking/cancel       {account_id, request_id}
 //   POST <backend_url>/api/v1/matchmaking/accepted     {account_id, request_id}   "the game server said everybody accepted"
+//   POST <backend_url>/api/v1/matchmaking/skin-snapshot {account_id, request_id, items[]}   EquippedSkinSnapshot, see SetSkinSnapshot
 // all with the X-Api-Key header from matchmaking.backend_api_key.
 //
 // Nothing here ever blocks the GC thread or the game: the calls below only update a small state and wake a dedicated
@@ -118,6 +121,14 @@ void ReportAccepted();
 // the client connects now: no need to watch the search any more
 void StopPolling();
 
+// ---- skin sync (research/backend_skin_sync_design.md) ----
+// The EQUIPPED items of this player (Inventory::CollectEquippedSkins). Kept here and POSTed to the backend by the worker
+// thread right after the tracked search was registered (again whenever the search is registered again, e.g. after a backend
+// restart) and when a party member's search is adopted: the backend hands the snapshots of a match to its game server. Call it
+// before SearchStarted / WatchAccount so the snapshot is current. Retried like the accepted report; a failure never affects
+// matchmaking. Does nothing when the backend is not configured.
+void SetSkinSnapshot(std::vector<SkinSync::Item> items);
+
 // A party member's client never sends a search: the leader's does. From now on the worker asks the backend once a second
 // whether this account has a search (GET /matchmaking/account/<id>) whenever it tracks none of its own; a search that belongs
 // to a party is adopted: it is tracked like a search this client started, and the result handler gets it first with
@@ -146,7 +157,14 @@ struct ServerRoster
     bool acceptRequired{};
     uint32_t requiredPlayers{};
     std::vector<RosterPlayer> players; // roster order: real players first, then the fake ones
+
+    // skin sync: the EquippedSkinSnapshot of every REAL player of the match that sent one, and the real players that did not
+    std::vector<SkinSync::PlayerSnapshot> skinSnapshots;
+    std::vector<uint32_t> skinMissing;
 };
+
+// the body of GET /servers/roster (exposed for the offline tests): false when it is not a roster
+bool ParseServerRoster(const std::string &body, ServerRoster &roster);
 
 enum class RosterResult
 {

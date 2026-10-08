@@ -9,6 +9,8 @@
 #include "server_roster.h"
 #include "test_accept.h"
 
+class ItemSchema;
+
 class ServerGC final : public SharedGC
 {
 public:
@@ -39,6 +41,9 @@ private:
 
     // backend-driven roster (server_roster.h, RESEARCH_FINDINGS.md #55)
     void OnBackendRoster(const std::string &text);
+    void OnBackendSkins();
+    void OnClientAuthenticated(uint64_t steamId);
+    void ApplySkins(uint64_t steamId);
     void ReleaseRoster(const std::string &matchId);
     void ArmRoster(const std::vector<uint32_t> &participants, const std::string &source, bool unreserveFirst);
     void IncrementKillCountAttribute(GCMessageRead &messageRead);
@@ -61,4 +66,20 @@ private:
     std::unique_ptr<RosterFeed::Poller> m_rosterPoller;
     std::unique_ptr<RosterFeed::Controller> m_rosterController;
     std::unordered_set<uint64_t> m_connectedClients; // worker thread only
+
+public:
+    // skin sync (research/backend_skin_sync_design.md): the EquippedSkinSnapshots of the match on this server as the backend
+    // delivered them (the real players only). Phase C: this is where they are kept; applying them to weapons is a later phase.
+    // GC thread only.
+    const SkinSync::MatchSnapshots &MatchSkins() const { return m_matchSkins; }
+
+private:
+    std::mutex m_skinMutex;                    // the poller thread hands the newest snapshots over here
+    SkinSync::MatchSnapshots m_pendingSkins;
+    SkinSync::MatchSnapshots m_matchSkins;     // GC thread
+
+    // Phase D (GC thread): players BeginAuthSession accepted, and those whose snapshot was already handed to the game
+    std::unordered_set<uint64_t> m_authenticated;
+    std::unordered_set<uint64_t> m_skinsApplied;
+    std::unique_ptr<ItemSchema> m_skinSchema;  // items_game.txt, loaded on the first application
 };

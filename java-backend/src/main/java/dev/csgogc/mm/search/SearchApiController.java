@@ -2,6 +2,7 @@ package dev.csgogc.mm.search;
 
 import dev.csgogc.mm.server.GameServer;
 import dev.csgogc.mm.server.GameServerService;
+import dev.csgogc.mm.skin.SkinSnapshotRequest;
 import dev.csgogc.mm.web.ApiException;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
@@ -163,6 +164,23 @@ public class SearchApiController {
         }
         if (result.search() != null) {
             body.put("search", result.search());
+        }
+        return body;
+    }
+
+    /**
+     * The GC of a player reports what it has equipped (EquippedSkinSnapshot, research/backend_skin_sync_design.md). Sent right
+     * after the search was registered; accepted only for an account with a live search of this request_id. The snapshots of a
+     * match are handed to its game server inside GET /servers/roster (skin_snapshots). Does not affect matchmaking.
+     */
+    @PostMapping("/matchmaking/skin-snapshot")
+    public Map<String, Object> skinSnapshot(@Valid @RequestBody SkinSnapshotRequest request) {
+        SearchService.SkinStoreResult result = searches.submitSkinSnapshot(request);
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("stored", true);
+        body.put("items", result.items());
+        if (result.matchId() != null) {
+            body.put("match_id", result.matchId());
         }
         return body;
     }

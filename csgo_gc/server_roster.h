@@ -9,6 +9,8 @@
 #include <utility>
 #include <vector>
 
+#include "skin_snapshot.h"
+
 // srcds side of the backend-driven roster (RESEARCH_FINDINGS.md #55).
 //
 // The Java matchmaking backend is the source of truth for who takes part in a test match: the real players and the
@@ -121,7 +123,11 @@ class Poller
 public:
     using Handler = std::function<void(const Snapshot &snapshot)>;
 
-    Poller(std::string address, uint16_t port, Handler handler);
+    // skin sync: called on the worker thread when the EquippedSkinSnapshots of the match on this server change (a snapshot came
+    // in late, was replaced, the match is gone: matchId empty). Independent of Handler: the roster decision logic never sees it.
+    using SkinHandler = std::function<void(const SkinSync::MatchSnapshots &snapshots)>;
+
+    Poller(std::string address, uint16_t port, Handler handler, SkinHandler skinHandler = {});
     ~Poller(); // stops and joins
 
     Poller(const Poller &) = delete;
@@ -136,6 +142,7 @@ private:
     const std::string m_address;
     const uint16_t m_port;
     const Handler m_handler;
+    const SkinHandler m_skinHandler;
 
     std::mutex m_mutex;
     std::condition_variable m_cv;

@@ -2,11 +2,13 @@
 #include <algorithm>
 
 #include "gc_server.h"
+#include "networking_shared.h"
 #include "backend_client.h"
 #include "gc_const.h"
 #include "gc_const_csgo.h"
 #include "config.h"
 #include "graffiti.h"
+#include "inventory.h"
 
 // yuck!! needed for CSteamID (construct full id from account id)
 #include "steam/steamclientpublic.h"
@@ -62,6 +64,14 @@ void ServerGC::HandleEvent(GCEvent type, uint64_t id, const std::vector<uint8_t>
         OnBackendRoster(std::string(buffer.begin(), buffer.end()));
         break;
 
+    case GCEvent::BackendSkins:
+        OnBackendSkins();
+        break;
+
+    case GCEvent::ClientAuthenticated:
+        OnClientAuthenticated(id);
+        break;
+
     case GCEvent::TestFakesReady:
         if (m_rosterController)
         {
@@ -111,6 +121,9 @@ void ServerGC::HandleMessage(uint32_t type, const void *data, uint32_t size)
 
 void ServerGC::HandleClientSOCacheUnsubscribe(uint64_t steamId)
 {
+    m_authenticated.erase(steamId);
+    m_skinsApplied.erase(steamId);
+
     if (m_connectedClients.erase(steamId) && m_connectedClients.empty() && m_testRoster)
     {
         // TEST ONLY: the last real client left, start over with a fresh roster for the next match
@@ -139,6 +152,7 @@ static bool ValidateMessageOwnerSOID(GCMessageRead &messageRead, uint64_t steamI
     T message;
     if (!messageRead.ReadProtobuf(message))
     {
+        P2P_PRINT("[P2P][ERROR] SOCache request parse failed steamid=%llu type=%u\n", steamId, messageRead.TypeUnmasked());
         Platform::Print("ValidateMessageOwnerSOID %llu: parsing failed\n", steamId);
         return false;
     }
@@ -146,6 +160,8 @@ static bool ValidateMessageOwnerSOID(GCMessageRead &messageRead, uint64_t steamI
     if (message.owner_soid().type() != SoIdTypeSteamId
         || message.owner_soid().id() != steamId)
     {
+        P2P_PRINT("[P2P][ERROR] HandleNetMessage rejected steamid=%llu type=%u reason=owner soid mismatch (message has %llu)\n",
+            steamId, messageRead.TypeUnmasked(), static_cast<uint64_t>(message.owner_soid().id()));
         Platform::Print("ValidateMessageOwnerSOID %llu: steam id mismatch (message has %llu)\n",
             steamId, message.owner_soid().id());
         return false;
@@ -193,6 +209,7 @@ bool ValidateMessageOwnerSOID<CMsgSOCacheSubscribed>(GCMessageRead &messageRead,
     CMsgSOCacheSubscribed message;
     if (!messageRead.ReadProtobuf(message))
     {
+        P2P_PRINT("[P2P][ERROR] SOCache parse failed steamid=%llu type=%u\n", steamId, messageRead.TypeUnmasked());
         Platform::Print("ValidateMessageOwnerSOID %llu: parsing failed\n", steamId);
         return false;
     }
@@ -200,6 +217,8 @@ bool ValidateMessageOwnerSOID<CMsgSOCacheSubscribed>(GCMessageRead &messageRead,
     if (message.owner_soid().type() != SoIdTypeSteamId
         || message.owner_soid().id() != steamId)
     {
+        P2P_PRINT("[P2P][ERROR] SOCache rejected steamid=%llu reason=owner soid mismatch (message has %llu)\n",
+            steamId, static_cast<uint64_t>(message.owner_soid().id()));
         Platform::Print("ValidateMessageOwnerSOID %llu: steam id mismatch (message has %llu)\n",
             steamId, message.owner_soid().id());
         return false;
@@ -210,9 +229,13 @@ bool ValidateMessageOwnerSOID<CMsgSOCacheSubscribed>(GCMessageRead &messageRead,
     int itemCount = 0;
     bool modified = RemoveUnequippedItems(message, itemCount);
 
+    P2P_PRINT("[P2P][SERVER] SOCache parsed steamid=%llu items=%d (equipped, after the original filter) removed_unequipped=%d\n",
+        steamId, itemCount, modified ? 1 : 0);
+
     if (itemCount > MaxServerSOCacheItems)
     {
-        Platform::Print("Client %llu socache has %d items (max allowed %d), ignoring\n", itemCount, MaxServerSOCacheItems);
+        P2P_PRINT("[P2P][ERROR] SOCache rejected steamid=%llu reason=%d items > max %d\n", steamId, itemCount, MaxServerSOCacheItems);
+        Platform::Print("Client %llu socache has %d items (max allowed %d), ignoring\n", steamId, itemCount, MaxServerSOCacheItems);
         return false;
     }
 
@@ -235,15 +258,20 @@ void ServerGC::HandleNetMessage(uint64_t steamId, const void *data, uint32_t siz
 
     Platform::Print("HandleNetMessage: %llu, %u bytes\n", steamId, size);
 
+    P2P_PRINT("[P2P][SERVER] HandleNetMessage from=%llu type=%u size=%u\n", steamId, P2PPeekMaskedType(data, size), size);
+
     GCMessageRead validate{ 0, data, size };
     if (!validate.IsValid())
     {
+        P2P_PRINT("[P2P][ERROR] HandleNetMessage rejected message from=%llu size=%u reason=invalid GC message header\n", steamId, size);
         assert(false);
         return;
     }
 
     if (!validate.IsProtobuf())
     {
+        P2P_PRINT("[P2P][ERROR] HandleNetMessage rejected message from=%llu type=%u reason=not protobuf\n", steamId,
+            validate.TypeUnmasked());
         // all the allowed messages are protobuf based
         Platform::Print("ServerGC: ignoring non protobuf message %u from %llu\n",
             validate.TypeUnmasked(), steamId);
@@ -263,6 +291,7 @@ void ServerGC::HandleNetMessage(uint64_t steamId, const void *data, uint32_t siz
         break;
 
     case k_ESOMsg_CacheSubscribed:
+        P2P_PRINT("[P2P][SERVER] SOCache received from=%llu size=%u\n", steamId, size);
         isValid = ValidateMessageOwnerSOID<CMsgSOCacheSubscribed>(validate, steamId, sanitized);
         break;
 
@@ -277,6 +306,8 @@ void ServerGC::HandleNetMessage(uint64_t steamId, const void *data, uint32_t siz
 
     if (!isValid)
     {
+        P2P_PRINT("[P2P][ERROR] HandleNetMessage rejected message from=%llu type=%u (unknown type or failed validation)\n",
+            steamId, validate.TypeUnmasked());
         Platform::Print("ServerGC: ignoring net message %u from %llu\n",
             validate.TypeUnmasked(), steamId);
         return;
@@ -292,11 +323,15 @@ void ServerGC::HandleNetMessage(uint64_t steamId, const void *data, uint32_t siz
     if (sanitized.has_value())
     {
         // pass the sanitized message
+        P2P_PRINT("[P2P][SERVER] forwarding sanitized message to server.dll steamid=%llu type=%u size=%u\n", steamId,
+            sanitized->TypeMasked() & ~ProtobufMask, static_cast<uint32_t>(sanitized->Size()));
         PostToHost(HostEvent::Message, sanitized->TypeMasked(), sanitized->Data(), sanitized->Size());
     }
     else
     {
         // otherwise the old message was fine
+        P2P_PRINT("[P2P][SERVER] forwarding message to server.dll steamid=%llu type=%u size=%u\n", steamId,
+            validate.TypeUnmasked(), size);
         PostToHost(HostEvent::Message, validate.TypeMasked(), data, size);
     }
 }
@@ -447,6 +482,14 @@ bool ServerGC::StartAcceptTestRoster()
             {
                 const std::string text = RosterFeed::Serialize(snapshot);
                 PostToGC(GCEvent::BackendRoster, 0, text.data(), static_cast<uint32_t>(text.size()));
+            },
+            [this](const SkinSync::MatchSnapshots &snapshots)
+            {
+                {
+                    std::lock_guard lock{ m_skinMutex };
+                    m_pendingSkins = snapshots;
+                }
+                PostToGC(GCEvent::BackendSkins, 0, nullptr, 0);
             });
     }
 
@@ -536,6 +579,128 @@ void ServerGC::OnTestRealPlayerSeen(uint32_t accountId)
 // ---- backend-driven roster (server_roster.h, RESEARCH_FINDINGS.md #55) ------------------------------------------
 
 // the poller's answer changed
+// The backend delivered the EquippedSkinSnapshots of the match on this server (GET /servers/roster -> skin_snapshots). They are
+// kept per player for the weapon/skin phase; nothing is applied here. Only safe identifiers are logged.
+void ServerGC::OnBackendSkins()
+{
+    SkinSync::MatchSnapshots skins;
+    {
+        std::lock_guard lock{ m_skinMutex };
+        skins = std::move(m_pendingSkins);
+        m_pendingSkins = {};
+    }
+
+    if (skins.matchId.empty())
+    {
+        if (!m_matchSkins.matchId.empty())
+        {
+            Platform::Print("[SKIN_SYNC] match %s is gone: its %zu snapshot(s) are dropped\n", m_matchSkins.matchId.c_str(),
+                m_matchSkins.players.size());
+        }
+        m_matchSkins = {};
+        return;
+    }
+
+    Platform::Print("[SKIN_SYNC] snapshot delivered to server: match=%s players_with_snapshot=%zu players_without=%zu\n",
+        skins.matchId.c_str(), skins.players.size(), skins.missing.size());
+    for (const SkinSync::PlayerSnapshot &player : skins.players)
+    {
+        Platform::Print("[SKIN_SYNC]   account=%u steamid=%llu items=%zu\n", player.accountId,
+            static_cast<unsigned long long>(player.steamId64), player.items.size());
+        for (const SkinSync::Item &item : player.items)
+        {
+            Platform::Print("[SKIN_SYNC]     %s\n", SkinSync::Describe(item).c_str());
+        }
+    }
+    for (uint32_t account : skins.missing)
+    {
+        Platform::Print("[SKIN_SYNC]   account=%u has no snapshot (default skins)\n", account);
+    }
+
+    m_matchSkins = std::move(skins);
+
+    // a snapshot that arrived after its player connected is applied now (once per connection)
+    for (uint64_t steamId : std::vector<uint64_t>(m_authenticated.begin(), m_authenticated.end()))
+    {
+        if (!m_skinsApplied.count(steamId))
+        {
+            ApplySkins(steamId);
+        }
+    }
+}
+
+void ServerGC::OnClientAuthenticated(uint64_t steamId)
+{
+    m_authenticated.insert(steamId);
+    ApplySkins(steamId);
+}
+
+// Phase D: hands the equipped items of the player that connected as `steamId` to the game server (server.dll) as the SOCache it
+// reads a player's items from -- the same message a client's P2P SOCache used to be turned into, now built from the backend's
+// snapshot (MatchSkins()). The player is matched by SteamID/account id, never by roster position; every item keeps the equipped
+// slot of the snapshot, so the knife stays the knife. What server.dll does with it afterwards is outside the project's view.
+void ServerGC::ApplySkins(uint64_t steamId)
+{
+    const SkinSync::ApplyPlan plan = SkinSync::PlanForPlayer(m_matchSkins, steamId);
+    Platform::Print("[SKIN_SYNC] applying snapshot: steamid=%llu account=%u match=%s\n", static_cast<unsigned long long>(steamId),
+        plan.accountId, m_matchSkins.matchId.empty() ? "(none yet)" : m_matchSkins.matchId.c_str());
+
+    if (!plan.playerMatched)
+    {
+        // either the player has no snapshot, or the roster has not reached this server yet (it is applied when it does)
+        Platform::Print("[SKIN_SYNC] application result=skipped (%s)\n", plan.reason.c_str());
+        return;
+    }
+
+    Platform::Print("[SKIN_SYNC] player matched: account=%u steamid=%llu\n", plan.accountId, static_cast<unsigned long long>(plan.steamId64));
+    for (const std::string &rejected : plan.rejected)
+    {
+        Platform::Print("[SKIN_SYNC] item rejected: %s\n", rejected.c_str());
+    }
+
+    if (plan.items.empty())
+    {
+        Platform::Print("[SKIN_SYNC] application result=skipped (%s)\n", plan.reason.c_str());
+        m_skinsApplied.insert(steamId);   // nothing to apply for this connection
+        return;
+    }
+
+    for (const SkinSync::Item &item : plan.items)
+    {
+        Platform::Print("[SKIN_SYNC] applying item: %s\n", SkinSync::Describe(item).c_str());
+        Platform::Print("[SKIN_SYNC] def_index=%u\n", item.defIndex);
+        if (item.hasPaint)
+        {
+            Platform::Print("[SKIN_SYNC] paint_kit=%u paint_seed=%u paint_wear=%.9g\n", item.paintKit, item.paintSeed,
+                static_cast<double>(item.paintWear));
+        }
+        for (const SkinSync::Equipped &equip : item.equipped)
+        {
+            Platform::Print("[SKIN_SYNC] equipped_slot=class %u slot %u\n", equip.classId, equip.slotId);
+        }
+    }
+
+    if (!m_skinSchema)
+    {
+        m_skinSchema = std::make_unique<ItemSchema>();
+    }
+
+    CMsgSOCacheSubscribed message;
+    const size_t written = Inventory::BuildServerCache(*m_skinSchema, plan, GetConfig().Level(), message);
+
+    if (!m_sentWelcome)
+    {
+        SendServerWelcome();
+    }
+
+    GCMessageWrite write{ k_ESOMsg_CacheSubscribed, message };
+    PostToHost(HostEvent::Message, write.TypeMasked(), write.Data(), write.Size());
+    m_skinsApplied.insert(steamId);
+
+    Platform::Print("[SKIN_SYNC] application result=posted to server.dll as SOCache: %zu item(s), %u bytes, owner %llu\n", written,
+        write.Size(), static_cast<unsigned long long>(steamId));
+}
+
 void ServerGC::OnBackendRoster(const std::string &text)
 {
     RosterFeed::Snapshot snapshot;

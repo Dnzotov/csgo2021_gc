@@ -470,9 +470,13 @@ public:
     EBeginAuthSessionResult BeginAuthSession(auto original, const void *pAuthTicket, int cbAuthTicket, CSteamID steamID)
     {
         EBeginAuthSessionResult result = original(pAuthTicket, cbAuthTicket, steamID);
+        // passive diagnostics (research/p2p_socache_step0.md): ClientConnected only runs when this is OK
+        P2P_PRINT("[P2P][SERVER] BeginAuthSession steamid=%llu result=%d serverGC=%d\n", steamID.ConvertToUint64(),
+            static_cast<int>(result), s_serverGC ? 1 : 0);
         if (s_serverGC && result == k_EBeginAuthSessionResultOK)
         {
             s_serverGC->m_networking.ClientConnected(steamID.ConvertToUint64(), pAuthTicket, cbAuthTicket);
+            s_serverGC->m_gc.PostToGC(GCEvent::ClientAuthenticated, steamID.ConvertToUint64(), nullptr, 0); // skin sync Phase D
             s_serverGC->m_gc.NoteClientJoined(); // a client on the server: the reservation lease of a classic dedicated server runs on
         }
 

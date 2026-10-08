@@ -10,6 +10,8 @@ import dev.csgogc.mm.mode.ModeCategory;
 import dev.csgogc.mm.server.GameServer;
 import dev.csgogc.mm.server.GameServerRepository;
 import dev.csgogc.mm.server.ServerState;
+import dev.csgogc.mm.skin.SkinSnapshotRequest;
+import dev.csgogc.mm.skin.SkinSnapshotStore;
 import dev.csgogc.mm.web.ApiException;
 import java.net.Inet4Address;
 import java.net.InetAddress;
@@ -88,7 +90,19 @@ public class SearchService {
     public record MatchRoster(String matchId, String mode, String status, String map, boolean acceptRequired,
                               int requiredPlayers, int realPlayers, int fakePlayers, List<RosterEntry> players,
                               /** the real state of the match; status is the srcds view (READY while the players accept) */
-                              String phase) {
+                              String phase,
+                              /** the equipped skins of the REAL players of this match that sent a snapshot (research/backend_skin_sync_design.md) */
+                              List<SkinSnapshotView> skinSnapshots,
+                              /** the real players of this match without a snapshot: they get no custom skins, the match is not affected */
+                              List<Long> skinMissing) {
+    }
+
+    /** one player's EquippedSkinSnapshot as the game server sees it */
+    public record SkinSnapshotView(long accountId, String steamId64, Instant receivedAt, List<SkinSnapshotRequest.Item> items) {
+    }
+
+    /** POST /api/v1/matchmaking/skin-snapshot: stored; matchId is set once the search is in a match */
+    public record SkinStoreResult(int items, String matchId) {
     }
 
     /** POST /api/v1/matchmaking/accepted: what became of the report of a player that accepted */
@@ -103,6 +117,10 @@ public class SearchService {
     private final BackendProperties props;
     private final Clock clock;
     private final TransactionTemplate tx;
+    private final SkinSnapshotStore skins;
+
+    /** a snapshot nobody removed (a bug, a crash between two steps) is dropped after this long anyway */
+    private static final Duration SKIN_SNAPSHOT_MAX_AGE = Duration.ofHours(6);
 
     /** full matches that already logged that no free server fits them (one line per match, not one per second) */
     private final Set<String> waitingForServerLogged = ConcurrentHashMap.newKeySet();
@@ -111,13 +129,16 @@ public class SearchService {
     private final Map<Long, Instant> rosterPolls = new ConcurrentHashMap<>();
     /** matches whose game server confirmed that it armed the roster */
     private final Set<String> rosterAcks = ConcurrentHashMap.newKeySet();
+    /** "match@snapshots" that already logged "snapshot attached" (once per change, not per poll) */
+    private final Set<String> skinAttachLogged = ConcurrentHashMap.newKeySet();
     /** "match@fill time" that already logged that its fake players wait for the gather window (once, not every second) */
     private final Set<String> fillWaitLogged = ConcurrentHashMap.newKeySet();
 
     public SearchService(SearchRepository searches, MatchRepository matches, GameServerRepository servers,
                          FakeSearchRepository fakes, FakeSettingsRepository fakeSettings, BackendProperties props, Clock clock,
-                         TransactionTemplate tx) {
+                         TransactionTemplate tx, SkinSnapshotStore skins) {
         this.tx = tx;
+        this.skins = skins;
         this.fakeSettings = fakeSettings;
         this.searches = searches;
         this.matches = matches;
@@ -298,6 +319,7 @@ public class SearchService {
         finishPartyMembers(current, SearchStatus.CANCELLED);
         memberLeft(current);
         log.info("search cancelled: account={}", accountId);
+        purgeSkinSnapshots();
         runMatcher();
         return new CancelResult(true, null, view(searches.findById(current.id()).orElseThrow()));
     }
@@ -417,6 +439,63 @@ public class SearchService {
         Instant cutoff = now.minus(props.finishedSearchRetention());
         searches.deleteFinishedBefore(cutoff);
         matches.deleteEndedBefore(cutoff);
+        purgeSkinSnapshots();
+    }
+
+    // ------------------------------------------------------------------------------------------- skin snapshots
+
+    /**
+     * POST /api/v1/matchmaking/skin-snapshot: the GC of a player says what it has equipped. Accepted only for an account
+     * that has a LIVE search with this request_id (the same proof the /accepted report needs); a newer snapshot of the same
+     * search replaces the older one. 404 = no live search, 409 = the live search of the account is another one (the
+     * snapshot is stale). Nothing about the matchmaking itself changes.
+     */
+    public synchronized SkinStoreResult submitSkinSnapshot(SkinSnapshotRequest request) {
+        SearchRecord live = searches.findLiveByAccount(request.accountId())
+                .orElseThrow(() -> ApiException.notFound("no live search for account " + request.accountId()));
+        if (live.requestId() == null || !live.requestId().equals(request.requestId())) {
+            throw ApiException.conflict("request_id_mismatch",
+                    "the live search of account " + request.accountId() + " is not request_id " + request.requestId());
+        }
+        skins.put(request);
+        log.info("[SKIN_SYNC] snapshot accepted: account={} request_id={} items={}{}", request.accountId(), request.requestId(),
+                request.items().size(), live.matchId() == null ? "" : " match=" + live.matchId());
+        for (SkinSnapshotRequest.Item item : request.items()) {
+            log.info("[SKIN_SYNC]   item={} def={} paint={} seed={} wear={}", item.itemId(), item.defIndex(), item.paintKit(),
+                    item.paintSeed(), item.paintWear());
+        }
+        return new SkinStoreResult(request.items().size(), live.matchId());
+    }
+
+    /**
+     * Removes the snapshots whose search is over: the account has no live search with the snapshot's request_id AND the match
+     * of that search is not alive any more (or there never was one). A snapshot of a match that is still on its server stays
+     * until the match ends; the absolute age limit catches anything left over.
+     */
+    synchronized void purgeSkinSnapshots() {
+        Instant now = clock.instant();
+        for (SkinSnapshotStore.Stored stored : skins.all()) {
+            boolean keep = false;
+            if (stored.receivedAt().plus(SKIN_SNAPSHOT_MAX_AGE).isAfter(now)) {
+                Optional<SearchRecord> live = searches.findLiveByAccount(stored.accountId());
+                if (live.isPresent() && stored.requestId().equals(live.get().requestId())) {
+                    keep = true;
+                } else {
+                    Optional<SearchRecord> own = searches.findByRequestId(stored.requestId());
+                    keep = own.isPresent() && own.get().matchId() != null
+                            && matches.findById(own.get().matchId()).map(m -> m.status().isLive()).orElse(false);
+                }
+            }
+            if (!keep && skins.remove(stored.accountId())) {
+                log.info("[SKIN_SYNC] snapshot removed: account={} request_id={} (search / match over)", stored.accountId(),
+                        stored.requestId());
+            }
+        }
+    }
+
+    /** stored snapshots, for tests and the panel */
+    public int skinSnapshotCount() {
+        return skins.size();
     }
 
     // ------------------------------------------------------------------------------------------- the matcher
@@ -436,6 +515,7 @@ public class SearchService {
         rosterAcks.remove(matchId);
         waitingForServerLogged.remove(matchId);
         fillWaitLogged.removeIf(key -> key.startsWith(matchId + "@"));
+        skinAttachLogged.removeIf(key -> key.startsWith(matchId + "@"));
     }
 
     private void place(SearchRecord search) {
@@ -1195,8 +1275,26 @@ public class SearchService {
         return matches.findActiveByServer(server.get().id()).map(m -> {
             List<RosterEntry> roster = roster(m);
             int fake = (int) roster.stream().filter(RosterEntry::fake).count();
+            List<SkinSnapshotView> snapshots = new ArrayList<>();
+            List<Long> missing = new ArrayList<>();
+            for (RosterEntry entry : roster) {
+                if (entry.fake()) {
+                    continue;   // virtual players have no inventory
+                }
+                Optional<SkinSnapshotStore.Stored> stored = skins.get(entry.accountId());
+                if (stored.isPresent()) {
+                    snapshots.add(new SkinSnapshotView(entry.accountId(), Long.toString(STEAM_ID64_BASE + entry.accountId()),
+                            stored.get().receivedAt(), stored.get().items()));
+                } else {
+                    missing.add(entry.accountId());
+                }
+            }
+            if (!snapshots.isEmpty() && skinAttachLogged.add(m.id() + "@" + snapshots.size())) {
+                log.info("[SKIN_SYNC] snapshot attached to match {}: {} player(s) with a snapshot, {} without", m.id(),
+                        snapshots.size(), missing.size());
+            }
             return new MatchRoster(m.id(), m.category(), m.status().serverView(), m.map(), m.acceptRequired(), roster.size(),
-                    roster.size() - fake, fake, roster, m.status().name());
+                    roster.size() - fake, fake, roster, m.status().name(), List.copyOf(snapshots), List.copyOf(missing));
         });
     }
 

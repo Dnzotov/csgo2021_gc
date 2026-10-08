@@ -1,4 +1,5 @@
 #include "stdafx.h"
+#include <algorithm>
 #include "inventory.h"
 #include "case_opening.h"
 #include "config.h"
@@ -404,6 +405,205 @@ void Inventory::BuildCacheSubscription(CMsgSOCacheSubscribed &message, int level
             object->add_object_data(defaultEquip.SerializeAsString());
         }
     }
+}
+
+std::vector<SkinSync::Item> Inventory::CollectEquippedSkins() const
+{
+    // deterministic order (the map is unordered)
+    std::vector<const CSOEconItem *> equipped;
+    for (const auto &pair : m_items)
+    {
+        if (pair.second.equipped_state_size())
+        {
+            equipped.push_back(&pair.second);
+        }
+    }
+
+    std::sort(equipped.begin(), equipped.end(), [](const CSOEconItem *a, const CSOEconItem *b) { return a->id() < b->id(); });
+
+    std::vector<SkinSync::Item> result;
+    for (const CSOEconItem *source : equipped)
+    {
+        if (result.size() >= SkinSync::MaxItems)
+        {
+            break;
+        }
+
+        SkinSync::Item item;
+        item.itemId = source->id();
+        item.defIndex = source->def_index();
+        item.quality = source->quality();
+        item.rarity = source->rarity();
+        item.customName = source->custom_name();
+
+        for (const CSOEconItemEquipped &equip : source->equipped_state())
+        {
+            item.equipped.push_back({ equip.new_class(), equip.new_slot() });
+        }
+
+        // sticker slots: id, wear (scale / rotation are not part of the snapshot yet)
+        std::vector<SkinSync::Sticker> stickers;
+        for (uint32_t slot = 0; slot < SkinSync::MaxStickers; slot++)
+        {
+            SkinSync::Sticker sticker;
+            sticker.slot = slot;
+            bool hasId = false;
+            for (const CSOEconItemAttribute &attribute : source->attribute())
+            {
+                if (attribute.def_index() == ItemSchema::AttributeStickerId0 + slot * 4)
+                {
+                    sticker.id = m_itemSchema.AttributeUint32(&attribute);
+                    hasId = sticker.id != 0;
+                }
+                else if (attribute.def_index() == ItemSchema::AttributeStickerWear0 + slot * 4)
+                {
+                    sticker.wear = m_itemSchema.AttributeFloat(&attribute);
+                    sticker.hasWear = true;
+                }
+            }
+
+            if (hasId)
+            {
+                stickers.push_back(sticker);
+            }
+        }
+        item.stickers = std::move(stickers);
+
+        for (const CSOEconItemAttribute &attribute : source->attribute())
+        {
+            switch (attribute.def_index())
+            {
+            case ItemSchema::AttributeTexturePrefab:
+                item.paintKit = static_cast<uint32_t>(m_itemSchema.AttributeFloat(&attribute));
+                item.hasPaint = true;
+                break;
+
+            case ItemSchema::AttributeTextureSeed:
+                item.paintSeed = static_cast<uint32_t>(m_itemSchema.AttributeFloat(&attribute));
+                break;
+
+            case ItemSchema::AttributeTextureWear:
+                item.paintWear = m_itemSchema.AttributeFloat(&attribute);
+                break;
+
+            case ItemSchema::AttributeKillEater:
+                item.statTrakCount = m_itemSchema.AttributeUint32(&attribute);
+                item.hasStatTrak = true;
+                break;
+
+            case ItemSchema::AttributeKillEaterScoreType:
+                item.statTrakScoreType = m_itemSchema.AttributeUint32(&attribute);
+                break;
+
+            case ItemSchema::AttributeCustomName:
+                if (item.customName.empty())
+                {
+                    item.customName = m_itemSchema.AttributeString(&attribute);
+                }
+                break;
+            }
+        }
+
+        result.push_back(std::move(item));
+    }
+
+    return result;
+}
+
+size_t Inventory::BuildServerCache(const ItemSchema &schema, const SkinSync::ApplyPlan &plan, int level, CMsgSOCacheSubscribed &message)
+{
+    message.set_version(InventoryVersion);
+    message.mutable_owner_soid()->set_type(SoIdTypeSteamId);
+    message.mutable_owner_soid()->set_id(plan.steamId64);
+
+    CMsgSOCacheSubscribed_SubscribedType *items = message.add_objects();
+    items->set_type_id(SOTypeItem);
+
+    uint32_t position = 0;
+    for (const SkinSync::Item &source : plan.items)
+    {
+        CSOEconItem item;
+        item.set_id(source.itemId);
+        item.set_account_id(plan.accountId);
+        item.set_inventory(++position);   // a plain position, no "unacknowledged" bit
+        item.set_def_index(source.defIndex);
+        item.set_quantity(1);
+        item.set_level(1);
+        item.set_quality(source.quality);
+        item.set_flags(0);
+        item.set_origin(24);              // the origin of the project's test items (inventory.txt)
+        item.set_in_use(false);
+        item.set_rarity(source.rarity);
+
+        if (source.hasPaint)
+        {
+            CSOEconItemAttribute *kit = item.add_attribute();
+            kit->set_def_index(ItemSchema::AttributeTexturePrefab);
+            schema.SetAttributeFloat(kit, static_cast<float>(source.paintKit));
+
+            CSOEconItemAttribute *seed = item.add_attribute();
+            seed->set_def_index(ItemSchema::AttributeTextureSeed);
+            schema.SetAttributeFloat(seed, static_cast<float>(source.paintSeed));
+
+            CSOEconItemAttribute *wear = item.add_attribute();
+            wear->set_def_index(ItemSchema::AttributeTextureWear);
+            schema.SetAttributeFloat(wear, source.paintWear);
+        }
+
+        if (source.hasStatTrak)
+        {
+            CSOEconItemAttribute *count = item.add_attribute();
+            count->set_def_index(ItemSchema::AttributeKillEater);
+            schema.SetAttributeUint32(count, source.statTrakCount);
+
+            CSOEconItemAttribute *type = item.add_attribute();
+            type->set_def_index(ItemSchema::AttributeKillEaterScoreType);
+            schema.SetAttributeUint32(type, source.statTrakScoreType);
+        }
+
+        if (!source.customName.empty())
+        {
+            SetCustomNameAttribute(schema, item, source.customName);
+        }
+
+        for (const SkinSync::Sticker &sticker : source.stickers)
+        {
+            if (sticker.slot >= SkinSync::MaxStickers)
+            {
+                continue;
+            }
+
+            CSOEconItemAttribute *id = item.add_attribute();
+            id->set_def_index(ItemSchema::AttributeStickerId0 + sticker.slot * 4);
+            schema.SetAttributeUint32(id, sticker.id);
+
+            if (sticker.hasWear)
+            {
+                CSOEconItemAttribute *wear = item.add_attribute();
+                wear->set_def_index(ItemSchema::AttributeStickerWear0 + sticker.slot * 4);
+                schema.SetAttributeFloat(wear, sticker.wear);
+            }
+        }
+
+        for (const SkinSync::Equipped &equip : source.equipped)
+        {
+            CSOEconItemEquipped *equipped = item.add_equipped_state();
+            equipped->set_new_class(equip.classId);
+            equipped->set_new_slot(equip.slotId);
+        }
+
+        items->add_object_data(item.SerializeAsString());
+    }
+
+    CSOPersonaDataPublic personaData;
+    personaData.set_player_level(level);
+    personaData.set_elevated_state(true);
+
+    CMsgSOCacheSubscribed_SubscribedType *persona = message.add_objects();
+    persona->set_type_id(SOTypePersonaDataPublic);
+    persona->add_object_data(personaData.SerializeAsString());
+
+    return plan.items.size();
 }
 
 // mikkotodo move

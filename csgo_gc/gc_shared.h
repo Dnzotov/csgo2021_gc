@@ -21,6 +21,8 @@ enum class GCEvent
     ReservationFullyAccepted, // TEST ONLY: sent to client gc when the reserved server reports 0x25 stage 2 / awaiting 0 (test_accept.h)
     BackendSearchResult, // sent to client gc by the backend client's worker thread: buffer is BackendClient::SerializeResult (backend_client.h)
     BackendRoster, // sent to server gc by the roster poller: buffer is RosterFeed::Serialize (server_roster.h), the backend's roster of this server's match
+    ClientAuthenticated, // sent to server gc when BeginAuthSession accepted a client, id contains the steam id (skin sync Phase D)
+    BackendSkins, // sent to server gc by the roster poller: the EquippedSkinSnapshots of the match changed (ServerGC::OnBackendSkins reads them from the poller's hand-over)
     TestFakesReady, // TEST ONLY: sent to server gc by the fake roster driver, id = 1 when every fake participant is at reservation stage 1, 0 while (re)arming
 };
 

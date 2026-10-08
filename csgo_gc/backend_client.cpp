@@ -50,11 +50,12 @@ constexpr int MaxSessionMs = 15 * 60 * 1000; // a search the client waits for lo
 constexpr int LogEveryNthFailure = 10;    // a backend that is down must not fill the log
 constexpr size_t QueueLimit = 16;         // cancel requests waiting for the worker, oldest dropped beyond this
 constexpr int JobMaxAgeMs = 30000;        // a cancel that waited this long in the queue is stale, drop it
-constexpr size_t MaxResponseBytes = 64 * 1024;
+constexpr size_t MaxResponseBytes = 512 * 1024; // a roster carries the skin snapshots of up to 16 players
 
 constexpr const char *SearchPath = "/api/v1/matchmaking/search";
 constexpr const char *CancelPath = "/api/v1/matchmaking/cancel";
 constexpr const char *AcceptedPath = "/api/v1/matchmaking/accepted";
+constexpr const char *SkinSnapshotPath = "/api/v1/matchmaking/skin-snapshot";
 constexpr const char *AccountPath = "/api/v1/matchmaking/account";
 constexpr int WatchIntervalMs = 1000;     // GET /account/<id> while this client has no search of its own (party members)
 constexpr int WatchFailureIntervalMs = 5000;
@@ -513,6 +514,48 @@ bool ParseSearchResponse(const std::string &body, SearchResult &result)
     return true;
 }
 
+// one item of an EquippedSkinSnapshot (the form SkinSync::AppendItemsJson writes)
+void ParseSkinItem(const Json &json, SkinSync::Item &item)
+{
+    item.itemId = static_cast<uint64_t>(json.Number("item_id"));
+    item.defIndex = static_cast<uint32_t>(json.Number("def_index"));
+    item.quality = static_cast<uint32_t>(json.Number("quality"));
+    item.rarity = static_cast<uint32_t>(json.Number("rarity"));
+    if (json.Get("paint_kit"))
+    {
+        item.hasPaint = true;
+        item.paintKit = static_cast<uint32_t>(json.Number("paint_kit"));
+        item.paintSeed = static_cast<uint32_t>(json.Number("paint_seed"));
+        item.paintWear = static_cast<float>(json.Number("paint_wear"));
+    }
+    if (const Json *stattrak = json.Get("stattrak"))
+    {
+        item.hasStatTrak = true;
+        item.statTrakCount = static_cast<uint32_t>(stattrak->Number("count"));
+        item.statTrakScoreType = static_cast<uint32_t>(stattrak->Number("score_type"));
+    }
+    item.customName = json.String("custom_name");
+    if (const Json *stickers = json.Get("stickers"))
+    {
+        for (const Json &s : stickers->array)
+        {
+            SkinSync::Sticker sticker;
+            sticker.slot = static_cast<uint32_t>(s.Number("slot"));
+            sticker.id = static_cast<uint32_t>(s.Number("id"));
+            sticker.hasWear = s.Get("wear") != nullptr;
+            sticker.wear = static_cast<float>(s.Number("wear"));
+            item.stickers.push_back(sticker);
+        }
+    }
+    if (const Json *equipped = json.Get("equipped"))
+    {
+        for (const Json &e : equipped->array)
+        {
+            item.equipped.push_back({ static_cast<uint32_t>(e.Number("class_id")), static_cast<uint32_t>(e.Number("slot_id")) });
+        }
+    }
+}
+
 // GET /servers/roster -> ServerRoster; false when the answer is not a roster
 bool ParseRosterResponse(const std::string &body, ServerRoster &roster)
 {
@@ -545,6 +588,43 @@ bool ParseRosterResponse(const std::string &body, ServerRoster &roster)
         }
 
         roster.players.push_back({ static_cast<uint32_t>(id), player.Bool("fake") });
+    }
+
+    // skin sync: optional, an older backend does not send them
+    if (const Json *snapshots = root.Get("skin_snapshots"))
+    {
+        for (const Json &entry : snapshots->array)
+        {
+            const double id = entry.Number("account_id", -1);
+            if (id < 1 || id > 4294967295.0)
+            {
+                continue;
+            }
+
+            SkinSync::PlayerSnapshot snapshot;
+            snapshot.accountId = static_cast<uint32_t>(id);
+            snapshot.steamId64 = strtoull(entry.String("steam_id64").c_str(), nullptr, 10);
+            if (const Json *items = entry.Get("items"))
+            {
+                for (const Json &itemJson : items->array)
+                {
+                    SkinSync::Item item;
+                    ParseSkinItem(itemJson, item);
+                    snapshot.items.push_back(std::move(item));
+                }
+            }
+            roster.skinSnapshots.push_back(std::move(snapshot));
+        }
+    }
+    if (const Json *missing = root.Get("skin_missing"))
+    {
+        for (const Json &id : missing->array)
+        {
+            if (id.type == Json::Type::Number && id.number >= 1 && id.number <= 4294967295.0)
+            {
+                roster.skinMissing.push_back(static_cast<uint32_t>(id.number));
+            }
+        }
     }
 
     return true;
@@ -1141,6 +1221,7 @@ struct Job
     const char *path;
     std::string body;
     Clock::time_point queuedAt;
+    std::string note;   // for the log only (skin-snapshot: "account=N items=N")
 };
 
 // an IP address or host name: what can go into a query string as it is
@@ -1411,6 +1492,19 @@ public:
         }
     }
 
+    // the current EquippedSkinSnapshot; sent by QueueSkinSnapshot when the search is registered / adopted
+    void SetSkinSnapshot(std::vector<SkinSync::Item> items)
+    {
+        if (!m_enabled)
+        {
+            return;
+        }
+
+        std::lock_guard lock{ m_mutex };
+        m_skinItems = std::move(items);
+        m_skinSet = true;
+    }
+
     void WatchAccount(uint32_t accountId)
     {
         if (!m_enabled || accountId == 0)
@@ -1466,6 +1560,31 @@ public:
 
 private:
     enum class Phase { Register, Poll, Done };
+
+    // POST /matchmaking/skin-snapshot for the search `requestId` of `accountId` (called without the lock held)
+    void QueueSkinSnapshot(uint32_t accountId, const std::string &requestId)
+    {
+        std::vector<SkinSync::Item> items;
+        {
+            std::lock_guard lock{ m_mutex };
+            if (!m_skinSet || accountId == 0 || requestId.empty())
+            {
+                return;
+            }
+
+            items = m_skinItems;
+        }
+
+        const std::string note = "account=" + std::to_string(accountId) + " request_id=" + requestId + " items="
+            + std::to_string(items.size());
+        Log("[SKIN_SYNC] snapshot created: %s", note.c_str());
+        for (const SkinSync::Item &item : items)
+        {
+            Log("[SKIN_SYNC]   %s", SkinSync::Describe(item).c_str());
+        }
+
+        Enqueue({ "skin-snapshot", SkinSnapshotPath, SkinSync::BuildSnapshotBody(accountId, requestId, items), Clock::now(), note });
+    }
 
     // the account of this client: asks whether the leader of a party started a search for it
     struct Watch
@@ -1664,10 +1783,18 @@ private:
             return;
         }
 
-        Log("POST %s%s %s", m_endpoint.basePath.c_str(), job.path, job.body.c_str());
+        const bool skin = std::string_view{ job.kind } == "skin-snapshot";
+        if (skin)
+        {
+            Log("[SKIN_SYNC] snapshot sent: POST %s%s %s", m_endpoint.basePath.c_str(), job.path, job.note.c_str());
+        }
+        else
+        {
+            Log("POST %s%s %s", m_endpoint.basePath.c_str(), job.path, job.body.c_str());
+        }
 
         HttpResult result = HttpRequest(m_endpoint, m_apiKey, "POST", job.path, &job.body);
-        if (std::string_view{ job.kind } == "accepted")
+        if (std::string_view{ job.kind } == "accepted" || skin)
         {
             // this one must get through: retry a network failure / a 5xx (an answer of the backend, even a refusal, is final)
             for (int attempt = 1; attempt < AcceptedAttempts && (result.status == 0 || result.status >= 500); attempt++)
@@ -1681,6 +1808,22 @@ private:
         }
 
         const auto tookMs = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - started).count();
+
+        if (skin)
+        {
+            if (result.status >= 200 && result.status < 300)
+            {
+                Log("[SKIN_SYNC] snapshot accepted by the backend (HTTP %d in %lld ms): %s", result.status,
+                    static_cast<long long>(tookMs), OneLine(result.body, 200).c_str());
+            }
+            else
+            {
+                Log("[SKIN_SYNC] snapshot NOT accepted (%s in %lld ms): %s -- matchmaking is not affected",
+                    result.status ? ("HTTP " + std::to_string(result.status)).c_str() : result.error.c_str(),
+                    static_cast<long long>(tookMs), OneLine(result.body, 200).c_str());
+            }
+            return;
+        }
 
         if (result.status >= 200 && result.status < 300)
         {
@@ -1730,8 +1873,12 @@ private:
         SearchResult parsed;
         const bool ok = result.status >= 200 && result.status < 300 && ParseSearchResponse(result.body, parsed);
 
+        // skin sync: the search was just registered (again), the backend takes the snapshot for it now
+        bool sendSkin = false;
+        uint32_t skinAccount = 0;
+
         {
-            std::lock_guard lock{ m_mutex };
+            std::unique_lock lock{ m_mutex };
             if (!m_session.active || m_session.serial != step.serial)
             {
                 // cancelled or replaced while the request was running
@@ -1741,6 +1888,9 @@ private:
             Session &session = m_session;
             if (ok)
             {
+                sendSkin = registering;
+                skinAccount = m_activeAccountId;
+
                 if (session.failures)
                 {
                     Log("backend reachable again");
@@ -1807,8 +1957,18 @@ private:
 
             if (!changed && session.phase != Phase::Done)
             {
+                lock.unlock();
+                if (sendSkin)
+                {
+                    QueueSkinSnapshot(skinAccount, step.requestId);
+                }
                 return;
             }
+        }
+
+        if (sendSkin)
+        {
+            QueueSkinSnapshot(skinAccount, step.requestId);
         }
 
         if (parsed.requestId.empty())
@@ -1885,6 +2045,8 @@ private:
         Log("the party leader's search %s (%s, %s) was found for account %u: tracking it", parsed.requestId.c_str(),
             parsed.mode.c_str(), parsed.status.c_str(), accountId);
 
+        QueueSkinSnapshot(accountId, parsed.requestId);
+
         parsed.discovered = true;
         Deliver(parsed);
     }
@@ -1919,6 +2081,10 @@ private:
     Session m_session;
     Watch m_watch;
     uint64_t m_serial{};
+
+    // the EquippedSkinSnapshot of this player (SetSkinSnapshot)
+    std::vector<SkinSync::Item> m_skinItems;
+    bool m_skinSet{};
 
     // the search being tracked (its request id lets the backend tell searches apart); cleared by SearchCancelled
     uint32_t m_activeAccountId{};
@@ -2021,6 +2187,22 @@ bool DeserializeResult(std::string_view text, SearchResult &result)
     }
 
     return any && !result.status.empty();
+}
+
+bool ParseServerRoster(const std::string &body, ServerRoster &roster)
+{
+    return ParseRosterResponse(body, roster);
+}
+
+void SetSkinSnapshot(std::vector<SkinSync::Item> items)
+{
+    try
+    {
+        Client::Get().SetSkinSnapshot(std::move(items));
+    }
+    catch (...)
+    {
+    }
 }
 
 void SetResultHandler(ResultHandler handler, void *context)
