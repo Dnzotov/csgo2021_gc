@@ -84,6 +84,16 @@ jobs:
         # ---- csgo_gc/examples ----
         Copy-Item -Force "$env:GITHUB_WORKSPACE/examples/*" $csgoGc
 
+        # ---- patched panorama (prebuilt, manually patched) ----
+        $patched = Join-Path $env:GITHUB_WORKSPACE 'patched_panorama'
+        if (!(Test-Path (Join-Path $patched 'panorama.dll'))) { throw 'patched_panorama/panorama.dll not found' }
+        if (!(Test-Path (Join-Path $patched 'code.pbin')))    { throw 'patched_panorama/code.pbin not found' }
+
+        New-Item -ItemType Directory -Force -Path "$release/bin"            | Out-Null
+        New-Item -ItemType Directory -Force -Path "$release/csgo/panorama"  | Out-Null
+        Copy-Item -Force (Join-Path $patched 'panorama.dll') "$release/bin/panorama.dll"
+        Copy-Item -Force (Join-Path $patched 'code.pbin')    "$release/csgo/panorama/code.pbin"
+
         # ---- backend/ ----
         New-Item -ItemType Directory -Force -Path $backend              | Out-Null
         New-Item -ItemType Directory -Force -Path "$backend/target"     | Out-Null
